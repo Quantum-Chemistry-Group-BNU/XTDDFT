@@ -1,15 +1,13 @@
 #!/usr/bin/env python
-import os
-os.environ["OMP_NUM_THREADS"] = "1"
 import sys
+sys.path.append('/')
 import time
 import scipy
 import numpy as np
+import pandas as pd
 import basis_set_exchange as bse
 from pyscf import dft, gto, scf, tddft, ao2mo, lib
 from pyscf.lib import logger
-from matplotlib import pyplot as plt
-sys.path.append('../')
 from utils import atom, unit
 '''
 most coda refer to pyscf code
@@ -17,11 +15,12 @@ most coda refer to pyscf code
 
 
 class TDA:
-    def __init__(self, mol, mf, singlet=True, nstates=5):
+    def __init__(self, mol, mf, nstates=5, savedata=False, singlet=True):
         self.mol = mol
         self.mf = mf
         self.singlet = singlet
         self.nstates = nstates
+        self.savedata = savedata
 
     def pyscf_tda(self, conv_tol=1e-6, is_analyze=False):
         td = tddft.TDA(self.mf)
@@ -48,7 +47,7 @@ class TDA:
         # cubegen.orbital(mol, 'mo11.cube', mf.mo_coeff[:, 10])
         # cubegen.orbital(mol, 'mo6.cube', mf.mo_coeff[:, 5])
 
-    def my_tda(self, is_analyze=False):
+    def kernel(self):
         # most code copy from pyscf/tdscf/rhf.py
         mol = self.mf.mol
         mo_coeff = self.mf.mo_coeff
@@ -169,24 +168,31 @@ class TDA:
         # self.v = self.v[:, np.where(self.e>0)[0]]
         self.e_eV = self.e[:self.nstates] * unit.ha2eV
         # self.e_eV = unit.eVxnm/self.e_eV
-        logger.info(self.mf, "my tda result is \n{}".format(self.e_eV))
+        # logger.info(self.mf, "my tda result is \n{}".format(self.e_eV))
         self.v = self.v[:, :self.nstates]
-        if is_analyze:
-            self.analyze()
         if self.singlet:
-            self.os = self.osc_str()  # oscillator strength
+            os = self.osc_str()  # oscillator strength
             # # before calculate rot_str, check whether mol is chiral mol
             if gto.mole.chiral_mol(self.mol):
-                self.rs = self.rot_str()
+                rs = self.rot_str()
             else:
-                self.rs = np.zeros(self.nstates)
-                logger.info(self.mf, 'molecule do not have chiral')
+                # molecule do not have chiral
+                rs = np.zeros(self.nstates)
         else:
-            self.os = np.zeros(self.nstates)
-            self.rs = np.zeros(self.nstates)
-        logger.info(self.mf, 'oscillator strength \n{}'.format(self.os))
-        logger.info(self.mf, 'rotatory strength (cgs unit) \n{}'.format(self.rs))
-        return self.e_eV, self.os, self.rs, self.v
+            # transitions forbidden
+            os = np.zeros(self.nstates)
+            rs = np.zeros(self.nstates)
+        print('TDA result is')
+        print(f'{"num":>4} {"energy":>8} {"wav_len":>8} {"osc_str":>8} {"rot_str":>8}')
+        for ni, ei, wli, osi, rsi in zip(range(self.nstates), self.e_eV, unit.eVxnm / self.e_eV, os, rs):
+            print(f'{ni:4d} {ei:8.4f} {wli:8.4f} {osi:8.4f} {rsi:8.4f}')
+        if self.savedata:
+            pd.DataFrame(
+                np.concatenate((unit.eVxnm / np.expand_dims(self.e_eV, axis=1), np.expand_dims(os, axis=1)), axis=1)
+            ).to_csv('uvspec_data.csv', index=False, header=None)
+        # logger.info(self.mf, 'oscillator strength \n{}'.format(self.os))
+        # logger.info(self.mf, 'rotatory strength (cgs unit) \n{}'.format(self.rs))
+        return self.e_eV, os, rs, self.v
 
     def osc_str(self):
         # oscillator strength, only implement length form
@@ -243,63 +249,22 @@ class TDA:
         # np.save("rot_str_tda.npy", f)
         return f
 
-    def spec(self, strength):
-        e_eV = []
-        osc_str = []
-        # in e_eV and os, some element is not same but they differ by 1e-8 or small. Consider they are same
-        for e, os in zip(self.e_eV, strength):
-            if not any(np.isclose(e, e_eV, atol=1e-8)):
-                e_eV.append(e)
-                osc_str.append(os)
-        e_eV = np.array(e_eV)
-        osc_str = np.array(osc_str)
-
-        x = np.linspace(np.min(e_eV)-1, np.max(e_eV)+1, 1000)
-        y = np.zeros_like(x)  # spectrum curve
-
-        # Gaussian function
-        def gaussian(x, x0, A, sigma=0.1):
-            return A * np.exp(-((x - x0) ** 2) / (2 * sigma ** 2))
-
-        for pos, height in zip(e_eV, osc_str):
-            y += gaussian(x, pos, height)
-
-        fig, ax = plt.subplots(figsize=(8, 5))
-        ax.plot(x, y, color="blue", lw=2, label="UV-spectra")
-
-        # peak position
-        for pos, height in zip(e_eV, osc_str):
-            ax.vlines(pos, 0, height, color="red", linestyle="dashed", alpha=0.6)
-
-        ax.set_xlabel("Energy (eV)", fontsize=14)
-        ax.set_ylabel("Intensity", fontsize=14)
-        ax.set_title("Spectrum", fontsize=16)
-        ax.legend()
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.tick_params(axis="both", which="major", labelsize=12)
-        ax.grid(True, linestyle="--", alpha=0.5)
-
-        plt.show()
-
     def analyze(self):
-        # TODO(WHB): error
         nc = self.nc
         nv = self.nv
         for nstate in range(self.nstates):
             value = self.v[:,nstate]
             x_cv_ab = value[:nc*nv].reshape(nc,nv)
-            print(f'Excited state {nstate + 1} {self.e[nstate] * 27.21138505:10.5f} eV')
+            print(f'Excited state {nstate + 1} {self.e[nstate] * unit.ha2eV:10.5f} eV')
             for o, v in zip(*np.where(abs(x_cv_ab) > 0.1)):
-                print(f'CV(ab) {o + 1}a -> {v + 1 + self.nc}b {x_cv_ab[o, v]:10.5f}')
+                print(f'CV {o + 1}a -> {v + 1 + nc}a {x_cv_ab[o, v]:10.5f}')
 
 
 if __name__ == "__main__":
     mol = gto.M(
         # atom=atom.ch2o,
         atom=atom.n2,  # unit is Angstrom
-        # basis='cc-pvtz',
-        # basis='def2-TZVP',
+        basis='cc-pvdz',
         # basis='sto3g',
         # unit='B',
         unit='A',
@@ -307,12 +272,12 @@ if __name__ == "__main__":
         max_memory=5000,
         verbose=4,
     )
-    # # bse.convert_formatted_basis_file('../orcabasis/sto-3g.bas', '../orcabasis/sto-3g.nw')
-    # with open("../orcabasis/sto-3g.nw", "r") as f:  # 打开文件
-    with open("../orcabasis/tzvp.nw", "r") as f:  # 打开文件
-        basis = f.read()  # 读取文件
-    mol.basis = basis
-    mol.build()
+    # # # bse.convert_formatted_basis_file('../orcabasis/sto-3g.bas', '../orcabasis/sto-3g.nw')
+    # # with open("../orcabasis/sto-3g.nw", "r") as f:  # 打开文件
+    # with open("../orcabasis/tzvp.nw", "r") as f:  # 打开文件
+    #     basis = f.read()  # 读取文件
+    # mol.basis = basis
+    # mol.build()
 
     mf = dft.RKS(mol)
     # xc = 'svwn'
@@ -338,11 +303,11 @@ if __name__ == "__main__":
 
     print("="*50)
     t0 = time.time()
-    e_eV, os, rs, v = tda.my_tda(is_analyze=is_analyze)
+    e_eV, os, rs, v = tda.kernel(is_analyze=is_analyze)
     t1 = time.time()
     print('tda use {} s'.format(t1 - t0))
 
-    import pandas as pd
-    pd.DataFrame(e_eV).to_csv(xc + 'TDA.csv')
+    # import pandas as pd
+    # pd.DataFrame(e_eV).to_csv(xc + 'TDA.csv')
     # tda.spec(os)
     # tda.spec(rs)

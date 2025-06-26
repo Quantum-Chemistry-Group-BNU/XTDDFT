@@ -1,23 +1,25 @@
 #!/usr/bin/env python
 import os
 import sys
-
 os.environ["OMP_NUM_THREADS"] = "4"
-sys.path.append('../')
+sys.path.append('/')
 import time
 import scipy
 import numpy as np
 import pandas as pd
 from pyscf import dft, gto, scf, tddft, lib, ao2mo
 from pyscf.lib import logger
-from utils import atom, unit, tools
+
+from sTDA import tools
+from utils import atom, unit
 
 
 class UTDA:
-    def __init__(self, mol, mf, nstates=10):
+    def __init__(self, mol, mf, nstates=10, savedata=False):
         self.mol = mol
         self.mf = mf
         self.nstates = nstates
+        self.savedata = savedata
 
     def pyscf_tda(self, conv_tol=1e-5, is_analyze=False):
         td = tddft.TDA(self.mf)
@@ -72,7 +74,7 @@ class UTDA:
         e, v = scipy.linalg.eigh(a)
         print("use pyscf get_ab func, result is \n{}".format(e[:self.nstates] * unit.ha2eV))
 
-    def my_tda(self):
+    def kernel(self):
         # Section: prepare for compute
         mo_energy = self.mf.mo_energy
         mo_coeff = self.mf.mo_coeff
@@ -343,13 +345,14 @@ class UTDA:
         # logger.info(self.mf, 'oscillator strength (length form) \n{}'.format(self.os))
         # logger.info(self.mf, 'rotatory strength (cgs unit) \n{}'.format(self.rs))
         # logger.info(self.mf, 'deltaS2 is \n{}'.format(dS2))
-        print('my UTDA result is')
-        print(f'{"num":>4} {"energy":>8} {"osc_str":>8} {"rot_str":>8} {"deltaS2":>8}')
+        print('UTDA result is')
+        print(f'{"num":>4} {"energy":>8} {"wav_len":>8} {"osc_str":>8} {"rot_str":>8} {"deltaS2":>8}')
         for ni, ei, wli, osi, rsi, ds2i in zip(range(self.nstates), self.e_eV, unit.eVxnm/self.e_eV, os, rs, dS2):
             print(f'{ni:4d} {ei:8.4f} {wli:8.4f} {osi:8.4f} {rsi:8.4f} {ds2i:8.4f}')
-        # pd.DataFrame(
-        #     np.concatenate((unit.eVxnm / np.expand_dims(self.e_eV, axis=1), np.expand_dims(os, axis=1)), axis=1)
-        # ).to_csv('uvspec_data.csv', index=False, header=None)
+        if self.savedata:
+            pd.DataFrame(
+                np.concatenate((unit.eVxnm / np.expand_dims(self.e_eV, axis=1), np.expand_dims(os, axis=1)), axis=1)
+            ).to_csv('uvspec_data.csv', index=False, header=None)
         return self.e_eV, os, rs, self.v
 
     def deltaS2(self):
@@ -523,7 +526,7 @@ if __name__ == "__main__":
     # utda.pyscf_get_ab()
 
     t0 = time.time()
-    e_eV = utda.my_tda()
+    e_eV = utda.kernel()
     t1 = time.time()
     print("utda use {} s".format(t1-t0))
 

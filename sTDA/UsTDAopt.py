@@ -1,24 +1,25 @@
 #!/usr/bin/env python
-import os
 import sys
-os.environ["OMP_NUM_THREADS"] = "4"
-sys.path.append('../')
+sys.path.append('../sTDA')
 import time
 import scipy
 import numpy as np
 import pandas as pd
 import basis_set_exchange as bse
 from numba import jit
+from functools import reduce
 from pyscf import dft, gto, scf, tddft
 from pyscf.lib import logger
 
-from utils.eta import eta
-from utils import atom, unit, tools
+import tools
+from eta import eta
+from utils import atom, unit
 '''lots of code can optimize,
 1. according to pyscf constructing method, use index to divide A matrix to each block
 2. create qAkcv_aa ... qBkcv_bb instead of create qAk_aa ... qBj_bb
 3. construct A matrix block line by block line
 '''
+'''U and X opt file select same CSF in CVaa and CVbb'''
 
 
 def iaia_f(qAk_ss, qAj_ss, qBk_tt, qBj_tt, gamma_k, gamma_j, fock_vir, n1, fock_occ, n2):
@@ -51,6 +52,30 @@ def devide_csf_ps(pcsf, ncsf, scsf):
     scsf -= len(ncsf[0])
     scsf = np.delete(scsf, np.where(scsf<0))
     return pscsfcv_a_i, pscsfcv_a_a, scsf
+
+
+def intersec(nc, csfcv_a, csfcv_b):
+    csfcv0 = np.array([], dtype=np.int64)
+    csfcv1 = np.array([], dtype=np.int64)
+    for i in range(nc):
+        inda = np.where(csfcv_a[0] == i)[0]
+        indb = np.where(csfcv_b[0] == i)[0]
+        csfcvi = np.intersect1d(csfcv_a[1][inda], csfcv_b[1][indb])
+        csfcv1 = np.concatenate((csfcv1, csfcvi))
+        csfcv0 = np.concatenate((csfcv0, np.ones(csfcvi.shape[0], dtype=np.int64) * i))
+    return (csfcv0, csfcv1)
+
+
+def union(nc, csfcv_a, csfcv_b):
+    csfcv0 = np.array([], dtype=np.int64)
+    csfcv1 = np.array([], dtype=np.int64)
+    for i in range(nc):
+        inda = np.where(csfcv_a[0] == i)[0]
+        indb = np.where(csfcv_b[0] == i)[0]
+        csfcvi = np.union1d(csfcv_a[1][inda], csfcv_b[1][indb])
+        csfcv1 = np.concatenate((csfcv1, csfcvi))
+        csfcv0 = np.concatenate((csfcv0, np.ones(csfcvi.shape[0], dtype=np.int64)*i))
+    return (csfcv0, csfcv1)
 
 
 def iajb_f(pcsfi, pcsfa, qAk1, qAj1, qBk1, qBj1, qBk2,
@@ -88,13 +113,15 @@ def iajb_f(pcsfi, pcsfa, qAk1, qAj1, qBk1, qBj1, qBk2,
 
 
 class UsTDA:
-    def __init__(self, mol, mf, truncate=20.0, cas=True, nstates=10, correct=False):
+    def __init__(self, mol, mf, truncate=20.0, cas=True, nstates=10, correct=False, paramtype='os', savedata=False):
         self.mol = mol
         self.mf = mf
         self.nstates = nstates
         self.cas = cas
         self.truncate = truncate
         self.correct = correct
+        self.paramtype = paramtype
+        self.savedata = savedata
 
     def info(self):
         mo_occ = self.mf.mo_occ
@@ -118,13 +145,6 @@ class UsTDA:
 
     def gamma(self, hyb):
         R = gto.inter_distance(self.mol)  # internuclear distance array, unit is bohr
-        alpha1 = 1.42
-        alpha2 = 0.48
-        beta1 = 0.20
-        beta2 = 1.83
-        alpha = alpha1 + hyb * alpha2
-        beta = beta1 + hyb * beta2  # close shell parameter, https://doi.org/10.1063/1.4811331
-        # beta = hyb + 0.3  # open shell parameter, 10.1021/acs.jpca.9b03176
         eta_ele = []  # Note: eta's unit is eV
         for e in self.mol.elements:
             # # eta_ele unit is eV, transform eV to hartree is fine.
@@ -134,12 +154,23 @@ class UsTDA:
             # refer to ORCA origin code: https://github.com/grimme-lab/std2/blob/master/stda.f
             eta_ele.append(2 * eta[e] / unit.ha2eV)
         eta_ele = (np.array(eta_ele)[:, np.newaxis] + np.array(eta_ele)[np.newaxis, :]) / 2
-        gj = (1. / (R ** beta + (hyb * eta_ele) ** (-beta))) ** (1. / beta)
-        # gj = (1. / (R ** beta + (1.4 * hyb * eta_ele) ** (-beta))) ** (1. / beta)
+        if self.paramtype == 'cs':
+            beta1 = 0.20
+            beta2 = 1.83
+            beta = beta1 + hyb * beta2
+            gj = (1. / (R ** beta + (hyb * eta_ele) ** (-beta))) ** (1. / beta)
+        elif self.paramtype == "os":
+            beta = hyb + 0.3
+            gj = (1. / (R ** beta + (1.4 * hyb * eta_ele) ** (-beta))) ** (1. / beta)
+        else:
+            raise ValueError
+        alpha1 = 1.42
+        alpha2 = 0.48
+        alpha = alpha1 + hyb * alpha2
         gk = (1. / (R ** alpha + eta_ele ** (-alpha))) ** (1. / alpha)
         return gj, gk
 
-    def my_stda(self):
+    def kernel(self):
         mo_energy = self.mf.mo_energy
         mo_coeff = self.mf.mo_coeff
         mo_occ = self.mf.mo_occ
@@ -338,61 +369,63 @@ class UsTDA:
             pcsfov_a, ncsfov_a = devide_csf_p_n(iaiaov_a, self.truncate)
             pcsfco_b, ncsfco_b = devide_csf_p_n(iaiaco_b, self.truncate)
             pcsfcv_b, ncsfcv_b = devide_csf_p_n(iaiacv_b, self.truncate)
-            iajb = np.zeros(len(ncsfcv_a[0])+len(ncsfov_a[0])+len(ncsfco_b[0])+len(ncsfcv_b[0]))
-            iaia_ncsf = np.concatenate((iaiacv_a[ncsfcv_a[0], ncsfcv_a[1]], iaiaov_a[ncsfov_a[0], ncsfov_a[1]],
-                                   iaiaco_b[ncsfco_b[0], ncsfco_b[1]], iaiacv_b[ncsfcv_b[0], ncsfcv_b[1]]), axis=0)
-            for i, j in zip(pcsfcv_a[0], pcsfcv_a[1]):
-                iajbcv_a = np.einsum('nm, nmi, nm->i', qAk_aa[:, None, i, j], qBk_aa[None, :, ncsfcv_a[0], ncsfcv_a[1]], gamma_k)
-                iajbcv_a -= np.einsum('nmi, nmi, nm->i', qAj_aa[:, None, i, ncsfcv_a[0]], qBj_aa[None, :, j, ncsfcv_a[1]], gamma_j)
-                iajbcv_a += np.einsum('i, i->i', np.eye(nc)[i, ncsfcv_a[0]], fock_a_vir[j, ncsfcv_a[1]])
-                iajbcv_a -= np.einsum('i, i->i', fock_a_occ[i, ncsfcv_a[0]], np.eye(nv)[j, ncsfcv_a[1]])
+            pcsfcv = union(nc, pcsfcv_a, pcsfcv_b)
+            ncsfcv = intersec(nc, ncsfcv_a, ncsfcv_b)
+            iajb = np.zeros(len(ncsfcv[0])+len(ncsfov_a[0])+len(ncsfco_b[0])+len(ncsfcv[0]))
+            iaia_ncsf = np.concatenate((iaiacv_a[ncsfcv[0], ncsfcv[1]], iaiaov_a[ncsfov_a[0], ncsfov_a[1]],
+                                   iaiaco_b[ncsfco_b[0], ncsfco_b[1]], iaiacv_b[ncsfcv[0], ncsfcv[1]]), axis=0)
+            for i, j in zip(pcsfcv[0], pcsfcv[1]):
+                iajbcv_a = np.einsum('nm, nmi, nm->i', qAk_aa[:, None, i, j], qBk_aa[None, :, ncsfcv[0], ncsfcv[1]], gamma_k)
+                iajbcv_a -= np.einsum('nmi, nmi, nm->i', qAj_aa[:, None, i, ncsfcv[0]], qBj_aa[None, :, j, ncsfcv[1]], gamma_j)
+                iajbcv_a += np.einsum('i, i->i', np.eye(nc)[i, ncsfcv[0]], fock_a_vir[j, ncsfcv[1]])
+                iajbcv_a -= np.einsum('i, i->i', fock_a_occ[i, ncsfcv[0]], np.eye(nv)[j, ncsfcv[1]])
                 # Note: calculate ov_a, so add nc and ncsfov_a, others is same
                 iajbov_a = np.einsum('nm, nmi, nm->i', qAk_aa[:, None, i, j], qBk_aa[None, :, nc+ncsfov_a[0], ncsfov_a[1]], gamma_k)
                 iajbov_a -= np.einsum('nmi, nmi, nm->i', qAj_aa[:, None, i, nc+ncsfov_a[0]], qBj_aa[None, :, j, ncsfov_a[1]], gamma_j)
                 iajbov_a += np.einsum('i, i->i', np.eye(nc + no)[i, nc + ncsfov_a[0]], fock_a_vir[j, ncsfov_a[1]])
                 iajbov_a -= np.einsum('i, i->i', fock_a_occ[i, nc + ncsfov_a[0]], np.eye(nv)[j, ncsfov_a[1]])
                 iajbkco_b = np.einsum('nm, nmi, nm->i', qAk_aa[:, None, i, j], qBk_bb[None, :, ncsfco_b[0], ncsfco_b[1]], gamma_k)
-                iajbkcv_b = np.einsum('nm, nmi, nm->i', qAk_aa[:, None, i, j], qBk_bb[None, :, ncsfcv_b[0], no+ncsfcv_b[1]], gamma_k)
+                iajbkcv_b = np.einsum('nm, nmi, nm->i', qAk_aa[:, None, i, j], qBk_bb[None, :, ncsfcv[0], no+ncsfcv[1]], gamma_k)
                 iajbline = np.concatenate((iajbcv_a, iajbov_a, iajbkco_b, iajbkcv_b), axis=0)
                 iajb += iajbline**2/(iaia_ncsf-iaiacv_a[i, j]+1e-10)
             for i, j in zip(pcsfov_a[0], pcsfov_a[1]):
-                iajbcv_a = np.einsum('nm, nmi, nm->i', qAk_aa[:, None, nc+i, j], qBk_aa[None, :, ncsfcv_a[0], ncsfcv_a[1]], gamma_k)
-                iajbcv_a -= np.einsum('nmi, nmi, nm->i', qAj_aa[:, None, nc+i, ncsfcv_a[0]], qBj_aa[None, :, j, ncsfcv_a[1]], gamma_j)
-                iajbcv_a += np.einsum('i, i->i', np.eye(nc+no)[nc+i, ncsfcv_a[0]], fock_a_vir[j, ncsfcv_a[1]])
-                iajbcv_a -= np.einsum('i, i->i', fock_a_occ[nc+i, ncsfcv_a[0]], np.eye(nv)[j, ncsfcv_a[1]])
+                iajbcv_a = np.einsum('nm, nmi, nm->i', qAk_aa[:, None, nc+i, j], qBk_aa[None, :, ncsfcv[0], ncsfcv[1]], gamma_k)
+                iajbcv_a -= np.einsum('nmi, nmi, nm->i', qAj_aa[:, None, nc+i, ncsfcv[0]], qBj_aa[None, :, j, ncsfcv[1]], gamma_j)
+                iajbcv_a += np.einsum('i, i->i', np.eye(nc+no)[nc+i, ncsfcv[0]], fock_a_vir[j, ncsfcv[1]])
+                iajbcv_a -= np.einsum('i, i->i', fock_a_occ[nc+i, ncsfcv[0]], np.eye(nv)[j, ncsfcv[1]])
                 iajbov_a = np.einsum('nm, nmi, nm->i', qAk_aa[:, None, nc+i, j], qBk_aa[None, :, nc+ncsfov_a[0], ncsfov_a[1]], gamma_k)
                 iajbov_a -= np.einsum('nmi, nmi, nm->i', qAj_aa[:, None, nc+i, nc+ncsfov_a[0]], qBj_aa[None, :, j, ncsfov_a[1]], gamma_j)
                 iajbov_a += np.einsum('i, i->i', np.eye(nc+no)[nc+i, nc+ncsfov_a[0]], fock_a_vir[j, ncsfov_a[1]])
                 iajbov_a -= np.einsum('i, i->i', fock_a_occ[nc+i, nc+ncsfov_a[0]], np.eye(nv)[j, ncsfov_a[1]])
                 iajbkco_b = np.einsum('nm, nmi, nm->i', qAk_aa[:, None, nc+i, j], qBk_bb[None, :, ncsfco_b[0], ncsfco_b[1]], gamma_k)
-                iajbkcv_b = np.einsum('nm, nmi, nm->i', qAk_aa[:, None, nc+i, j], qBk_bb[None, :, ncsfcv_b[0], no+ncsfcv_b[1]], gamma_k)
+                iajbkcv_b = np.einsum('nm, nmi, nm->i', qAk_aa[:, None, nc+i, j], qBk_bb[None, :, ncsfcv[0], no+ncsfcv[1]], gamma_k)
                 iajbline = np.concatenate((iajbcv_a, iajbov_a, iajbkco_b, iajbkcv_b), axis=0)
                 # Note: iaiaov_a[i, j] can not use nc+i as index, so iajb_f do not suit for this iteration
                 iajb += iajbline ** 2 / (iaia_ncsf - iaiaov_a[i, j] + 1e-10)
             for i, j in zip(pcsfco_b[0], pcsfco_b[1]):
-                iajbkcv_a = np.einsum('nm, nmi, nm->i', qAk_bb[:, None, i, j], qBk_aa[None, :, ncsfcv_a[0], ncsfcv_a[1]], gamma_k)
+                iajbkcv_a = np.einsum('nm, nmi, nm->i', qAk_bb[:, None, i, j], qBk_aa[None, :, ncsfcv[0], ncsfcv[1]], gamma_k)
                 iajbkov_a = np.einsum('nm, nmi, nm->i', qAk_bb[:, None, i, j], qBk_aa[None, :, nc+ncsfov_a[0], ncsfov_a[1]], gamma_k)
                 iajbco_b = np.einsum('nm, nmi, nm->i', qAk_bb[:, None, i, j], qBk_bb[None, :, ncsfco_b[0], ncsfco_b[1]], gamma_k)
                 iajbco_b -= np.einsum('nmi, nmi, nm->i', qAj_bb[:, None, i, ncsfco_b[0]], qBj_bb[None, :, j, ncsfco_b[1]], gamma_j)
                 iajbco_b += np.einsum('i, i->i', np.eye(nc)[i, ncsfco_b[0]], fock_b_vir[j, ncsfco_b[1]])
                 iajbco_b -= np.einsum('i, i->i', fock_b_occ[i, ncsfco_b[0]], np.eye(no+nv)[j, ncsfco_b[1]])
-                iajbcv_b = np.einsum('nm, nmi, nm->i', qAk_bb[:, None, i, j], qBk_bb[None, :, ncsfcv_b[0], no+ncsfcv_b[1]], gamma_k)
-                iajbcv_b -= np.einsum('nmi, nmi, nm->i', qAj_bb[:, None, i, ncsfcv_b[0]], qBj_bb[None, :, j, no+ncsfcv_b[1]], gamma_j)
-                iajbcv_b += np.einsum('i, i->i', np.eye(nc)[i, ncsfcv_b[0]], fock_b_vir[j, no+ncsfcv_b[1]])
-                iajbcv_b -= np.einsum('i, i->i', fock_b_occ[i, ncsfcv_b[0]], np.eye(no+nv)[j, no+ncsfcv_b[1]])
+                iajbcv_b = np.einsum('nm, nmi, nm->i', qAk_bb[:, None, i, j], qBk_bb[None, :, ncsfcv[0], no+ncsfcv[1]], gamma_k)
+                iajbcv_b -= np.einsum('nmi, nmi, nm->i', qAj_bb[:, None, i, ncsfcv[0]], qBj_bb[None, :, j, no+ncsfcv[1]], gamma_j)
+                iajbcv_b += np.einsum('i, i->i', np.eye(nc)[i, ncsfcv[0]], fock_b_vir[j, no+ncsfcv[1]])
+                iajbcv_b -= np.einsum('i, i->i', fock_b_occ[i, ncsfcv[0]], np.eye(no+nv)[j, no+ncsfcv[1]])
                 iajbline = np.concatenate((iajbkcv_a, iajbkov_a, iajbco_b, iajbcv_b), axis=0)
                 iajb += iajbline ** 2 / (iaia_ncsf - iaiaco_b[i, j] + 1e-10)
-            for i, j in zip(pcsfcv_b[0], pcsfcv_b[1]):
-                iajbkcv_a = np.einsum('nm, nmi, nm->i', qAk_bb[:, None, i, no+j], qBk_aa[None, :, ncsfcv_a[0], ncsfcv_a[1]], gamma_k)
+            for i, j in zip(pcsfcv[0], pcsfcv[1]):
+                iajbkcv_a = np.einsum('nm, nmi, nm->i', qAk_bb[:, None, i, no+j], qBk_aa[None, :, ncsfcv[0], ncsfcv[1]], gamma_k)
                 iajbkov_a = np.einsum('nm, nmi, nm->i', qAk_bb[:, None, i, no+j], qBk_aa[None, :, nc + ncsfov_a[0], ncsfov_a[1]], gamma_k)
                 iajbco_b = np.einsum('nm, nmi, nm->i', qAk_bb[:, None, i, no+j], qBk_bb[None, :, ncsfco_b[0], ncsfco_b[1]], gamma_k)
                 iajbco_b -= np.einsum('nmi, nmi, nm->i', qAj_bb[:, None, i, ncsfco_b[0]], qBj_bb[None, :, no+j, ncsfco_b[1]], gamma_j)
                 iajbco_b += np.einsum('i, i->i', np.eye(nc)[i, ncsfco_b[0]], fock_b_vir[no+j, ncsfco_b[1]])
                 iajbco_b -= np.einsum('i, i->i', fock_b_occ[i, ncsfco_b[0]], np.eye(no + nv)[no+j, ncsfco_b[1]])
-                iajbcv_b = np.einsum('nm, nmi, nm->i', qAk_bb[:, None, i, no+j], qBk_bb[None, :, ncsfcv_b[0], no + ncsfcv_b[1]], gamma_k)
-                iajbcv_b -= np.einsum('nmi, nmi, nm->i', qAj_bb[:, None, i, ncsfcv_b[0]], qBj_bb[None, :, no+j, no + ncsfcv_b[1]], gamma_j)
-                iajbcv_b += np.einsum('i, i->i', np.eye(nc)[i, ncsfcv_b[0]], fock_b_vir[no+j, no + ncsfcv_b[1]])
-                iajbcv_b -= np.einsum('i, i->i', fock_b_occ[i, ncsfcv_b[0]], np.eye(no + nv)[no+j, no + ncsfcv_b[1]])
+                iajbcv_b = np.einsum('nm, nmi, nm->i', qAk_bb[:, None, i, no+j], qBk_bb[None, :, ncsfcv[0], no + ncsfcv[1]], gamma_k)
+                iajbcv_b -= np.einsum('nmi, nmi, nm->i', qAj_bb[:, None, i, ncsfcv[0]], qBj_bb[None, :, no+j, no + ncsfcv[1]], gamma_j)
+                iajbcv_b += np.einsum('i, i->i', np.eye(nc)[i, ncsfcv[0]], fock_b_vir[no+j, no + ncsfcv[1]])
+                iajbcv_b -= np.einsum('i, i->i', fock_b_occ[i, ncsfcv[0]], np.eye(no + nv)[no+j, no + ncsfcv[1]])
                 iajbline = np.concatenate((iajbkcv_a, iajbkov_a, iajbco_b, iajbcv_b), axis=0)
                 # Note: iaiacv_b[i, j] can not use no+j as index, so iajb_f do not suit for this iteration
                 iajb += iajbline ** 2 / (iaia_ncsf - iaiacv_b[i, j] + 1e-10)
@@ -400,12 +433,12 @@ class UsTDA:
                 iaia, iajbline, iaia_ncsf, iaiacv_a, iaiaov_a, iaiaco_b, iaiacv_b
             scsf = np.where(iajb>=1e-4)[0]
             # # CV(aa)
-            # pscsfcv_a_i = np.concatenate((pcsfcv_a[0], ncsfcv_a[0][scsf[scsf<len(ncsfcv_a[0])]]), axis=0)
-            # pscsfcv_a_a = np.concatenate((pcsfcv_a[1], ncsfcv_a[1][scsf[scsf<len(ncsfcv_a[1])]]), axis=0)
+            # pscsfcv_a_i = np.concatenate((pcsfcv[0], ncsfcv[0][scsf[scsf<len(ncsfcv[0])]]), axis=0)
+            # pscsfcv_a_a = np.concatenate((pcsfcv[1], ncsfcv[1][scsf[scsf<len(ncsfcv[1])]]), axis=0)
             # pscsfcv_a_ind = np.argsort(pscsfcv_a_i, stable=True)
             # pscsfcv_a_i = pscsfcv_a_i[pscsfcv_a_ind]
             # pscsfcv_a_a = pscsfcv_a_a[pscsfcv_a_ind]
-            # scsf -= len(ncsfcv_a[0])
+            # scsf -= len(ncsfcv[0])
             # scsf = np.delete(scsf, np.where(scsf<0))
             # # OV(aa)
             # pscsfov_a_i = np.concatenate((pcsfov_a[0], ncsfov_a[0][scsf[scsf<len(ncsfov_a[0])]]), axis=0)
@@ -424,24 +457,25 @@ class UsTDA:
             # scsf -= len(ncsfco_b[0])
             # scsf = np.delete(scsf, np.where(scsf < 0))
             # # CV(bb)
-            # pscsfcv_b_i = np.concatenate((pcsfcv_b[0], ncsfcv_b[0][scsf[scsf<len(ncsfcv_b[0])]]), axis=0)
-            # pscsfcv_b_a = np.concatenate((pcsfcv_b[1], ncsfcv_b[1][scsf[scsf<len(ncsfcv_b[1])]]), axis=0)
+            # pscsfcv_b_i = np.concatenate((pcsfcv[0], ncsfcv[0][scsf[scsf<len(ncsfcv[0])]]), axis=0)
+            # pscsfcv_b_a = np.concatenate((pcsfcv[1], ncsfcv[1][scsf[scsf<len(ncsfcv[1])]]), axis=0)
             # pscsfcv_b_ind = np.argsort(pscsfcv_b_i, stable=True)
             # pscsfcv_b_i = pscsfcv_b_i[pscsfcv_b_ind]
             # pscsfcv_b_a = pscsfcv_b_a[pscsfcv_b_ind]
 
             # # encapsulate to a function, same with upper code
             # CV(aa)
-            pscsfcv_a_i, pscsfcv_a_a, scsf = devide_csf_ps(pcsfcv_a, ncsfcv_a, scsf)
+            pscsfcv_a_i, pscsfcv_a_a, scsf = devide_csf_ps(pcsfcv, ncsfcv, scsf)
             # OV(aa)
             pscsfov_a_i, pscsfov_a_a, scsf = devide_csf_ps(pcsfov_a, ncsfov_a, scsf)
             # CO(bb)
             pscsfco_b_i, pscsfco_b_a, scsf = devide_csf_ps(pcsfco_b, ncsfco_b, scsf)
             # CV(bb)
-            pscsfcv_b_i, pscsfcv_b_a, scsf = devide_csf_ps(pcsfcv_b, ncsfcv_b, scsf)
-            Adim = len(pscsfcv_a_i) + len(pscsfov_a_i) + len(pscsfco_b_i) + len(pscsfcv_b_i)
-            pcsfdim = len(pcsfcv_a[0]) + len(pcsfov_a[0]) + len(pcsfco_b[0]) + len(pcsfcv_b[0])
-            scsfdim = len(pscsfcv_a_i) + len(pscsfov_a_i) + len(pscsfco_b_i) + len(pscsfcv_b_i) - pcsfdim
+            pscsfcv_b_i, pscsfcv_b_a, scsf = devide_csf_ps(pcsfcv, ncsfcv, scsf)
+            pscsfcv_i, pscsfcv_a = union(nc, (pscsfcv_a_i, pscsfcv_a_a), (pscsfcv_b_i, pscsfcv_b_a))
+            Adim = len(pscsfcv_i) + len(pscsfov_a_i) + len(pscsfco_b_i) + len(pscsfcv_i)
+            pcsfdim = len(pcsfcv[0]) + len(pcsfov_a[0]) + len(pcsfco_b[0]) + len(pcsfcv[0])
+            scsfdim = len(pscsfcv_i) + len(pscsfov_a_i) + len(pscsfco_b_i) + len(pscsfcv_i) - pcsfdim
             ncsfdim = len(iajb) - scsfdim
             logger.info(self.mf, 'A matrix dimension is {}'.format(Adim))
             logger.info(self.mf, '{} CSFs in pcsf'.format(pcsfdim))
@@ -450,24 +484,21 @@ class UsTDA:
         else:
             Adim = (nc+no)*nv+nc*(no+nv)
             logger.info(self.mf, 'no * nv is {}'.format(Adim))
-            pscsfcv_a_i, pscsfcv_a_a = np.indices((nc, nv))
+            pscsfcv_i, pscsfcv_a = np.indices((nc, nv))
             pscsfov_a_i, pscsfov_a_a = np.indices((no, nv))
             pscsfco_b_i, pscsfco_b_a = np.indices((nc, no))
-            pscsfcv_b_i, pscsfcv_b_a = np.indices((nc, nv))
-            pscsfcv_a_i = pscsfcv_a_i.reshape(-1)
-            pscsfcv_a_a = pscsfcv_a_a.reshape(-1)
+            pscsfcv_i = pscsfcv_i.reshape(-1)
+            pscsfcv_a = pscsfcv_a.reshape(-1)
             pscsfov_a_i = pscsfov_a_i.reshape(-1)
             pscsfov_a_a = pscsfov_a_a.reshape(-1)
             pscsfco_b_i = pscsfco_b_i.reshape(-1)
             pscsfco_b_a = pscsfco_b_a.reshape(-1)
-            pscsfcv_b_i = pscsfcv_b_i.reshape(-1)
-            pscsfcv_b_a = pscsfcv_b_a.reshape(-1)
 
         # Section: calculate overlap need transform different order to same, so here calculate order
-        pscsf_fdiag_a[pscsfcv_a_i+pscsf_fdiag_a.shape[0]-nc-no, pscsfcv_a_a] = True
+        pscsf_fdiag_a[pscsfcv_i+pscsf_fdiag_a.shape[0]-nc-no, pscsfcv_a] = True
         pscsf_fdiag_a[pscsfov_a_i+pscsf_fdiag_a.shape[0]-nc-no+nc, pscsfov_a_a] = True
         pscsf_fdiag_b[pscsfco_b_i+pscsf_fdiag_b.shape[0]-nc, pscsfco_b_a] = True
-        pscsf_fdiag_b[pscsfcv_b_i+pscsf_fdiag_b.shape[0]-nc, no+pscsfcv_b_a] = True
+        pscsf_fdiag_b[pscsfcv_i+pscsf_fdiag_b.shape[0]-nc, no+pscsfcv_a] = True
         # Note: pscsf_fdiag order is pyscf order, so if calculate overlap, adjust pyscf csf order to my order
         pscsf_fdiag = np.concatenate((pscsf_fdiag_a.reshape(-1), pscsf_fdiag_b.reshape(-1)))
         nc_old, no_old, nv_old = tools.get_cov(self.mf)
@@ -476,28 +507,28 @@ class UsTDA:
 
         # Section: construct A
         A = np.zeros((Adim, Adim))
-        qAkcv_aa = qAk_aa[:, pscsfcv_a_i, pscsfcv_a_a]
+        qAkcv_aa = qAk_aa[:, pscsfcv_i, pscsfcv_a]
         qAkov_aa = qAk_aa[:, nc+pscsfov_a_i, pscsfov_a_a]
         qAkco_bb = qAk_bb[:, pscsfco_b_i, pscsfco_b_a]
-        qAkcv_bb = qAk_bb[:, pscsfcv_b_i, no+pscsfcv_b_a]
+        qAkcv_bb = qAk_bb[:, pscsfcv_i, no+pscsfcv_a]
         qBkcv_aa = np.array(qAkcv_aa)
         qBkov_aa = np.array(qAkov_aa)
         qBkco_bb = np.array(qAkco_bb)
         qBkcv_bb = np.array(qAkcv_bb)
-        lcva = len(pscsfcv_a_i)
+        lcva = len(pscsfcv_i)
         lova = len(pscsfov_a_i)
         lcob = len(pscsfco_b_i)
-        lcvb = len(pscsfcv_b_i)
+        lcvb = len(pscsfcv_i)
         if self.correct:
             delta_max = 0.5 / unit.ha2eV
             sigma_k = 0.1 / unit.ha2eV
         # CV(aa)-CV(aa)
         int2ekcv_a = np.einsum('nmi, nma, nm->ia', qAkcv_aa[:, None, ...], qBkcv_aa[None, ...], gamma_k)
         int2ejcv_a = np.zeros_like(int2ekcv_a)
-        for i, a, p in zip(pscsfcv_a_i, pscsfcv_a_a, range(lcva)):
-            int2ejcv_a[p, :] = np.einsum('nmp, nmp, nm->p', qAj_aa[:, None, i, pscsfcv_a_i], qBj_aa[None, :, a, pscsfcv_a_a], gamma_j)
-            A[p, :lcva] -= np.einsum('p, p->p', fock_a_occ[i, pscsfcv_a_i], np.eye(nv)[a, pscsfcv_a_a])
-            A[p, :lcva] += np.einsum('p, p->p', np.eye(nc)[i, pscsfcv_a_i], fock_a_vir[a, pscsfcv_a_a])
+        for i, a, p in zip(pscsfcv_i, pscsfcv_a, range(lcva)):
+            int2ejcv_a[p, :] = np.einsum('nmp, nmp, nm->p', qAj_aa[:, None, i, pscsfcv_i], qBj_aa[None, :, a, pscsfcv_a], gamma_j)
+            A[p, :lcva] -= np.einsum('p, p->p', fock_a_occ[i, pscsfcv_i], np.eye(nv)[a, pscsfcv_a])
+            A[p, :lcva] += np.einsum('p, p->p', np.eye(nc)[i, pscsfcv_i], fock_a_vir[a, pscsfcv_a])
         A[:lcva, :lcva] += int2ekcv_a - int2ejcv_a
         if self.correct:
             delta_k = delta_max / (1 + (np.diag(int2ekcv_a) / sigma_k) ** 4)
@@ -506,7 +537,7 @@ class UsTDA:
         # CV(aa)-OV(aa)
         int2ekcvaova = np.einsum('nmi, nma, nm->ia', qAkcv_aa[:, None, ...], qBkov_aa[None, ...], gamma_k)
         int2ejcvaova = np.zeros_like(int2ekcvaova)
-        for i, a, p in zip(pscsfcv_a_i, pscsfcv_a_a, range(lcva)):
+        for i, a, p in zip(pscsfcv_i, pscsfcv_a, range(lcva)):
             int2ejcvaova[p, :] = np.einsum('nmp, nmp, nm->p', qAj_aa[:, None, i, nc+pscsfov_a_i], qBj_aa[None, :, a, pscsfov_a_a], gamma_j)
             A[p, lcva:lcva+lova] -= np.einsum('p, p->p', fock_a_occ[i, nc+pscsfov_a_i], np.eye(nv)[a, pscsfov_a_a])
             A[p, lcva:lcva+lova] += np.einsum('p, p->p', np.eye(nc+no)[i, nc+pscsfov_a_i], fock_a_vir[a, pscsfov_a_a])
@@ -554,9 +585,9 @@ class UsTDA:
         int2ekcobcvb = np.einsum('nmi, nma, nm->ia', qAkco_bb[:, None, ...], qBkcv_bb[None, ...], gamma_k)
         int2ejcobcvb = np.zeros_like(int2ekcobcvb)
         for i, a, p in zip(pscsfco_b_i, pscsfco_b_a, range(lcob)):
-            int2ejcobcvb[p, :] = np.einsum('nmp, nmp, nm->p', qAj_bb[:, None, i, pscsfcv_b_i], qBj_bb[None, :, a, no+pscsfcv_b_a], gamma_j)
-            A[lcva+lova+p, lcva+lova+lcob:] -= np.einsum('p, p->p', fock_b_occ[i, pscsfcv_b_i], np.eye(no+nv)[a, no+pscsfcv_b_a])
-            A[lcva+lova+p, lcva+lova+lcob:] += np.einsum('p, p->p', np.eye(nc)[i, pscsfcv_b_i], fock_b_vir[a, no+pscsfcv_b_a])
+            int2ejcobcvb[p, :] = np.einsum('nmp, nmp, nm->p', qAj_bb[:, None, i, pscsfcv_i], qBj_bb[None, :, a, no+pscsfcv_a], gamma_j)
+            A[lcva+lova+p, lcva+lova+lcob:] -= np.einsum('p, p->p', fock_b_occ[i, pscsfcv_i], np.eye(no+nv)[a, no+pscsfcv_a])
+            A[lcva+lova+p, lcva+lova+lcob:] += np.einsum('p, p->p', np.eye(nc)[i, pscsfcv_i], fock_b_vir[a, no+pscsfcv_a])
         A[lcva+lova:lcva+lova+lcob, lcva+lova+lcob:] += int2ekcobcvb - int2ejcobcvb
         del int2ekcobcvb, int2ejcobcvb
         # CV(bb)-CV(aa)
@@ -568,10 +599,10 @@ class UsTDA:
         # CV(bb)-CV(bb)
         int2ekcv_b = np.einsum('nmi, nma, nm->ia', qAkcv_bb[:, None, ...], qBkcv_bb[None, ...], gamma_k)
         int2ejcv_b = np.zeros_like(int2ekcv_b)
-        for i, a, p in zip(pscsfcv_b_i, pscsfcv_b_a, range(lcvb)):
-            int2ejcv_b[p, :] = np.einsum('nmp, nmp, nm->p', qAj_bb[:, None, i, pscsfcv_b_i], qBj_bb[None, :, no+a, no+pscsfcv_b_a], gamma_j)
-            A[lcva+lova+lcob+p, lcva+lova+lcob:] -= np.einsum('p, p->p', fock_b_occ[i, pscsfcv_b_i], np.eye(no+nv)[no+a, no+pscsfcv_b_a])
-            A[lcva+lova+lcob+p, lcva+lova+lcob:] += np.einsum('p, p->p', np.eye(nc)[i, pscsfcv_b_i], fock_b_vir[no+a, no+pscsfcv_b_a])
+        for i, a, p in zip(pscsfcv_i, pscsfcv_a, range(lcvb)):
+            int2ejcv_b[p, :] = np.einsum('nmp, nmp, nm->p', qAj_bb[:, None, i, pscsfcv_i], qBj_bb[None, :, no+a, no+pscsfcv_a], gamma_j)
+            A[lcva+lova+lcob+p, lcva+lova+lcob:] -= np.einsum('p, p->p', fock_b_occ[i, pscsfcv_i], np.eye(no+nv)[no+a, no+pscsfcv_a])
+            A[lcva+lova+lcob+p, lcva+lova+lcob:] += np.einsum('p, p->p', np.eye(nc)[i, pscsfcv_i], fock_b_vir[no+a, no+pscsfcv_a])
         A[lcva+lova+lcob:, lcva+lova+lcob:] += int2ekcv_b - int2ejcv_b
         if self.correct:
             delta_k = delta_max / (1 + (np.diag(int2ekcv_b) / sigma_k) ** 4)
@@ -588,14 +619,12 @@ class UsTDA:
         self.no = no
         self.nc = nc
         self.nv = nv
-        self.pscsfcv_a_i = pscsfcv_a_i
-        self.pscsfcv_a_a = pscsfcv_a_a
+        self.pscsfcv_i = pscsfcv_i
+        self.pscsfcv_a = pscsfcv_a
         self.pscsfov_a_i = pscsfov_a_i
         self.pscsfov_a_a = pscsfov_a_a
         self.pscsfco_b_i = pscsfco_b_i
         self.pscsfco_b_a = pscsfco_b_a
-        self.pscsfcv_b_i = pscsfcv_b_i
-        self.pscsfcv_b_a = pscsfcv_b_a
 
         self.e, self.v = scipy.linalg.eigh(A)
         self.e_eV = self.e[:self.nstates] * unit.ha2eV
@@ -623,12 +652,13 @@ class UsTDA:
         # logger.info(self.mf, 'rotatory strength (cgs unit) \n{}'.format(self.rs))
         # logger.info(self.mf, 'deltaS2 is \n{}'.format(dS2))
         print('my UsTDA result is')
-        print(f'{"num":>4} {"energy":>8} {"osc_str":>8} {"rot_str":>8} {"deltaS2":>8}')
+        print(f'{"num":>4} {"energy":>8} {"wav_len"} {"osc_str":>8} {"rot_str":>8} {"deltaS2":>8}')
         for ni, ei, wli, osi, rsi, ds2i in zip(range(self.nstates), self.e_eV, unit.eVxnm/self.e_eV, os, rs, dS2):
             print(f'{ni:4d} {ei:8.4f} {wli:8.4f} {osi:8.4f} {rsi:8.4f} {ds2i:8.4f}')
-        pd.DataFrame(
-            np.concatenate((unit.eVxnm / np.expand_dims(self.e_eV, axis=1), np.expand_dims(os, axis=1)), axis=1)
-        ).to_csv('uvspec_data.csv', index=False, header=None)
+        if self.savedata:
+            pd.DataFrame(
+                np.concatenate((unit.eVxnm / np.expand_dims(self.e_eV, axis=1), np.expand_dims(os, axis=1)), axis=1)
+            ).to_csv('uvspec_data.csv', index=False, header=None)
         # np.save("energy_ustda.npy", self.e)
         return self.e_eV, os, rs, self.v, pscsf_fdiag
 
@@ -650,10 +680,10 @@ class UsTDA:
             xyov_a = np.zeros((self.nstates, self.no, self.nv))
             xyco_b = np.zeros((self.nstates, self.nc, self.no))
             xycv_b = np.zeros((self.nstates, self.nc, self.nv))
-            xycv_a[:, self.pscsfcv_a_i, self.pscsfcv_a_a] = self.xycv_a
+            xycv_a[:, self.pscsfcv_i, self.pscsfcv_a] = self.xycv_a
             xyov_a[:, self.pscsfov_a_i, self.pscsfov_a_a] = self.xyov_a
             xyco_b[:, self.pscsfco_b_i, self.pscsfco_b_a] = self.xyco_b
-            xycv_b[:, self.pscsfcv_b_i, self.pscsfcv_b_a] = self.xycv_b
+            xycv_b[:, self.pscsfcv_i, self.pscsfcv_a] = self.xycv_b
         else:
             xycv_a = self.xycv_a.reshape(self.nstates, self.nc, self.nv)
             xyov_a = self.xyov_a.reshape(self.nstates, self.no, self.nv)
@@ -693,10 +723,10 @@ class UsTDA:
         dipole_mo_a = np.einsum('xpq,pi,qj->xij', dipole_ao, orbo_a, orbv_a)
         dipole_mo_b = np.einsum('xpq,pi,qj->xij', dipole_ao, orbo_b, orbv_b)
         if self.truncate:
-            dipole_mocv_a = dipole_mo_a[:, self.pscsfcv_a_i, self.pscsfcv_a_a]
+            dipole_mocv_a = dipole_mo_a[:, self.pscsfcv_i, self.pscsfcv_a]
             dipole_moov_a = dipole_mo_a[:, self.nc+self.pscsfov_a_i, self.pscsfov_a_a]
             dipole_moco_b = dipole_mo_b[:, self.pscsfco_b_i, self.pscsfco_b_a]
-            dipole_mocv_b = dipole_mo_b[:, self.pscsfcv_b_i, self.no+self.pscsfcv_b_a]
+            dipole_mocv_b = dipole_mo_b[:, self.pscsfcv_i, self.no+self.pscsfcv_a]
         else:
             dipole_mocv_a = dipole_mo_a[:, :self.nc, :].reshape(3, -1)
             dipole_moov_a = dipole_mo_a[:, self.nc:, :].reshape(3, -1)
@@ -727,14 +757,14 @@ class UsTDA:
         dip_meg_mo_a = np.einsum('xpq,pi,qj->xij', dip_meg_ao, orbo_a, orbv_a)
         dip_meg_mo_b = np.einsum('xpq,pi,qj->xij', dip_meg_ao, orbo_b, orbv_b)
         if self.truncate:
-            dip_ele_mocv_a = dip_ele_mo_a[:, self.pscsfcv_a_i, self.pscsfcv_a_a]
+            dip_ele_mocv_a = dip_ele_mo_a[:, self.pscsfcv_i, self.pscsfcv_a]
             dip_ele_moov_a = dip_ele_mo_a[:, self.nc+self.pscsfov_a_i, self.pscsfov_a_a]
             dip_ele_moco_b = dip_ele_mo_b[:, self.pscsfco_b_i, self.pscsfco_b_a]
-            dip_ele_mocv_b = dip_ele_mo_b[:, self.pscsfcv_b_i, self.no+self.pscsfcv_b_a]
-            dip_meg_mocv_a = dip_meg_mo_a[:, self.pscsfcv_a_i, self.pscsfcv_a_a]
+            dip_ele_mocv_b = dip_ele_mo_b[:, self.pscsfcv_i, self.no+self.pscsfcv_a]
+            dip_meg_mocv_a = dip_meg_mo_a[:, self.pscsfcv_i, self.pscsfcv_a]
             dip_meg_moov_a = dip_meg_mo_a[:, self.nc+self.pscsfov_a_i, self.pscsfov_a_a]
             dip_meg_moco_b = dip_meg_mo_b[:, self.pscsfco_b_i, self.pscsfco_b_a]
-            dip_meg_mocv_b = dip_meg_mo_b[:, self.pscsfcv_b_i, self.no+self.pscsfcv_b_a]
+            dip_meg_mocv_b = dip_meg_mo_b[:, self.pscsfcv_i, self.no+self.pscsfcv_a]
         else:
             dip_ele_mocv_a = dip_ele_mo_a[:, :self.nc, :].reshape(3, -1)
             dip_ele_moov_a = dip_ele_mo_a[:, self.nc:, :].reshape(3, -1)
@@ -767,8 +797,8 @@ if __name__ == "__main__":
         # atom=atom.perylene,
         # atom=atom.n2,  # unit is Angstrom
         # atom=atom.ch2o,
-        # atom=atom.ch2o_vacuum,
-        atom=atom.ch2o_cyclohexane,
+        atom=atom.ch2o_vacuum,
+        # atom=atom.ch2o_cyclohexane,
         # atom=atom.ch2o_diethylether,
         # atom=atom.ch2o_thf,
         # atom=atom.ch2s,
@@ -780,8 +810,9 @@ if __name__ == "__main__":
         # basis='aug-cc-pvtz',
         # basis='sto-3g',
         basis='cc-pvdz',
-        spin=1,
-        charge=1,
+        # basis='6-31g**',
+        spin=2,
+        charge=0,
         verbose=4
     )
     # path = '/home/whb/Documents/TDDFT/orcabasis/'
@@ -793,17 +824,17 @@ if __name__ == "__main__":
     # mol.basis = basis
     # mol.build()
 
-    # add solvents
-    t_dft0 = time.time()
-    mf = dft.UKS(mol).SMD()
-    # mf.with_solvent.method = 'COSMO'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
-    # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
-    mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
-    # mf.with_solvent.eps = 4.2400  # for DiethylEther 乙醚
-    # mf.with_solvent.eps = 7.4257  # for TetraHydroFuran 四氢呋喃
-
+    # # add solvents
     # t_dft0 = time.time()
-    # mf = dft.UKS(mol)
+    # mf = dft.UKS(mol).SMD()
+    # # mf.with_solvent.method = 'COSMO'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
+    # # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
+    # # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
+    # # mf.with_solvent.eps = 4.2400  # for DiethylEther 乙醚
+    # # mf.with_solvent.eps = 7.4257  # for TetraHydroFuran 四氢呋喃
+
+    t_dft0 = time.time()
+    mf = dft.UKS(mol)
     # mf.init_guess = '1e'
     # mf.init_guess = 'atom'
     # mf.init_guess = 'huckel'
@@ -829,30 +860,34 @@ if __name__ == "__main__":
     ustda = UsTDA(mol, mf, nstates=10)
     ustda.info()
 
+    # # three kind approximation
+    # # A12
     # print("=" * 50)
     # t0 = time.time()
     # ustda.nstates = 12
     # ustda.truncate = 0.0
     # ustda.cas = False
-    # e_eV, os, rs, v, pscsf = ustda.my_stda()
+    # e_eV, os, rs, v, pscsf = ustda.kernel()
     # t1 = time.time()
     # print("ustda use {} s".format(t1-t0))
 
+    # # A123
     # print("="*50)
     # t0 = time.time()
     # ustda.nstates = 12
     # ustda.truncate = 20.0
     # ustda.cas = False
-    # ustda.my_stda()
+    # e_eV, os, rs, v, pscsf = ustda.kernel()
     # t1 = time.time()
     # print("ustda use {} s".format(t1 - t0))
 
+    # A1234
     print("="*50)
     t0 = time.time()
     ustda.nstates = 12
     ustda.truncate = 20.0
     ustda.cas = True
-    e_eV, os, rs, v, pscsf = ustda.my_stda()
+    e_eV, os, rs, v, pscsf = ustda.kernel()
     t1 = time.time()
     print("ustda use {} s".format(t1 - t0))
 

@@ -1,8 +1,6 @@
 #!/usr/bin/env python
-import os
 import sys
-os.environ["OMP_NUM_THREADS"] = "4"
-sys.path.append('../')
+sys.path.append('../sTDA')
 import time
 import scipy
 import numpy as np
@@ -12,7 +10,7 @@ from numba import jit
 from pyscf import dft, gto, scf
 from pyscf.lib import logger
 
-from utils.eta import eta
+from eta import eta
 from utils import atom, unit
 
 
@@ -26,7 +24,7 @@ def int2e_f(pscsf_i, pscsf_a, qAj, qBj, gamma_j):
 
 class sTDA:
     def __init__(self, mol, mf, singlet=True, nstates=5, cas=True,
-                 truncate=20.0, correct=False):
+                 truncate=20.0, correct=False, savedata=False):
         self.mol = mol
         self.mf = mf
         self.singlet = singlet
@@ -34,6 +32,7 @@ class sTDA:
         self.cas = cas
         self.truncate = truncate
         self.correct = correct
+        self.savedata = savedata
 
     def info(self):
         mo_occ = self.mf.mo_occ
@@ -70,7 +69,7 @@ class sTDA:
         gk = (1. / (R ** alpha + eta_ele ** (-alpha))) ** (1. / alpha)
         return gj, gk
 
-    def my_stda(self):
+    def kernel(self):
         mol = self.mf.mol
         mo_coeff = self.mf.mo_coeff
         assert (mo_coeff.dtype == np.double)
@@ -293,28 +292,36 @@ class sTDA:
         #     self.pscsf = pcsf
 
         self.e, self.v = scipy.linalg.eigh(A)
-        # TODO(WHB): when remove minor value, 'osc_str' and 'rot_str' truncate code have error.
+        # Note: when remove minor value, 'osc_str' and 'rot_str' truncate code have error.
         #  In my code do not consider remove
         # self.e = self.e[np.where(self.e > 0)[0]]  # avoid appear negetive value
         # self.v = self.v[:, np.where(self.e > 0)[0]]
         self.e_eV = self.e[:self.nstates] * unit.ha2eV
         self.v = self.v[:, :self.nstates]
-        logger.info(self.mf, "my stda result is \n{}".format(self.e_eV))
+        # logger.info(self.mf, "my stda result is \n{}".format(self.e_eV))
         if self.singlet:
-            self.os = self.osc_str()  # oscillator strength
+            os = self.osc_str()  # oscillator strength
             # before calculate rot_str, check whether mol is chiral mol
             if gto.mole.chiral_mol(mol):
-                self.rs = self.rot_str()
+                rs = self.rot_str()
             else:
-                self.rs = np.zeros(self.nstates)
+                rs = np.zeros(self.nstates)
                 # logger.info(self.mf, 'molecule do not have chiral')
         else:
-            self.os = np.zeros(self.nstates)
-            self.rs = np.zeros(self.nstates)
-        logger.info(self.mf, 'oscillator strength (length form) \n{}'.format(self.os))
-        logger.info(self.mf, 'rotatory strength (cgs unit) \n{}'.format(self.rs))
+            os = np.zeros(self.nstates)
+            rs = np.zeros(self.nstates)
+        # logger.info(self.mf, 'oscillator strength (length form) \n{}'.format(self.os))
+        # logger.info(self.mf, 'rotatory strength (cgs unit) \n{}'.format(self.rs))
+        print('my UsTDA result is')
+        print(f'{"num":>4} {"energy":>8} {"wav_len"} {"osc_str":>8} {"rot_str":>8}')
+        for ni, ei, wli, osi, rsi in zip(range(self.nstates), self.e_eV, unit.eVxnm / self.e_eV, os, rs):
+            print(f'{ni:4d} {ei:8.4f} {wli:8.4f} {osi:8.4f} {rsi:8.4f}')
+        if self.savedata:
+            pd.DataFrame(
+                np.concatenate((unit.eVxnm / np.expand_dims(self.e_eV, axis=1), np.expand_dims(os, axis=1)), axis=1)
+            ).to_csv('uvspec_data.csv', index=False, header=None)
         # np.save("energy_stda.npy", self.e)
-        return self.e_eV, self.os, self.rs, self.v, pscsf_fdiag
+        return self.e_eV, os, rs, self.v, pscsf_fdiag
 
 
     def osc_str(self):
@@ -432,36 +439,40 @@ if __name__ == "__main__":
     stda = sTDA(mol, mf, singlet=True, nstates=10, cas=True, truncate=20, correct=False)
     stda.info()
 
-    print("=" * 50)
-    t_stda0 = time.time()
-    stda.nstates = 12
-    stda.truncate = 0  # eV, do not set to small or raise error, same with ORCA
-    stda.cas = False
-    stda.correct = False
-    e_eV, os, rs, v, pscsf = stda.my_stda()
-    t_stad1 = time.time()
-    print("stda use {} s".format(t_stad1-t_stda0))
+    # # three kind approximation
+    # # A12
+    # print("=" * 50)
+    # t_stda0 = time.time()
+    # stda.nstates = 12
+    # stda.truncate = 0  # eV, do not set to small or raise error, same with ORCA
+    # stda.cas = False
+    # stda.correct = False
+    # e_eV, os, rs, v, pscsf = stda.kernel()
+    # t_stad1 = time.time()
+    # print("stda use {} s".format(t_stad1-t_stda0))
 
+    # # A123
     # print("=" * 50)
     # t_stda0 = time.time()
     # stda.nstates = 12
     # stda.truncate = 20  # eV, do not set to small or raise error, same with ORCA
     # stda.cas = False
     # stda.correct = False
-    # e_eV, os, rs, v, pscsf = stda.my_stda()
+    # e_eV, os, rs, v, pscsf = stda.kernel()
     # t_stad1 = time.time()
     # print("stda use {} s".format(t_stad1 - t_stda0))
     # stda.analyze()
 
-    # print("=" * 50)
-    # t_stda0 = time.time()
-    # stda.nstates = 12
-    # stda.truncate = 20  # eV, do not set to small or raise error, same with ORCA
-    # stda.cas = True
-    # stda.correct = False
-    # e_eV, os, rs, v, pscsf = stda.my_stda()
-    # t_stad1 = time.time()
-    # print("stda use {} s".format(t_stad1 - t_stda0))
+    # A1234
+    print("=" * 50)
+    t_stda0 = time.time()
+    stda.nstates = 12
+    stda.truncate = 20  # eV, do not set to small or raise error, same with ORCA
+    stda.cas = True
+    stda.correct = False
+    e_eV, os, rs, v, pscsf = stda.kernel()
+    t_stad1 = time.time()
+    print("stda use {} s".format(t_stad1 - t_stda0))
 
     # print("=" * 50)
     # t_stda0 = time.time()
@@ -469,7 +480,7 @@ if __name__ == "__main__":
     # stda.truncate = 20  # eV, do not set to small or raise error, same with ORCA
     # stda.cas = True
     # stda.correct = True
-    # e_eV, os, rs, v, pscsf = stda.my_stda()
+    # e_eV, os, rs, v, pscsf = stda.kernel()
     # t_stad1 = time.time()
     # print("stda use {} s".format(t_stad1 - t_stda0))
 
@@ -480,6 +491,6 @@ if __name__ == "__main__":
     # t_tda0 = time.time()
     # from TDA import TDA
     # tda = TDA(mol, mf, singlet=True, nstates=12)
-    # tda.my_tda()
+    # tda.kernel()
     # t_tda1 = time.time()
     # print("tda use {} s".format(t_tda1-t_tda0))
