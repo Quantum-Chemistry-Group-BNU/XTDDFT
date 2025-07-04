@@ -134,45 +134,53 @@ class sTDA:
         for (shl0, shl1, p0, p1) in ao_slices:
             C_occ_atom = C_occ[p0:p1]
             C_vir_atom = C_vir[p0:p1]
-            qAk.append(np.einsum('mi, ma -> ia', C_occ_atom, C_vir_atom))
+            if self.singlet:
+                qAk.append(np.einsum('mi, ma -> ia', C_occ_atom, C_vir_atom))
             qAj.append(np.einsum('mi, mj -> ij', C_occ_atom, C_occ_atom))
             qBj.append(np.einsum('ma, mb -> ab', C_vir_atom, C_vir_atom))
-        qAk = np.array(qAk)
-        qBk = np.array(qAk)  # do not remove np.array(), this will make qAk and qBk use same memory (change qBk will change qAk)
+        if self.singlet:
+            qAk = np.array(qAk)
+            qBk = np.array(qAk)  # do not remove np.array(), this will make qAk and qBk use same memory (change qBk will change qAk)
         qAj = np.array(qAj)
         qBj = np.array(qBj)
         fockocc = fock[:nocc, :nocc]
         fockvir = fock[nocc:, nocc:]
         if self.truncate:
-            # int2e_k[i, a, i, a] = qAk[atom, i, a] * qBk[atom, i, a]
-            iaia_k = np.einsum('nmia, nmia, nm->ia', qAk[:, None, ...], qBk[None, ...], gamma_k)
             # int2e_j[i, a, i, a] = qAj[atom, i, i] * qBj[atom, a, a]
             iaia_j = np.einsum('nmii, nmaa, nm->ia', qAj[:, None, ...], qBj[None, ...], gamma_j)
-            if self.correct:
-                delta_max = 0.5 / unit.ha2eV
-                sigma_k = 0.1 / unit.ha2eV
-                delta_k = delta_max / (1 + (iaia_k / sigma_k) ** 4)
-                iaia_k += delta_k
-            iaia = 2 * iaia_k - iaia_j  # A matrix main diagonal element (do not include fock)
+            if self.singlet:
+                # int2e_k[i, a, i, a] = qAk[atom, i, a] * qBk[atom, i, a]
+                iaia_k = np.einsum('nmia, nmia, nm->ia', qAk[:, None, ...], qBk[None, ...], gamma_k)
+                if self.correct:
+                    delta_max = 0.5 / unit.ha2eV
+                    sigma_k = 0.1 / unit.ha2eV
+                    delta_k = delta_max / (1 + (iaia_k / sigma_k) ** 4)
+                    iaia_k += delta_k
+                iaia = 2 * iaia_k - iaia_j  # A matrix main diagonal element (do not include fock)
+            else:
+                iaia = -iaia_j
             iaia -= np.einsum('i, a->ia', np.diag(fockocc), np.ones(nvir))  # add fock contribution
             iaia += np.einsum('i, a->ia', np.ones(nocc), np.diag(fockvir))  # add fock contribution
-            del iaia_k, iaia_j
+            del iaia_j
 
             # get truncation space
             pcsf = np.where(iaia * unit.ha2eV < self.truncate)
             ncsf = np.where(iaia * unit.ha2eV > self.truncate)
             iajb = np.zeros(ncsf[0].shape[0])
             for i, j in zip(pcsf[0], pcsf[1]):
-                # exchange term in non-diagonal A matrix element
-                iajb_k = np.einsum('nm, nmi, nm->i',
-                                    qAk[:, None, i, j], qBk[None, :, ncsf[0], ncsf[1]], gamma_k)
                 # coulomb term in non-diagonal A matrix element
                 iajb_j = np.einsum('nmi, nmi, nm->i',
-                                    qAj[:, None, i, ncsf[0]], qBj[None, :, j, ncsf[1]], gamma_j)
+                                   qAj[:, None, i, ncsf[0]], qBj[None, :, j, ncsf[1]], gamma_j)
                 # fock term in non-diagonal A matrix element
                 iajb_f_o = np.einsum('i, i->i', fockocc[i, ncsf[0]], np.eye(nvir)[j, ncsf[1]])
                 iajb_f_v = np.einsum('i, i->i', np.eye(nocc)[i, ncsf[0]], fockvir[j, ncsf[1]])
-                iajb += (2 * iajb_k - iajb_j - iajb_f_o + iajb_f_v) ** 2 / (iaia[ncsf[0], ncsf[1]] - iaia[i, j] + 1e-10)
+                if self.singlet:
+                    # exchange term in non-diagonal A matrix element
+                    iajb_k = np.einsum('nm, nmi, nm->i',
+                                        qAk[:, None, i, j], qBk[None, :, ncsf[0], ncsf[1]], gamma_k)
+                    iajb += (2 * iajb_k - iajb_j - iajb_f_o + iajb_f_v) ** 2 / (iaia[ncsf[0], ncsf[1]] - iaia[i, j] + 1e-10)
+                else:
+                    iajb += (-iajb_j - iajb_f_o + iajb_f_v) ** 2 / (iaia[ncsf[0], ncsf[1]] - iaia[i, j] + 1e-10)
             scsf = np.where(iajb > 1e-4)  # 1D array
             pscsf_i = np.concatenate((pcsf[0], ncsf[0][scsf[0]]), axis=0)
             pscsf_a = np.concatenate((pcsf[1], ncsf[1][scsf[0]]), axis=0)
@@ -183,7 +191,7 @@ class sTDA:
             logger.info(self.mf, '{} CSFs in pcsf'.format(len(pcsf[0])))
             logger.info(self.mf, '{} CSFs in scsf'.format(len(scsf[0])))
             logger.info(self.mf, '{} CSFs in ncsf'.format(len(ncsf[0]) - len(scsf[0])))
-            del iajb, iajb_k, iajb_j, iajb_f_o, iajb_f_v, pcsf, scsf, ncsf
+            del iajb, iajb_j, iajb_f_o, iajb_f_v, pcsf, scsf, ncsf
         else:
             logger.info(self.mf, 'no * nv is {}'.format(nocc * nvir))
             pscsf_i, pscsf_a = np.indices((nocc, nvir))
@@ -193,9 +201,31 @@ class sTDA:
         pscsf_fdiag[pscsf_i+pscsf_fdiag.shape[0]-nocc, pscsf_a] = True  # full A matrix diagonal element
         pscsf_fdiag = pscsf_fdiag.reshape(-1)
         A = np.zeros((pscsf_i.shape[0], pscsf_a.shape[0]))
-        qAk = qAk[:, pscsf_i, pscsf_a]
-        qBk = qAk
-        int2e_k = np.einsum('nmi, nma, nm->ia', qAk[:, None, ...], qBk[None, ...], gamma_k)
+        # # line by line construct int2e (1/2)
+        # int2e_k = np.zeros((pscsf_i.shape[0], pscsf_a.shape[0]))
+        int2e_j = np.zeros((pscsf_i.shape[0], pscsf_a.shape[0]))
+        for i, a, p in zip(pscsf_i, pscsf_a, range(len(pscsf_i))):
+            # int2e_k[p, :] = np.einsum('nmp, nmp, nm->p',
+            #                           qAk[:, None, i, pscsf_a], qBk[None, :, i, pscsf_a], gamma_k)
+            # int2e_j[p, :] = np.einsum('nmp, nmp, nm->p',
+            #                           qAj[:, None, i, pscsf_i], qBj[None, :, a, pscsf_a], gamma_j)
+            # # line by line construct int2e (2/2)
+            # int2e_k[p, :] = int2e_f(pscsf_i, pscsf_a, qAk[:, None, i, pscsf_a], qBk[None, :, i, pscsf_a], gamma_k)
+            int2e_j[p, :] = int2e_f(pscsf_i, pscsf_a, qAj[:, None, i, pscsf_i], qBj[None, :, a, pscsf_a], gamma_j)
+            A[p, :] -= np.einsum('p, p->p', fockocc[i, pscsf_i], np.eye(nvir)[a, pscsf_a])
+            A[p, :] += np.einsum('p, p->p', np.eye(nocc)[i, pscsf_i], fockvir[a, pscsf_a])
+        if self.singlet:
+            qAk = qAk[:, pscsf_i, pscsf_a]
+            qBk = qAk
+            int2e_k = np.einsum('nmi, nma, nm->ia', qAk[:, None, ...], qBk[None, ...], gamma_k)
+            if self.correct:
+                delta_max = 0.5 / unit.ha2eV
+                sigma_k = 0.1 / unit.ha2eV
+                delta_k = delta_max / (1 + (np.diag(int2e_k) / sigma_k) ** 4)
+                A += np.diag(delta_k)
+            A += 2 * int2e_k - int2e_j
+        else:
+            A += -int2e_j
 
         # # construct int2e_j, but these code take too much memory
         # xx_i, yy_i = np.meshgrid(pscsf_i, pscsf_i, indexing='ij')  # For easy indexing
@@ -212,26 +242,6 @@ class sTDA:
         #
         # A -= np.einsum('ia, ia->ia', fockocc[xx_i, yy_i], np.eye(nvir)[xx_a, yy_a])
         # A += np.einsum('ia, ia->ia', np.eye(nocc)[xx_i, yy_i], fockvir[xx_a, yy_a])
-
-        # # line by line construct int2e (1/2)
-        # int2e_k = np.zeros((pscsf_i.shape[0], pscsf_a.shape[0]))
-        int2e_j = np.zeros_like(int2e_k)
-        for i, a, p in zip(pscsf_i, pscsf_a, range(len(pscsf_i))):
-            # int2e_k[p, :] = np.einsum('nmp, nmp, nm->p',
-            #                           qAk[:, None, i, pscsf_a], qBk[None, :, i, pscsf_a], gamma_k)
-            # int2e_j[p, :] = np.einsum('nmp, nmp, nm->p',
-            #                           qAj[:, None, i, pscsf_i], qBj[None, :, a, pscsf_a], gamma_j)
-            # # line by line construct int2e (2/2)
-            # int2e_k[p, :] = int2e_f(pscsf_i, pscsf_a, qAk[:, None, i, pscsf_a], qBk[None, :, i, pscsf_a], gamma_k)
-            int2e_j[p, :] = int2e_f(pscsf_i, pscsf_a, qAj[:, None, i, pscsf_i], qBj[None, :, a, pscsf_a], gamma_j)
-            A[p, :] -= np.einsum('p, p->p', fockocc[i, pscsf_i], np.eye(nvir)[a, pscsf_a])
-            A[p, :] += np.einsum('p, p->p', np.eye(nocc)[i, pscsf_i], fockvir[a, pscsf_a])
-        if self.correct:
-            delta_max = 0.5 / unit.ha2eV
-            sigma_k = 0.1 / unit.ha2eV
-            delta_k = delta_max / (1 + (np.diag(int2e_k) / sigma_k) ** 4)
-            A += np.diag(delta_k)
-        A += 2 * int2e_k - int2e_j
 
         # define some class variety, simple to use
         self.mo_coeff = mo_coeff
@@ -312,8 +322,8 @@ class sTDA:
             rs = np.zeros(self.nstates)
         # logger.info(self.mf, 'oscillator strength (length form) \n{}'.format(self.os))
         # logger.info(self.mf, 'rotatory strength (cgs unit) \n{}'.format(self.rs))
-        print('my UsTDA result is')
-        print(f'{"num":>4} {"energy":>8} {"wav_len"} {"osc_str":>8} {"rot_str":>8}')
+        print('my sTDA result is')
+        print(f'{"num":>4} {"energy":>8} {"wav_len":>8} {"osc_str":>8} {"rot_str":>8}')
         for ni, ei, wli, osi, rsi in zip(range(self.nstates), self.e_eV, unit.eVxnm / self.e_eV, os, rs):
             print(f'{ni:4d} {ei:8.4f} {wli:8.4f} {osi:8.4f} {rsi:8.4f}')
         if self.savedata:

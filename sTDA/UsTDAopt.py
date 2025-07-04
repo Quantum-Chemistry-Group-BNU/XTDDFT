@@ -811,8 +811,8 @@ if __name__ == "__main__":
         # basis='sto-3g',
         basis='cc-pvdz',
         # basis='6-31g**',
-        spin=2,
-        charge=0,
+        spin=1,
+        charge=1,
         verbose=4
     )
     # path = '/home/whb/Documents/TDDFT/orcabasis/'
@@ -867,6 +867,7 @@ if __name__ == "__main__":
     # ustda.nstates = 12
     # ustda.truncate = 0.0
     # ustda.cas = False
+    # ustda.paramtype = 'os'
     # e_eV, os, rs, v, pscsf = ustda.kernel()
     # t1 = time.time()
     # print("ustda use {} s".format(t1-t0))
@@ -877,6 +878,7 @@ if __name__ == "__main__":
     # ustda.nstates = 12
     # ustda.truncate = 20.0
     # ustda.cas = False
+    # ustda.paramtype = 'os'
     # e_eV, os, rs, v, pscsf = ustda.kernel()
     # t1 = time.time()
     # print("ustda use {} s".format(t1 - t0))
@@ -887,6 +889,7 @@ if __name__ == "__main__":
     ustda.nstates = 12
     ustda.truncate = 20.0
     ustda.cas = True
+    ustda.paramtype = 'os'
     e_eV, os, rs, v, pscsf = ustda.kernel()
     t1 = time.time()
     print("ustda use {} s".format(t1 - t0))
