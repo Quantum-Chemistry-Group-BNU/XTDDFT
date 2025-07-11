@@ -5,10 +5,9 @@ import numpy as np
 from pyscf.dft import numint
 import scipy
 from functools import reduce
-import sys
-
-sys.path.append('/home/lenovo2/usrs/zhw/TDDFT')
-from sf_tda import *
+#import sys
+#sys.path.append('/home/lenovo2/usrs/zhw/TDDFT')
+from SF_TDA import *
 
 def _charge_center(mol):
     charges = mol.atom_charges()
@@ -310,7 +309,7 @@ class SA_SF_TDA():
                 
         return a_a2b
         
-    def get_Amat(self,SA=None):
+    def get_Amat(self,SA=None,foo=1.0):
         """SA=0: SF-TDA
            SA=1: only add diagonal block for dA
            SA=2: add all dA except for OO block
@@ -413,21 +412,21 @@ class SA_SF_TDA():
         if SA > 2:
             tmp_CV_OO = -(factor-1)*np.einsum('avwi->iawv',eri[nc+no:,nc:nc+no,nc:nc+no,:nc]).reshape(nv*nc,no*no) + \
                          (1/si)*factor*np.einsum('ia,wv->iawv',fockS_CV,iden_O).reshape(nv*nc,no*no)
-            Amat[:dim1,dim3:] += tmp_CV_OO
-            Amat[dim3:,:dim1] += tmp_CV_OO.T
+            Amat[:dim1,dim3:] += foo*tmp_CV_OO
+            Amat[dim3:,:dim1] += foo*tmp_CV_OO.T
         
         # CO-OO, OO-CO  iuvw
             tmp_CO_OO = (np.sqrt(2*si/(2*si-1))-1)*(- np.einsum('wi,uv->iuwv',fockA_hf[nc:nc+no,:nc],iden_O).reshape(no*nc,no*no)\
                                                     -np.einsum('uvwi->iuwv',eri[nc:nc+no,nc:nc+no,nc:nc+no,:nc]).reshape(no*nc,no*no))\
                          +(1/np.sqrt(2*si*(2*si-1)))*np.einsum('iu,wv->iuwv',fockB_hf[:nc,nc:nc+no],iden_O).reshape(no*nc,no*no)
-            Amat[dim1:dim2,dim3:] += tmp_CO_OO
-            Amat[dim3:,dim1:dim2] += tmp_CO_OO.T
+            Amat[dim1:dim2,dim3:] += foo*tmp_CO_OO
+            Amat[dim3:,dim1:dim2] += foo*tmp_CO_OO.T
         # OV-OO, OO-OV uawv
             tmp_OV_OO = (np.sqrt(2*si/(2*si-1))-1)*(np.einsum('wu,av->uawv',iden_O,fockB_hf[nc+no:,nc:nc+no]).reshape(nv*no,no*no) \
                                                   - np.einsum('avwu->uawv',eri[nc+no:,nc:nc+no,nc:nc+no,nc:nc+no]).reshape(nv*no,no*no)) \
                          -(1/np.sqrt(2*si*(2*si-1)))*np.einsum('ua,wv->uawv',fockA_hf[nc:nc+no,nc+no:],iden_O).reshape(nv*no,no*no)
-            Amat[dim2:dim3,dim3:] += tmp_OV_OO
-            Amat[dim3:,dim2:dim3] += tmp_OV_OO.T
+            Amat[dim2:dim3,dim3:] += foo*tmp_OV_OO
+            Amat[dim3:,dim2:dim3] += foo*tmp_OV_OO.T
         
         return Amat
     
@@ -917,7 +916,7 @@ class SA_SF_TDA():
         tmp_A = tmp_A[:, kept]
         return tmp_A
             
-    def kernel(self, nstates=1,remove=False,frozen=None):
+    def kernel(self, nstates=1,remove=False,frozen=None,foo=1.0):
         self.re = remove
         self.nstates = nstates
         if remove:
@@ -932,7 +931,7 @@ class SA_SF_TDA():
             if self.davidson:
                 self.davison_process()
             else:
-                self.A = self.get_Amat()
+                self.A = self.get_Amat(foo=foo)
                 if frozen is not None:
                     self.A = self.frozen_A(frozen)
                 e,v = scipy.linalg.eigh(self.A)
