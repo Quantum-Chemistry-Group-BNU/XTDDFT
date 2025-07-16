@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 import sys
-sys.path.append('../sTDA')
+sys.path.append('../')
 import time
 import scipy
 import numpy as np

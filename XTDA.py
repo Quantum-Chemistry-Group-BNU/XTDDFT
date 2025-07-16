@@ -421,6 +421,29 @@ class XTDA:
         # np.save("rot_str_stda.npy", f)
         return f
 
+    def analyze(self):
+        nc = self.nc
+        nv = self.nv
+        no = self.no
+        print(nc)
+        print(no)
+        print(nv)
+        for nstate in range(self.nstates):
+            value = self.v[:,nstate]
+            x_cv_aa = value[:nc*nv].reshape(nc,nv)
+            x_ov_aa = value[nc*nv:(nc+no)*nv].reshape(no,nv)
+            x_co_bb = value[(nc+no)*nv:(nc+no)*nv+nc*no].reshape(nc,no)
+            x_cv_bb = value[(nc+no)*nv+nc*no:].reshape(nc, nv)
+            print(f'Excited state {nstate + 1} {self.e[nstate] * unit.ha2eV:10.5f} eV')
+            for o, v in zip(*np.where(abs(x_cv_aa) > 0.1)):
+                print(f'CV(aa) {o + 1}a -> {v + 1 + nc+no}a {x_cv_aa[o, v]:10.5f}')
+            for o, v in zip(*np.where(abs(x_ov_aa) > 0.1)):
+                print(f'OV(aa) {nc+o + 1}a -> {v + 1+nc+no}a {x_ov_aa[o, v]:10.5f}')
+            for o, v in zip(*np.where(abs(x_co_bb) > 0.1)):
+                print(f'CO(bb) {o + 1}b -> {v + 1+nc}b {x_co_bb[o, v]:10.5f}')
+            for o, v in zip(*np.where(abs(x_cv_bb) > 0.1)):
+                print(f'CV(bb) {o + 1}b -> {v + 1 + nc+no}b {x_cv_bb[o, v]:10.5f}')
+
 
 # spin-conserving spin-adapted x-tda
 def _charge_center(mol):

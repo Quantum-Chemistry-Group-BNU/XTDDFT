@@ -1,6 +1,8 @@
 #!/usr/bin/env python
+import os
 import sys
-sys.path.append('../sTDA')
+os.environ["OMP_NUM_THREADS"] = "4"
+sys.path.append('../')
 import time
 import scipy
 import numpy as np
@@ -553,6 +555,10 @@ class XsTDA:
         self.pscsfov_a_a = pscsfov_a_a
         self.pscsfco_b_i = pscsfco_b_i
         self.pscsfco_b_a = pscsfco_b_a
+        self.lcva = lcva
+        self.lova = lova
+        self.lcob = lcob
+        self.lcvb = lcvb
 
         self.e, self.v = scipy.linalg.eigh(A)
         self.e_eV = self.e[:self.nstates] * unit.ha2eV
@@ -722,6 +728,41 @@ class XsTDA:
         # np.save("rot_str_stda.npy", f)
         return f
 
+    def analyze(self):
+        nc = self.nc
+        nv = self.nv
+        no = self.no
+        print(nc)
+        print(no)
+        print(nv)
+        print("if select active orbital, "
+              "Molecular orbitals are numbered starting with the lowest energy active orbital.")
+        for nstate in range(self.nstates):
+            value = self.v[:,nstate]
+            x_cv_aa = value[:self.lcva]
+            x_ov_aa = value[self.lcva:self.lcva+self.lova]
+            x_co_bb = value[self.lcva+self.lova:self.lcva+self.lova+self.lcob]
+            x_cv_bb = value[self.lcva+self.lova+self.lcob:]
+            print(f'Excited state {nstate + 1} {self.e[nstate] * unit.ha2eV:10.5f} eV')
+            if self.truncate:
+                for i in np.where(abs(x_cv_aa) > 0.1)[0]:
+                    print(f'CV(aa) {self.pscsfcv_i[i]+1}a -> {self.pscsfcv_a[i]+1+nc+no}a {x_cv_aa[i]:10.5f}')
+                for i in np.where(abs(x_ov_aa) > 0.1)[0]:
+                    print(f'OV(aa) {self.pscsfov_a_i[i]+1+nc}a -> {self.pscsfov_a_a[i]+1+nc+no}a {x_ov_aa[i]:10.5f}')
+                for i in np.where(abs(x_co_bb) > 0.1)[0]:
+                    print(f'CO(bb) {self.pscsfco_b_i[i]+1}b -> {self.pscsfco_b_a[i]+1+nc}b {x_co_bb[i]:10.5f}')
+                for i in np.where(abs(x_cv_bb) > 0.1)[0]:
+                    print(f'CV(bb) {self.pscsfcv_i[i]+1}b -> {self.pscsfcv_a[i]+1+nc+no}b {x_cv_bb[i]:10.5f}')
+            else:
+                for o, v in zip(*np.where(abs(x_cv_aa) > 0.1)):
+                    print(f'CV(aa) {o + 1}a -> {v + 1 + nc+no}a {x_cv_aa[o, v]:10.5f}')
+                for o, v in zip(*np.where(abs(x_ov_aa) > 0.1)):
+                    print(f'OV(aa) {nc+o + 1}a -> {v + 1+nc+no}a {x_ov_aa[o, v]:10.5f}')
+                for o, v in zip(*np.where(abs(x_co_bb) > 0.1)):
+                    print(f'CO(bb) {o + 1}b -> {v + 1+nc}b {x_co_bb[o, v]:10.5f}')
+                for o, v in zip(*np.where(abs(x_cv_bb) > 0.1)):
+                    print(f'CV(bb) {o + 1}b -> {v + 1 + nc+no}b {x_cv_bb[o, v]:10.5f}')
+
 
 if __name__ == "__main__":
     mol = gto.M(
@@ -792,6 +833,7 @@ if __name__ == "__main__":
     xstda.truncate = 20
     xstda.correct = False
     e_eV, os, rs, v, pscsf = xstda.kernel()
+    xstda.analyze()
 
     # import pandas as pd
     # pd.DataFrame(e_eV).to_csv(xc + 'xsTDA.csv')
