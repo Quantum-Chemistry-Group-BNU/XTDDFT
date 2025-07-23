@@ -493,14 +493,3 @@ if __name__ == "__main__":
     # e_eV, os, rs, v, pscsf = stda.kernel()
     # t_stad1 = time.time()
     # print("stda use {} s".format(t_stad1 - t_stda0))
-
-    # import pandas as pd
-    # pd.DataFrame(e_eV).to_csv(xc + 'sTDA.csv')
-
-    # print("="*50)
-    # t_tda0 = time.time()
-    # from TDA import TDA
-    # tda = TDA(mol, mf, singlet=True, nstates=12)
-    # tda.kernel()
-    # t_tda1 = time.time()
-    # print("tda use {} s".format(t_tda1-t_tda0))

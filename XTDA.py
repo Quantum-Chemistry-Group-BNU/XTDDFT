@@ -104,7 +104,16 @@ class XTDA:
         bb -= np.einsum('ijba->iajb', eri[:nocc_b, :nocc_b, nocc_b:, nocc_b:]) * hyb
 
         ab += np.einsum('iabj->iajb', eri[:nocc_a, nocc_a:, nocc_b:, :nocc_b])
-        del dm, eri, focka, fockb, h1e, mo_a, mo_b,
+        del dm, eri, focka, fockb, h1e
+        if omega != 0:  # For RSH
+            with self.mol.with_range_coulomb(omega):
+                eri_aa = ao2mo.general(self.mol, [orbo_a, mo_a, mo_a, mo_a], compact=False)
+                eri_bb = ao2mo.general(self.mol, [orbo_b, mo_b, mo_b, mo_b], compact=False)
+                eri_aa = eri_aa.reshape(nocc_a, nmo_a, nmo_a, nmo_a)
+                eri_bb = eri_bb.reshape(nocc_b, nmo_b, nmo_b, nmo_b)
+                k_fac = alpha - hyb
+                aa -= np.einsum('ijba->iajb', eri_aa[:nocc_a,:nocc_a,nocc_a:,nocc_a:]) * k_fac
+                bb -= np.einsum('ijba->iajb', eri_bb[:nocc_b,:nocc_b,nocc_b:,nocc_b:]) * k_fac
 
         occ = np.zeros((2, len(mo_occ)))  # deal as uks
         occ[0][:len(occidx_a)] = 1
@@ -185,6 +194,41 @@ class XTDA:
                 ab += iajb
             del ao, coords, fxc, iajb, rho0a, rho0b, rho_o_a, rho_o_b, rho_ov_a, rho_ov_b, \
                 rho_v_a, rho_v_b, w_ov_aa, w_ov_ab, w_ov_bb, wfxc
+        elif xctype == 'MGGA':
+            ao_deriv = 1
+            for ao, mask, weight, coords \
+                    in ni.block_loop(mol, mf.grids, nao, ao_deriv, max_memory):
+                rho0a = make_rho(0, ao, mask, xctype)
+                rho0b = make_rho(1, ao, mask, xctype)
+                rho = (rho0a, rho0b)
+                fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype)[2]
+                wfxc = fxc * weight
+                rho_oa = lib.einsum('xrp,pi->xri', ao, orbo_a)
+                rho_ob = lib.einsum('xrp,pi->xri', ao, orbo_b)
+                rho_va = lib.einsum('xrp,pi->xri', ao, orbv_a)
+                rho_vb = lib.einsum('xrp,pi->xri', ao, orbv_b)
+                rho_ov_a = np.einsum('xri,ra->xria', rho_oa, rho_va[0])
+                rho_ov_b = np.einsum('xri,ra->xria', rho_ob, rho_vb[0])
+                rho_ov_a[1:4] += np.einsum('ri,xra->xria', rho_oa[0], rho_va[1:4])
+                rho_ov_b[1:4] += np.einsum('ri,xra->xria', rho_ob[0], rho_vb[1:4])
+                tau_ov_a = np.einsum('xri,xra->ria', rho_oa[1:4], rho_va[1:4]) * .5
+                tau_ov_b = np.einsum('xri,xra->ria', rho_ob[1:4], rho_vb[1:4]) * .5
+                rho_ov_a = np.vstack([rho_ov_a, tau_ov_a[np.newaxis]])
+                rho_ov_b = np.vstack([rho_ov_b, tau_ov_b[np.newaxis]])
+                w_ov_aa = np.einsum('xyr,xria->yria', wfxc[0,:,0], rho_ov_a)
+                w_ov_ab = np.einsum('xyr,xria->yria', wfxc[0,:,1], rho_ov_a)
+                w_ov_bb = np.einsum('xyr,xria->yria', wfxc[1,:,1], rho_ov_b)
+
+                iajb = lib.einsum('xria,xrjb->iajb', w_ov_aa, rho_ov_a)
+                aa += iajb
+
+                iajb = lib.einsum('xria,xrjb->iajb', w_ov_bb, rho_ov_b)
+                bb += iajb
+
+                iajb = lib.einsum('xria,xrjb->iajb', w_ov_ab, rho_ov_b)
+                ab += iajb
+            del ao, coords, fxc, iajb, rho0a, rho0b, rho_oa, rho_ob, rho_ov_a, rho_ov_b, \
+                rho_va, rho_vb, w_ov_aa, w_ov_ab, w_ov_bb, wfxc, tau_ov_a, tau_ov_b
         elif xctype == 'hf':
             pass
 

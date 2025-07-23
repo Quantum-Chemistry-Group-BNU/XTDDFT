@@ -782,6 +782,7 @@ if __name__ == "__main__":
         # basis='sto-3g',
         # basis='6-31g**',
         basis='cc-pvdz',
+        # cart = True,
         spin=1,
         charge=1,
         verbose=4
@@ -798,6 +799,7 @@ if __name__ == "__main__":
     # # add solvents
     # t_dft0 = time.time()
     # mf = dft.ROKS(mol).SMD()
+    # # mf = dft.ROKS(mol).PCM()
     # # mf.with_solvent.method = 'COSMO'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
     # # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
     # # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
@@ -828,21 +830,12 @@ if __name__ == "__main__":
     print("dft use {} s".format(t_dft1 - t_dft0))
 
     xstda = XsTDA(mol, mf)
+    t0 = time.time()
     xstda.nstates = 12
     xstda.cas = True
     xstda.truncate = 20
     xstda.correct = False
     e_eV, os, rs, v, pscsf = xstda.kernel()
+    t1 = time.time()
+    print("XsTDA use {} s".format(t1 - t0))
     xstda.analyze()
-
-    # import pandas as pd
-    # pd.DataFrame(e_eV).to_csv(xc + 'xsTDA.csv')
-
-    # from XTDA import XTDA
-    # xtda = XTDA(mol, mf)
-    # print('='*50)
-    # t0 = time.time()
-    # xtda.nstates = 12
-    # e_eV, os = xtda.my_tda()
-    # t1 = time.time()
-    # print("utda use {} s".format(t1 - t0))

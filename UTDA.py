@@ -44,7 +44,7 @@ class UTDA:
         nc, no, nv = tools.get_cov(self.mf)
         order = tools.order_pyscf2my(nc, no, nv)
         v = v[order, :]
-        print('my UTDA result is')
+        print('pyscf UTDA result is')
         print(f'{"num":>4} {"energy":>8} {"osc_str":>8}')
         for ni, ei, osi in zip(range(self.nstates), e*unit.ha2eV, os):
             print(f'{ni:4d} {ei:8.4f} {osi:8.4f}')
@@ -142,6 +142,15 @@ class UTDA:
 
         ab += np.einsum('iabj->iajb', eri_ab[:nocc_a, nocc_a:, nocc_b:, :nocc_b])
         # del dm, eri, focka, fockb, h1e, mo_a, mo_b,
+        if omega != 0:  # For RSH
+            with self.mol.with_range_coulomb(omega):
+                eri_aa = ao2mo.general(self.mol, [orbo_a, mo_a, mo_a, mo_a], compact=False)
+                eri_bb = ao2mo.general(self.mol, [orbo_b, mo_b, mo_b, mo_b], compact=False)
+                eri_aa = eri_aa.reshape(nocc_a, nmo_a, nmo_a, nmo_a)
+                eri_bb = eri_bb.reshape(nocc_b, nmo_b, nmo_b, nmo_b)
+                k_fac = alpha - hyb
+                aa -= np.einsum('ijba->iajb', eri_aa[:nocc_a,:nocc_a,nocc_a:,nocc_a:]) * k_fac
+                bb -= np.einsum('ijba->iajb', eri_bb[:nocc_b,:nocc_b,nocc_b:,nocc_b:]) * k_fac
 
         from pyscf.dft import xc_deriv
         ni = self.mf._numint
@@ -220,6 +229,41 @@ class UTDA:
                 ab += iajb
             del ao, coords, fxc, iajb, rho0a, rho0b, rho_o_a, rho_o_b, rho_ov_a, rho_ov_b, \
                 rho_v_a, rho_v_b, w_ov_aa, w_ov_ab, w_ov_bb, wfxc
+        elif xctype == 'MGGA':
+            ao_deriv = 1
+            for ao, mask, weight, coords \
+                    in ni.block_loop(mol, mf.grids, nao, ao_deriv, max_memory):
+                rho0a = make_rho(0, ao, mask, xctype)
+                rho0b = make_rho(1, ao, mask, xctype)
+                rho = (rho0a, rho0b)
+                fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype)[2]
+                wfxc = fxc * weight
+                rho_oa = lib.einsum('xrp,pi->xri', ao, orbo_a)
+                rho_ob = lib.einsum('xrp,pi->xri', ao, orbo_b)
+                rho_va = lib.einsum('xrp,pi->xri', ao, orbv_a)
+                rho_vb = lib.einsum('xrp,pi->xri', ao, orbv_b)
+                rho_ov_a = np.einsum('xri,ra->xria', rho_oa, rho_va[0])
+                rho_ov_b = np.einsum('xri,ra->xria', rho_ob, rho_vb[0])
+                rho_ov_a[1:4] += np.einsum('ri,xra->xria', rho_oa[0], rho_va[1:4])
+                rho_ov_b[1:4] += np.einsum('ri,xra->xria', rho_ob[0], rho_vb[1:4])
+                tau_ov_a = np.einsum('xri,xra->ria', rho_oa[1:4], rho_va[1:4]) * .5
+                tau_ov_b = np.einsum('xri,xra->ria', rho_ob[1:4], rho_vb[1:4]) * .5
+                rho_ov_a = np.vstack([rho_ov_a, tau_ov_a[np.newaxis]])
+                rho_ov_b = np.vstack([rho_ov_b, tau_ov_b[np.newaxis]])
+                w_ov_aa = np.einsum('xyr,xria->yria', wfxc[0,:,0], rho_ov_a)
+                w_ov_ab = np.einsum('xyr,xria->yria', wfxc[0,:,1], rho_ov_a)
+                w_ov_bb = np.einsum('xyr,xria->yria', wfxc[1,:,1], rho_ov_b)
+
+                iajb = lib.einsum('xria,xrjb->iajb', w_ov_aa, rho_ov_a)
+                aa += iajb
+
+                iajb = lib.einsum('xria,xrjb->iajb', w_ov_bb, rho_ov_b)
+                bb += iajb
+
+                iajb = lib.einsum('xria,xrjb->iajb', w_ov_ab, rho_ov_b)
+                ab += iajb
+            del ao, coords, fxc, iajb, rho0a, rho0b, rho_oa, rho_ob, rho_ov_a, rho_ov_b, \
+                rho_va, rho_vb, w_ov_aa, w_ov_ab, w_ov_bb, wfxc, tau_ov_a, tau_ov_b
         elif xctype == 'hf':
             pass
 
@@ -498,10 +542,11 @@ if __name__ == "__main__":
         # atom=atom.ch2o,
         # atom=atom.ch2s,
         # atom=atom.ch2o_vacuum,
-        # atom=atom.ch2o_cyclohexane,
+        atom=atom.ch2o_cyclohexane,
         # atom=atom.ch2o_diethylether,
-        atom=atom.ch2o_thf,
-        basis='cc-pvdz',
+        # atom=atom.ch2o_thf,
+        # basis='cc-pvdz',
+        basis='def2-tzvpp',
         # basis='aug-cc-pvtz',
         # basis='6-31g*',
         # basis='sto-3g',
@@ -520,20 +565,21 @@ if __name__ == "__main__":
     # mol.basis = basis
     # mol.build()
 
-    # add solvents
-    t_dft0 = time.time()
-    # mf = dft.UKS(mol).SMD()
-    mf = dft.UKS(mol).PCM()
-    mf.with_solvent.method = 'IEF-PCM'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
-    # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
-    # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
-    # mf.with_solvent.eps = 4.2400  # for DiethylEther 乙醚
-    mf.with_solvent.eps = 7.4257  # for TetraHydroFuran 四氢呋喃
+    # # add solvents
+    # t_dft0 = time.time()
+    # # mf = dft.UKS(mol).SMD()
+    # mf = dft.UKS(mol).PCM()
+    # mf.with_solvent.method = 'IEF-PCM'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
+    # # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
+    # # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
+    # # mf.with_solvent.eps = 4.2400  # for DiethylEther 乙醚
+    # mf.with_solvent.eps = 7.4257  # for TetraHydroFuran 四氢呋喃
 
-    # mf = dft.UKS(mol)
+    mf = dft.UKS(mol)
     # xc = 'svwn'
     # xc = 'blyp'
-    xc = 'b3lyp'
+    # xc = 'b3lyp'
+    xc = 'cam-b3lyp'
     # xc = 'pbe0'
     # xc = 'pbe38'
     # xc = 'hf'

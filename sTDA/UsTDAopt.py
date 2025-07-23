@@ -837,10 +837,10 @@ if __name__ == "__main__":
         # atom=atom.perylene,
         # atom=atom.n2,  # unit is Angstrom
         # atom=atom.ch2o,
-        atom=atom.ch2o_vacuum,
+        # atom=atom.ch2o_vacuum,
         # atom=atom.ch2o_cyclohexane,
         # atom=atom.ch2o_diethylether,
-        # atom=atom.ch2o_thf,
+        atom=atom.ch2o_thf,
         # atom=atom.ch2s,
         # atom=atom.c2h4foh,  # unit is Angstrom
         # atom = atom.indigo,
@@ -864,17 +864,18 @@ if __name__ == "__main__":
     # mol.basis = basis
     # mol.build()
 
-    # # add solvents
-    # t_dft0 = time.time()
-    # mf = dft.UKS(mol).SMD()
-    # # mf.with_solvent.method = 'COSMO'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
-    # # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
-    # # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
-    # # mf.with_solvent.eps = 4.2400  # for DiethylEther 乙醚
-    # # mf.with_solvent.eps = 7.4257  # for TetraHydroFuran 四氢呋喃
-
+    # add solvents
     t_dft0 = time.time()
-    mf = dft.UKS(mol)
+    mf = dft.UKS(mol).SMD()
+    # mf = dft.ROKS(mol).PCM()
+    # mf.with_solvent.method = 'COSMO'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
+    # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
+    # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
+    # mf.with_solvent.eps = 4.2400  # for DiethylEther 乙醚
+    mf.with_solvent.eps = 7.4257  # for TetraHydroFuran 四氢呋喃
+
+    # t_dft0 = time.time()
+    # mf = dft.UKS(mol)
     # mf.init_guess = '1e'
     # mf.init_guess = 'atom'
     # mf.init_guess = 'huckel'
@@ -929,21 +930,8 @@ if __name__ == "__main__":
     ustda.nstates = 12
     ustda.truncate = 20.0
     ustda.cas = True
-    ustda.paramtype = 'os'
+    ustda.paramtype = 'cs'
     e_eV, os, rs, v, pscsf = ustda.kernel()
     t1 = time.time()
     print("ustda use {} s".format(t1 - t0))
     # ustda.analyze()
-
-    # import pandas as pd
-    # pd.DataFrame(e_eV).to_csv(xc + 'UsTDA.csv')
-
-    # from UTDA import UTDA
-    # utda = UTDA(mol, mf)
-    # print('='*50)
-    # t0 = time.time()
-    # utda.nstates = 12
-    # # e_eV = utda.my_utda()
-    # utda.pyscf_tda()
-    # t1 = time.time()
-    # print("utda use {} s".format(t1 - t0))

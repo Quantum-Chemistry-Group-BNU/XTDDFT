@@ -92,6 +92,12 @@ class TDA:
         omega, alpha, hyb = ni.rsh_and_hybrid_coeff(self.mf.xc, mol.spin)
         # print('omega alpha hyb', omega, alpha, hyb)
         add_hf_(a, hyb)
+        if omega != 0:  # For RSH
+            with mol.with_range_coulomb(omega):
+                eri_mo = ao2mo.general(mol, [orbo,mo,mo,mo], compact=False)
+                eri_mo = eri_mo.reshape(nocc,nmo,nmo,nmo)
+                k_fac = alpha - hyb
+                a -= np.einsum('ijba->iajb', eri_mo[:nocc,:nocc,nocc:,nocc:]) * k_fac
 
         xctype = ni._xc_type(self.mf.xc)
         dm0 = self.mf.make_rdm1(mo_coeff, mo_occ)
@@ -144,6 +150,26 @@ class TDA:
                 iajb = lib.einsum('xria,xrjb->iajb', w_ov, rho_ov) * 2
                 a += iajb
                 # b += iajb
+
+        elif xctype == 'MGGA':
+            ao_deriv = 1
+            for ao, mask, weight, coords \
+                    in ni.block_loop(mol, mf.grids, nao, ao_deriv, max_memory):
+                rho = make_rho(0, ao, mask, xctype)
+                fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype)[2]
+                wfxc = fxc * weight
+                rho_o = lib.einsum('xrp,pi->xri', ao, orbo)
+                rho_v = lib.einsum('xrp,pi->xri', ao, orbv)
+                rho_ov = np.einsum('xri,ra->xria', rho_o, rho_v[0])
+                rho_ov[1:4] += np.einsum('ri,xra->xria', rho_o[0], rho_v[1:4])
+                tau_ov = np.einsum('xri,xra->ria', rho_o[1:4], rho_v[1:4]) * .5
+                rho_ov = np.vstack([rho_ov, tau_ov[np.newaxis]])
+                w_ov = np.einsum('xyr,xria->yria', wfxc, rho_ov)
+                iajb = lib.einsum('xria,xrjb->iajb', w_ov, rho_ov) * 2
+                a += iajb
+
+        elif xctype == 'HF':
+            pass
 
         self.nc = nocc
         self.nv = nvir
@@ -299,11 +325,11 @@ if __name__ == "__main__":
 
     tda = TDA(mol, mf, singlet=singlet, nstates=10)
     tda.nstates = 12
-    tda.pyscf_tda(conv_tol=1e-6, is_analyze=True)
+    tda.pyscf_tda(conv_tol=1e-6, is_analyze=False)
 
     print("="*50)
     t0 = time.time()
-    e_eV, os, rs, v = tda.kernel(is_analyze=is_analyze)
+    e_eV, os, rs, v = tda.kernel()
     t1 = time.time()
     print('tda use {} s'.format(t1 - t0))
 
