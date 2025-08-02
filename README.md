@@ -11,11 +11,12 @@
 
 1. Davidson diagonalization for X-TDA and XSF-TDA
 
-2. State interaction for treating spin-orbit couplings
+2. State interaction for treating spin-orbit couplings:
+   This is required in many applications such as zero-field splittings for organic and rare-earth systems.
 
-3. Gradients
+4. Gradients for excited state geometry optimization
 
-4. Non-adiabatic couplings
+5. Non-adiabatic couplings for non-adiabatic dynamics
 
-5. GPU for large systems
+6. GPU for large systems
 
