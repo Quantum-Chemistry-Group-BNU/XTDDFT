@@ -12,6 +12,7 @@ from pyscf.lib import logger
 
 from eta import eta
 from utils import atom, unit
+"""not update for a long time, so somewhere may not be as satisfactory as XsTDA and UsTDA"""
 
 
 @jit(nopython=True)

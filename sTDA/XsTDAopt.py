@@ -9,8 +9,9 @@ import numpy as np
 import pandas as pd
 import basis_set_exchange as bse
 from numba import jit
-from pyscf import dft, gto, scf, tddft
+from pyscf import dft, gto, scf, tddft, lo
 from pyscf.lib import logger
+from pyscf.tools import molden
 
 import tools
 from eta import eta
@@ -176,6 +177,12 @@ class XsTDA:
             nocc_b = len(occidx_b)
             nvir_b = len(viridx_b)
             mo_coeff = mo_coeff[:, index]
+
+        # in analyze, if self.cas=True orbital begin at frozen orbital
+        if self.cas:
+            self.frozen_nc = np.min(index)
+        else:
+            self.frozen_nc = 0
 
         # Section: compute Fock matrix
         h1e = self.mf.get_hcore()
@@ -732,11 +739,7 @@ class XsTDA:
         nc = self.nc
         nv = self.nv
         no = self.no
-        print(nc)
-        print(no)
-        print(nv)
-        print("if select active orbital, "
-              "Molecular orbitals are numbered starting with the lowest energy active orbital.")
+        fnc = self.frozen_nc
         for nstate in range(self.nstates):
             value = self.v[:,nstate]
             x_cv_aa = value[:self.lcva]
@@ -746,22 +749,22 @@ class XsTDA:
             print(f'Excited state {nstate + 1} {self.e[nstate] * unit.ha2eV:10.5f} eV')
             if self.truncate:
                 for i in np.where(abs(x_cv_aa) > 0.1)[0]:
-                    print(f'CV(aa) {self.pscsfcv_i[i]+1}a -> {self.pscsfcv_a[i]+1+nc+no}a {x_cv_aa[i]:10.5f}')
+                    print(f'CV(aa) {fnc+self.pscsfcv_i[i]+1}a -> {fnc+self.pscsfcv_a[i]+1+nc+no}a {x_cv_aa[i]:10.5f}')
                 for i in np.where(abs(x_ov_aa) > 0.1)[0]:
-                    print(f'OV(aa) {self.pscsfov_a_i[i]+1+nc}a -> {self.pscsfov_a_a[i]+1+nc+no}a {x_ov_aa[i]:10.5f}')
+                    print(f'OV(aa) {fnc+self.pscsfov_a_i[i]+1+nc}a -> {fnc+self.pscsfov_a_a[i]+1+nc+no}a {x_ov_aa[i]:10.5f}')
                 for i in np.where(abs(x_co_bb) > 0.1)[0]:
-                    print(f'CO(bb) {self.pscsfco_b_i[i]+1}b -> {self.pscsfco_b_a[i]+1+nc}b {x_co_bb[i]:10.5f}')
+                    print(f'CO(bb) {fnc+self.pscsfco_b_i[i]+1}b -> {fnc+self.pscsfco_b_a[i]+1+nc}b {x_co_bb[i]:10.5f}')
                 for i in np.where(abs(x_cv_bb) > 0.1)[0]:
-                    print(f'CV(bb) {self.pscsfcv_i[i]+1}b -> {self.pscsfcv_a[i]+1+nc+no}b {x_cv_bb[i]:10.5f}')
+                    print(f'CV(bb) {fnc+self.pscsfcv_i[i]+1}b -> {fnc+self.pscsfcv_a[i]+1+nc+no}b {x_cv_bb[i]:10.5f}')
             else:
                 for o, v in zip(*np.where(abs(x_cv_aa) > 0.1)):
-                    print(f'CV(aa) {o + 1}a -> {v + 1 + nc+no}a {x_cv_aa[o, v]:10.5f}')
+                    print(f'CV(aa) {fnc+o + 1}a -> {fnc+v + 1 + nc+no}a {x_cv_aa[o, v]:10.5f}')
                 for o, v in zip(*np.where(abs(x_ov_aa) > 0.1)):
-                    print(f'OV(aa) {nc+o + 1}a -> {v + 1+nc+no}a {x_ov_aa[o, v]:10.5f}')
+                    print(f'OV(aa) {fnc+nc+o + 1}a -> {fnc+v + 1+nc+no}a {x_ov_aa[o, v]:10.5f}')
                 for o, v in zip(*np.where(abs(x_co_bb) > 0.1)):
-                    print(f'CO(bb) {o + 1}b -> {v + 1+nc}b {x_co_bb[o, v]:10.5f}')
+                    print(f'CO(bb) {fnc+o + 1}b -> {fnc+v + 1+nc}b {x_co_bb[o, v]:10.5f}')
                 for o, v in zip(*np.where(abs(x_cv_bb) > 0.1)):
-                    print(f'CV(bb) {o + 1}b -> {v + 1 + nc+no}b {x_cv_bb[o, v]:10.5f}')
+                    print(f'CV(bb) {fnc+o + 1}b -> {fnc+v + 1 + nc+no}b {x_cv_bb[o, v]:10.5f}')
 
 
 if __name__ == "__main__":
@@ -795,6 +798,10 @@ if __name__ == "__main__":
     #     basis = f.read()
     # mol.basis = basis
     # mol.build()
+
+    # # export molden file
+    # c_loc_orth = lo.orth.orth_ao(mol)
+    # molden.from_mo(mol, 'ch2o.molden', c_loc_orth)
 
     # # add solvents
     # t_dft0 = time.time()

@@ -938,12 +938,13 @@ class X_TDA():
 if __name__ == "__main__":
     mol = gto.M(
         # atom=atom.ch2o,
-        # atom=atom.n2,
-        atom=atom.ch2o_vacuum,
+        atom=atom.n2,
+        # atom=atom.ch2o_vacuum,
         # atom=atom.ch2o_Cyclohexane,
         # atom=atom.ch2o_DiethylEther,
         # atom=atom.ch2o_TetraHydroFuran,
-        basis='cc-pvdz',
+        # basis='cc-pvdz',
+        basis='def2-tzvpp',
         # basis='aug-cc-pvtz',
         # basis='sto-3g',
         unit='A',
@@ -973,7 +974,8 @@ if __name__ == "__main__":
     mf = dft.ROKS(mol)  # use ROKS is for use ROKS orbital, in paper assume ROKS orbital same with UKS orbital
     # xc = 'svwn'
     # xc = 'blyp'
-    xc = 'b3lyp'
+    # xc = 'b3lyp'
+    xc = 'cam-b3lyp'
     # xc = '0.50*HF + 0.50*B88 + GGA_C_LYP'  # BHHLYP
     # xc = 'pbe0'
     # xc = 'pbe38'
