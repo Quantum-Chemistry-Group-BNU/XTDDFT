@@ -83,10 +83,12 @@ class XTDA:
         fij_a2 = focka2[:nocc_a, :nocc_a]
         fij_b2 = fockb2[:nocc_b, :nocc_b]
 
-        # Section: compute two electron integral and XC integral
-        # use self.mf.mol general two-electron repulsion integral
-        eri = ao2mo.general(self.mf.mol, [mo_a, mo_a, mo_a, mo_a], compact=False)
-        eri = eri.reshape(nmo_a, nmo_a, nmo_a, nmo_a)
+        # # Section: compute two electron integral and XC integral
+        # # use self.mf.mol general two-electron repulsion integral
+        # eri = ao2mo.general(self.mf.mol, [mo_a, mo_a, mo_a, mo_a], compact=False)
+        # eri = eri.reshape(nmo_a, nmo_a, nmo_a, nmo_a)
+        eri = ao2mo.general(self.mol, [orbo_a, mo_a, mo_a, mo_a], compact=False)
+        eri = eri.reshape(nocc_a, nmo_a, nmo_a, nmo_a)
 
         # # use this code can compare with test/test_RO_UTDA.py and remember remove Fock matrix in A matrix
         # e_ia_a = (mo_energy[viridx_a, None] - mo_energy[occidx_a]).T
@@ -937,14 +939,14 @@ class X_TDA():
 
 if __name__ == "__main__":
     mol = gto.M(
-        # atom=atom.ch2o,
-        atom=atom.n2,
+        # atom=atom.ch2o_vacuum,
+        atom=atom.n2_,
         # atom=atom.ch2o_vacuum,
         # atom=atom.ch2o_Cyclohexane,
         # atom=atom.ch2o_DiethylEther,
         # atom=atom.ch2o_TetraHydroFuran,
-        # basis='cc-pvdz',
-        basis='def2-tzvpp',
+        basis='cc-pvdz',
+        # basis='def2-tzvpp',
         # basis='aug-cc-pvtz',
         # basis='sto-3g',
         unit='A',
@@ -975,7 +977,8 @@ if __name__ == "__main__":
     # xc = 'svwn'
     # xc = 'blyp'
     # xc = 'b3lyp'
-    xc = 'cam-b3lyp'
+    # xc = 'cam-b3lyp'
+    xc = 'wb97xd'
     # xc = '0.50*HF + 0.50*B88 + GGA_C_LYP'  # BHHLYP
     # xc = 'pbe0'
     # xc = 'pbe38'

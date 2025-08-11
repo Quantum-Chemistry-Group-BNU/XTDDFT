@@ -1,5 +1,7 @@
 #!/usr/bin/env python
+import os
 import sys
+os.environ["OMP_NUM_THREADS"] = "4"
 sys.path.append('../')
 import time
 import scipy
@@ -10,7 +12,7 @@ from numba import jit
 from functools import reduce
 from pyscf import dft, gto, scf, tddft, lo
 from pyscf.lib import logger
-from pyscf.tools import molden
+from pyscf.tools import molden, cubegen
 
 import tools
 from eta import eta
@@ -649,7 +651,7 @@ class UsTDA:
             self.xyov_a = self.v.T[:, nc*nv:(nc+no)*nv]  # V_ov_a
             self.xyco_b = self.v.T[:, (nc+no)*nv:(nc+no)*nv+nc*no]  # V_co_b
             self.xycv_b = self.v.T[:, (nc+no)*nv+nc*no:]  # V_cv_b
-        os = self.osc_str()  # oscillator strength
+        self.os = self.osc_str()  # oscillator strength
         # before calculate rot_str, check whether mol is chiral mol
         if gto.mole.chiral_mol(mol):
             rs = self.rot_str()
@@ -662,14 +664,14 @@ class UsTDA:
         # logger.info(self.mf, 'deltaS2 is \n{}'.format(dS2))
         print('my UsTDA result is')
         print(f'{"num":>4} {"energy":>8} {"wav_len"} {"osc_str":>8} {"rot_str":>8} {"deltaS2":>8}')
-        for ni, ei, wli, osi, rsi, ds2i in zip(range(self.nstates), self.e_eV, unit.eVxnm/self.e_eV, os, rs, dS2):
+        for ni, ei, wli, osi, rsi, ds2i in zip(range(self.nstates), self.e_eV, unit.eVxnm/self.e_eV, self.os, rs, dS2):
             print(f'{ni:4d} {ei:8.4f} {wli:8.4f} {osi:8.4f} {rsi:8.4f} {ds2i:8.4f}')
         if self.savedata:
             pd.DataFrame(
-                np.concatenate((unit.eVxnm / np.expand_dims(self.e_eV, axis=1), np.expand_dims(os, axis=1)), axis=1)
+                np.concatenate((unit.eVxnm / np.expand_dims(self.e_eV, axis=1), np.expand_dims(self.os, axis=1)), axis=1)
             ).to_csv('uvspec_data.csv', index=False, header=None)
         # np.save("energy_ustda.npy", self.e)
-        return self.e_eV, os, rs, self.v, pscsf_fdiag
+        return self.e_eV, self.os, rs, self.v, pscsf_fdiag
 
     def deltaS2(self):
         orbo_a = self.mo_coeff_a[:, self.occidx_a]
@@ -800,11 +802,13 @@ class UsTDA:
         # np.save("rot_str_stda.npy", f)
         return f
 
-    def analyze(self):
+    def analyze(self, out_filename='UsTDA'):
         nc = self.nc
         nv = self.nv
         no = self.no
         fnc = self.frozen_nc
+        out_cube = [0, np.argmax(self.os)]
+        orbital = []  # record output orbital number
         for nstate in range(self.nstates):
             value = self.v[:,nstate]
             x_cv_aa = value[:self.lcva]
@@ -812,25 +816,57 @@ class UsTDA:
             x_co_bb = value[self.lcva+self.lova:self.lcva+self.lova+self.lcob]
             x_cv_bb = value[self.lcva+self.lova+self.lcob:]
             print(f'Excited state {nstate + 1} {self.e[nstate] * unit.ha2eV:10.5f} eV')
+            # out_excittype = np.argmax((np.max(abs(x_cv_aa)), np.max(abs(x_ov_aa)), np.max(abs(x_co_bb)), np.max(abs(x_cv_bb))))
             if self.truncate:
                 for i in np.where(abs(x_cv_aa) > 0.1)[0]:
-                    print(f'CV(aa) {fnc+self.pscsfcv_i[i]+1}a -> {fnc+self.pscsfcv_a[i]+1+nc+no}a {x_cv_aa[i]:10.5f}')
+                    print(f'CV(aa) {fnc+self.pscsfcv_i[i]+1} -> {fnc+self.pscsfcv_a[i]+1+nc+no} {x_cv_aa[i]:10.5f}')
+                    # if nstate in out_cube and out_excittype == 0 and i == np.argmax(abs(x_cv_aa)):
+                    if nstate in out_cube:
+                        orbital.append(fnc+self.pscsfcv_i[i])
+                        orbital.append(fnc+self.pscsfcv_a[i]+nc+no)
                 for i in np.where(abs(x_ov_aa) > 0.1)[0]:
-                    print(f'OV(aa) {fnc+self.pscsfov_a_i[i]+1+nc}a -> {fnc+self.pscsfov_a_a[i]+1+nc+no}a {x_ov_aa[i]:10.5f}')
+                    print(f'OV(aa) {fnc+self.pscsfov_a_i[i]+1+nc} -> {fnc+self.pscsfov_a_a[i]+1+nc+no} {x_ov_aa[i]:10.5f}')
+                    if nstate in out_cube:
+                        orbital.append(fnc+self.pscsfov_a_i[i]+nc)
+                        orbital.append(fnc+self.pscsfov_a_a[i]+nc+no)
                 for i in np.where(abs(x_co_bb) > 0.1)[0]:
-                    print(f'CO(bb) {fnc+self.pscsfco_b_i[i]+1}b -> {fnc+self.pscsfco_b_a[i]+1+nc}b {x_co_bb[i]:10.5f}')
+                    print(f'CO(bb) {fnc+self.pscsfco_b_i[i]+1} -> {fnc+self.pscsfco_b_a[i]+1+nc} {x_co_bb[i]:10.5f}')
+                    if nstate in out_cube:
+                        orbital.append(fnc+self.pscsfco_b_i[i])
+                        orbital.append(fnc+self.pscsfco_b_a[i]+nc)
                 for i in np.where(abs(x_cv_bb) > 0.1)[0]:
-                    print(f'CV(bb) {fnc+self.pscsfcv_i[i]+1}b -> {fnc+self.pscsfcv_a[i]+1+nc+no}b {x_cv_bb[i]:10.5f}')
+                    print(f'CV(bb) {fnc+self.pscsfcv_i[i]+1} -> {fnc+self.pscsfcv_a[i]+1+nc+no} {x_cv_bb[i]:10.5f}')
+                    if nstate in out_cube:
+                        orbital.append(fnc+self.pscsfcv_i[i])
+                        orbital.append(fnc+self.pscsfcv_a[i]+nc+no)
             else:
                 for o, v in zip(*np.where(abs(x_cv_aa) > 0.1)):
-                    print(f'CV(aa) {fnc+o + 1}a -> {fnc+v + 1 + nc+no}a {x_cv_aa[o, v]:10.5f}')
+                    print(f'CV(aa) {fnc+o + 1} -> {fnc+v + 1 + nc+no} {x_cv_aa[o, v]:10.5f}')
+                    if nstate in out_cube:
+                        orbital.append(fnc+o)
+                        orbital.append(fnc+v+nc+no)
                 for o, v in zip(*np.where(abs(x_ov_aa) > 0.1)):
-                    print(f'OV(aa) {fnc+nc+o + 1}a -> {fnc+v + 1+nc+no}a {x_ov_aa[o, v]:10.5f}')
+                    print(f'OV(aa) {fnc+nc+o + 1} -> {fnc+v + 1+nc+no} {x_ov_aa[o, v]:10.5f}')
+                    if nstate in out_cube:
+                        orbital.append(fnc+nc+o)
+                        orbital.append(fnc+v+nc+no)
                 for o, v in zip(*np.where(abs(x_co_bb) > 0.1)):
-                    print(f'CO(bb) {fnc+o + 1}b -> {fnc+v + 1+nc}b {x_co_bb[o, v]:10.5f}')
+                    print(f'CO(bb) {fnc+o + 1} -> {fnc+v + 1+nc} {x_co_bb[o, v]:10.5f}')
+                    if nstate in out_cube:
+                        orbital.append(fnc+o)
+                        orbital.append(fnc+v+nc)
                 for o, v in zip(*np.where(abs(x_cv_bb) > 0.1)):
-                    print(f'CV(bb) {fnc+o + 1}b -> {fnc+v + 1 + nc+no}b {x_cv_bb[o, v]:10.5f}')
-
+                    print(f'CV(bb) {fnc+o + 1} -> {fnc+v + 1 + nc+no} {x_cv_bb[o, v]:10.5f}')
+                    if nstate in out_cube:
+                        orbital.append(fnc+o)
+                        orbital.append(fnc+v+nc+no)
+        orbital = np.unique(np.array(orbital))
+        for i in orbital:
+            cubegen.orbital(mol, out_filename+str(i + 1)+'alpha.cube', mf.mo_coeff[0, :, i])
+            cubegen.orbital(mol, out_filename+str(i + 1)+'beta.cube', mf.mo_coeff[1, :, i])
+        # export molden file
+        c_loc_orth = lo.orth.orth_ao(mol)
+        molden.from_mo(mol, out_filename+'.molden', c_loc_orth)
 
 
 if __name__ == "__main__":
@@ -841,13 +877,13 @@ if __name__ == "__main__":
         # atom=atom.ch2o_vacuum,
         # atom=atom.ch2o_cyclohexane,
         # atom=atom.ch2o_diethylether,
-        atom=atom.ch2o_thf,
+        atom=atom.ch2o_,
         # atom=atom.ch2s,
         # atom=atom.c2h4foh,  # unit is Angstrom
-        # atom = atom.indigo,
+        # atom=atom.indigo,
         # atom=atom.ttm1cz,  # unit is Angstrom
-        unit="A",
-        # unit="B",  # https://doi.org/10.1016/j.comptc.2014.02.023 use bohr
+        # unit="A",
+        unit="B",  # https://doi.org/10.1016/j.comptc.2014.02.023 use bohr
         # basis='aug-cc-pvtz',
         # basis='sto-3g',
         basis='cc-pvdz',
@@ -865,31 +901,29 @@ if __name__ == "__main__":
     # mol.basis = basis
     # mol.build()
 
-    # # export molden file
-    # c_loc_orth = lo.orth.orth_ao(mol)
-    # molden.from_mo(mol, 'ch2o.molden', c_loc_orth)
-
-    # add solvents
-    t_dft0 = time.time()
-    mf = dft.UKS(mol).SMD()
-    # mf = dft.ROKS(mol).PCM()
-    # mf.with_solvent.method = 'COSMO'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
-    # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
-    # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
-    # mf.with_solvent.eps = 4.2400  # for DiethylEther 乙醚
-    mf.with_solvent.eps = 7.4257  # for TetraHydroFuran 四氢呋喃
-
+    # # add solvents
     # t_dft0 = time.time()
-    # mf = dft.UKS(mol)
+    # mf = dft.UKS(mol).SMD()
+    # # mf = dft.UKS(mol).PCM()
+    # # mf.with_solvent.method = 'COSMO'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
+    # # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
+    # # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
+    # # # mf.with_solvent.eps = 2.3741  # for toluene 甲苯
+    # # mf.with_solvent.eps = 4.2400  # for DiethylEther 乙醚
+    # mf.with_solvent.eps = 7.4257  # for TetraHydroFuran 四氢呋喃
+
+    t_dft0 = time.time()
+    mf = dft.UKS(mol)
     # mf.init_guess = '1e'
     # mf.init_guess = 'atom'
     # mf.init_guess = 'huckel'
-    mf.conv_tol = 1e-11
-    mf.conv_tol_grad = 1e-8
+    mf.conv_tol = 1e-8
+    mf.conv_tol_grad = 1e-5
     mf.max_cycle = 200
     # xc = 'svwn'
     # xc = 'blyp'
-    xc = 'b3lyp'
+    # xc = 'b3lyp'
+    xc = 'wb97xd3'
     # xc = 'pbe0'
     # xc = 'pbe38'
     # xc = '0.50*HF + 0.50*B88 + GGA_C_LYP'  # BHHLYP
@@ -939,4 +973,4 @@ if __name__ == "__main__":
     e_eV, os, rs, v, pscsf = ustda.kernel()
     t1 = time.time()
     print("ustda use {} s".format(t1 - t0))
-    ustda.analyze()
+    # ustda.analyze(out_filename='solvent-UsTDA')
