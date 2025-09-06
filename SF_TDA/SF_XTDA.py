@@ -190,12 +190,14 @@ class SA_SF_TDA():
             self.mo_energy = mf.mo_energy
             self.mo_coeff = mf.mo_coeff
             self.mo_occ = mf.mo_occ
+            self.type_u = True
         else: # ROKS
             self.mo_energy = np.array([mf.mo_energy, mf.mo_energy])
             self.mo_coeff = np.array([mf.mo_coeff, mf.mo_coeff])
             self.mo_occ = np.zeros((2,len(mf.mo_coeff)))
             self.mo_occ[0][np.where(mf.mo_occ>=1)[0]]=1
             self.mo_occ[1][np.where(mf.mo_occ>=2)[0]]=1
+            self.type_u = False
 
         self.mol = mf.mol
         self.nao = self.mol.nao_nr()
@@ -643,8 +645,14 @@ class SA_SF_TDA():
     def calculate_irrep(self,orb1,orb2):
         orb_sym = self.mf.get_orbsym(self.mf.mo_coeff)
         ground_sym = self.mf.get_wfnsym()
-        orb1_sym = np.array([orb_sym[orb1]])
-        orb2_sym = np.array([orb_sym[orb2]])
+        #print('orb_sym',orb_sym)
+        #print(orb1,orb2)
+        if self.type_u:
+            orb1_sym = np.array([orb_sym[0][orb1]])
+            orb2_sym = np.array([orb_sym[1][orb2]])
+        else:
+            orb1_sym = np.array([orb_sym[orb1]])
+            orb2_sym = np.array([orb_sym[orb2]])
         direct_s = direct_prod(orb1_sym,orb2_sym,self.mol.groupname)
         direct_s = direct_prod(direct_s[0],np.array(ground_sym),self.mol.groupname)
         return self.mol.irrep_name[direct_s[0][0]]
@@ -1016,7 +1024,9 @@ class SA_SF_TDA():
                 if self.A.shape[0] < 1000:
                     e,v = scipy.linalg.eigh(self.A)
                 else:
-                    e,v = scipy.sparse.linalg.eigsh(self.A,k=nstates,which='SA')
+                    dim_n = self.A.shape[0]
+                    nroots = min(nstates+5,nroots)
+                    e,v = scipy.sparse.linalg.eigsh(self.A,k=nroots,which='SA')
                 self.e = e[:nstates]
                 self.v = v[:,:nstates]
         else:
@@ -1029,7 +1039,9 @@ class SA_SF_TDA():
                 if self.A.shape[0] < 1000:
                     e,v = scipy.linalg.eigh(self.A)
                 else:
-                    e,v = scipy.sparse.linalg.eigsh(self.A,k=nstates,which='SA')
+                    dim_n = self.A.shape[0]
+                    nroots = min(dim_n,nstates+5)
+                    e,v = scipy.sparse.linalg.eigsh(self.A,k=nroots,which='SA')
                 self.e = e[:nstates]
                 self.v = v[:,:nstates]
         return self.e*27.21138505, self.v
