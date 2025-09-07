@@ -1025,7 +1025,7 @@ class SA_SF_TDA():
                     e,v = scipy.linalg.eigh(self.A)
                 else:
                     dim_n = self.A.shape[0]
-                    nroots = min(nstates+5,nroots)
+                    nroots = min(nstates+5,dim_n)
                     e,v = scipy.sparse.linalg.eigsh(self.A,k=nroots,which='SA')
                 self.e = e[:nstates]
                 self.v = v[:,:nstates]
