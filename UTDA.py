@@ -378,24 +378,24 @@ class UTDA:
         self.xyov_a = self.v.T[:, nc * nv:(nc + no) * nv]  # V_ov_a
         self.xyco_b = self.v.T[:, (nc + no) * nv:(nc + no) * nv + nc * no]  # V_co_b
         self.xycv_b = self.v.T[:, (nc + no) * nv + nc * no:]  # V_cv_b
-        os = self.osc_str()  # oscillator strength
+        self.os = self.osc_str()  # oscillator strength
         # before calculate rot_str, check whether mol is chiral mol
         if gto.mole.chiral_mol(self.mol):
             rs = self.rot_str()
         else:
             rs = np.zeros(self.nstates)
             # logger.info(self.mf, 'molecule do not have chiral')
-        dS2 = self.deltaS2()
+        self.dS2 = self.deltaS2()
         # logger.info(self.mf, 'oscillator strength (length form) \n{}'.format(self.os))
         # logger.info(self.mf, 'rotatory strength (cgs unit) \n{}'.format(self.rs))
         # logger.info(self.mf, 'deltaS2 is \n{}'.format(dS2))
         print('UTDA result is')
         print(f'{"num":>4} {"energy":>8} {"wav_len":>8} {"osc_str":>8} {"rot_str":>8} {"deltaS2":>8}')
-        for ni, ei, wli, osi, rsi, ds2i in zip(range(self.nstates), self.e_eV, unit.eVxnm/self.e_eV, os, rs, dS2):
+        for ni, ei, wli, osi, rsi, ds2i in zip(range(self.nstates), self.e_eV, unit.eVxnm/self.e_eV, self.os, rs, self.dS2):
             print(f'{ni:4d} {ei:8.4f} {wli:8.4f} {osi:8.4f} {rsi:8.4f} {ds2i:8.4f}')
         if self.savedata:
             pd.DataFrame(
-                np.concatenate((unit.eVxnm / np.expand_dims(self.e_eV, axis=1), np.expand_dims(os, axis=1)), axis=1)
+                np.concatenate((unit.eVxnm / np.expand_dims(self.e_eV, axis=1), np.expand_dims(self.os, axis=1)), axis=1)
             ).to_csv('uvspec_data.csv', index=False, header=None)
         return self.e_eV, os, rs, self.v
 
@@ -525,15 +525,19 @@ class UTDA:
             x_ov_aa = value[nc*nv:(nc+no)*nv].reshape(no,nv)
             x_co_bb = value[(nc+no)*nv:(nc+no)*nv+nc*no].reshape(nc,no)
             x_cv_bb = value[(nc+no)*nv+nc*no:].reshape(nc, nv)
-            print(f'Excited state {nstate + 1} {self.e[nstate] * unit.ha2eV:10.5f} eV')
+            print(
+                f'D{nstate + 1}'+r"    w:"+f'{self.e[nstate] * unit.ha2eV:10.4f} eV'
+                + r"    d<S^2>:" + f'{self.dS2[nstate]:8.4f}'
+                + r"    f:" + f'{self.os[nstate]:8.4f}'
+            )
             for o, v in zip(*np.where(abs(x_cv_aa) > 0.1)):
-                print(f'CV(aa) {o + 1}a -> {v + 1 + nc+no}a {x_cv_aa[o, v]:10.5f}')
+                print(f'    CV(aa) {o + 1:3d} -> {v + 1 + nc+no:3d}    c_i: {x_cv_aa[o, v]:8.5f}    Per: {100*x_cv_aa[o,v]**2:5.2f}%')
             for o, v in zip(*np.where(abs(x_ov_aa) > 0.1)):
-                print(f'OV(aa) {nc+o + 1}a -> {v + 1+nc+no}a {x_ov_aa[o, v]:10.5f}')
+                print(f'    OV(aa) {nc+o + 1:3d} -> {v + 1+nc+no:3d}    c_i: {x_ov_aa[o, v]:8.5f}    Per: {100*x_ov_aa[o,v]**2:5.2f}%')
             for o, v in zip(*np.where(abs(x_co_bb) > 0.1)):
-                print(f'CO(bb) {o + 1}b -> {v + 1+nc}b {x_co_bb[o, v]:10.5f}')
+                print(f'    CO(bb) {o + 1:3d} -> {v + 1+nc:3d}    c_i: {x_co_bb[o, v]:8.5f}    Per: {100*x_co_bb[o,v]**2:5.2f}%')
             for o, v in zip(*np.where(abs(x_cv_bb) > 0.1)):
-                print(f'CV(bb) {o + 1}b -> {v + 1 + nc+no}b {x_cv_bb[o, v]:10.5f}')
+                print(f'    CV(bb) {o + 1:3d} -> {v + 1 + nc+no:3d}    c_i: {x_cv_bb[o, v]:8.5f}    Per: {100*x_cv_bb[o,v]**2:5.2f}%')
 
 
 if __name__ == "__main__":
