@@ -655,7 +655,10 @@ class SA_SF_TDA():
             orb2_sym = np.array([orb_sym[orb2]])
         direct_s = direct_prod(orb1_sym,orb2_sym,self.mol.groupname)
         direct_s = direct_prod(direct_s[0],np.array(ground_sym),self.mol.groupname)
-        return self.mol.irrep_name[direct_s[0][0]]
+        if direct_s[0][0] >= len(self.mol.irrep_name):
+            return 'A'
+        else:
+            return self.mol.irrep_name[direct_s[0][0]]
 
     def analyse(self):
         nc = self.nc
@@ -707,7 +710,7 @@ class SA_SF_TDA():
                 sym = 'A'
             syms.append(sym)
 
-            if self.SA == 0:
+            if self.SA == 0 and not self.type_u:
                 Dp_ab = 0.
                 Dp_ab += sum(sum(x_cv_ab*x_cv_ab)) -sum(sum(x_oo_ab*x_oo_ab))
                 for i in range(no):
@@ -1010,7 +1013,7 @@ class SA_SF_TDA():
         tmp_A = tmp_A[:, kept]
         return tmp_A
             
-    def kernel(self, nstates=1,remove=False,frozen=None,foo=1.0,d_lda=0.2,fglobal=None):
+    def kernel(self, nstates=1,remove=False,frozen=None,foo=1.0,d_lda=0.3,fglobal=None):
         self.re = remove
         self.nstates = nstates
         if fglobal is None:
