@@ -1,4 +1,4 @@
-from pyscf import gto, dft, scf, ao2mo, lib, tddft
+from pyscf import gto, dft, scf, ao2mo, lib, tddft,symm
 from pyscf.dft.numint import _dot_ao_ao_sparse,_scale_ao_sparse,_tau_dot_sparse
 from pyscf.dft.gen_grid import NBINS
 import numpy as np
@@ -9,6 +9,51 @@ from pyscf.symm import direct_prod
 #import sys
 #sys.path.append('/home/lenovo2/usrs/zhw/TDDFT')
 from SF_TDA import *
+
+
+def get_irrep_occupancy_directly(mol, mf):
+    results = {}
+    
+    if len(mf.mo_occ)==2:  # RKS/ROKS
+        mo_coeff = mf.mo_coeff
+        mo_occ = mf.mo_occ
+        orb_symm = symm.label_orb_symm(mol, mol.irrep_name, mol.symm_orb, mo_coeff)
+        
+        #results['total'] = _calculate_irrep_occupancy(orb_symm, mo_occ)
+        
+    else:  # UKS
+        mo_coeff_alpha, mo_coeff_beta = mf.mo_coeff
+        mo_occ_alpha, mo_occ_beta = mf.mo_occ
+        
+        orb_symm_alpha = symm.label_orb_symm(mol, mol.irrep_name, mol.symm_orb, mo_coeff_alpha)
+        orb_symm_beta = symm.label_orb_symm(mol, mol.irrep_name, mol.symm_orb, mo_coeff_beta)
+        
+        results['alpha'] = _calculate_irrep_occupancy(orb_symm_alpha, mo_occ_alpha)
+        results['beta'] = _calculate_irrep_occupancy(orb_symm_beta, mo_occ_beta)
+    res = {}
+    alpha = results['alpha']
+    beta = results['beta']
+    for name in mol.irrep_name: # like mf.analyze()
+        if name in alpha:
+            tmp_a = alpha[name]
+        else:
+            tmp_a = 0
+        if name in beta:
+            tmp_b = beta[name]
+        else:
+            tmp_b = 0
+        res[name] = (int(tmp_a),int(tmp_b))
+    return res
+
+def _calculate_irrep_occupancy(orb_symm, mo_occ):
+    """计算指定轨道的不可约表示占据"""
+    occupancy = {}
+    for sym, occ in zip(orb_symm, mo_occ):
+        if occ > 0:  # 只考虑占据轨道
+            if sym not in occupancy:
+                occupancy[sym] = 0.0
+            occupancy[sym] += occ
+    return occupancy
 
 def _charge_center(mol):
     charges = mol.atom_charges()
