@@ -8,22 +8,23 @@ import numpy as np
 import pandas as pd
 from pyscf import dft, gto, scf, lib, ao2mo, tddft
 from pyscf.lib import logger
-from utils import unit, atom
+from utils import unit, atom, utils
 
 
 class XTDA:
-    def __init__(self, mol, mf, nstates=10, savedata=False, basis='orbital'):
+    def __init__(self, mol, mf, nstates=10, savedata=False, basis='orbital', so2st=True):
         self.mol = mol
         self.mf = mf
         self.nstates = nstates
         self.savedata = savedata
         self.basis = basis
+        self.so2st = so2st
 
     def kernel(self):
         if self.basis == 'tensor':
             self.x_tda = X_TDA(self.mf)
             e, v = self.x_tda.kernel(nstates=self.nstates)
-            # x_tda.analyze()
+            self.x_tda.analyze()
             # x_tda.analyze_TDM()
             return e, v
         elif self.basis == 'orbital':
@@ -384,8 +385,8 @@ class XTDA:
         self.xycv_b = self.v.T[:, (nc+no)*nv+nc*no:]  # V_cv_b
         # dS2 = (np.sum(self.xycv_a*self.xycv_a) + np.sum(self.xycv_b*self.xycv_b)
         #        * np.sum(self.xyco_b*self.co_b) * np.sum(self.xycv_a*self.xycv_b))
-        dS2 = self.deltaS2()
-        os = self.osc_str()  # oscillator strength
+        self.dS2 = self.deltaS2()
+        self.os = self.osc_str()  # oscillator strength
         # before calculate rot_str, check whether mol is chiral mol
         if gto.mole.chiral_mol(self.mol):
             rs = self.rot_str()
@@ -397,11 +398,11 @@ class XTDA:
         # logger.info(self.mf, 'deltaS2 is \n{}'.format(dS2))
         print('my XTDA result is')
         print(f'{"num":>4} {"energy":>8} {"wav_len":>8} {"osc_str":>8} {"rot_str":>8} {"deltaS2":>8}')
-        for ni, ei, wli, osi, rsi, ds2i in zip(range(self.nstates), self.e_eV, unit.eVxnm/self.e_eV, os, rs, dS2):
+        for ni, ei, wli, osi, rsi, ds2i in zip(range(self.nstates), self.e_eV, unit.eVxnm/self.e_eV, self.os, rs, self.dS2):
             print(f'{ni:4d} {ei:8.4f} {wli:8.4f} {osi:8.4f} {rsi:8.4f} {ds2i:8.4f}')
         if self.savedata:
             pd.DataFrame(
-                np.concatenate((unit.eVxnm / np.expand_dims(self.e_eV, axis=1), np.expand_dims(os, axis=1)), axis=1)
+                np.concatenate((unit.eVxnm / np.expand_dims(self.e_eV, axis=1), np.expand_dims(self.os, axis=1)), axis=1)
             ).to_csv('uvspec_data.csv', index=False, header=None)
         return self.e[:self.nstates], os, rs, self.v
 
@@ -474,21 +475,39 @@ class XTDA:
         print(nc)
         print(no)
         print(nv)
+        if self.so2st:
+            self.v = utils.so2st(self.v, nc, no, nv)
+        else:
+            pass
         for nstate in range(self.nstates):
             value = self.v[:,nstate]
             x_cv_aa = value[:nc*nv].reshape(nc,nv)
             x_ov_aa = value[nc*nv:(nc+no)*nv].reshape(no,nv)
             x_co_bb = value[(nc+no)*nv:(nc+no)*nv+nc*no].reshape(nc,no)
             x_cv_bb = value[(nc+no)*nv+nc*no:].reshape(nc, nv)
-            print(f'Excited state {nstate + 1} {self.e[nstate] * unit.ha2eV:10.5f} eV')
-            for o, v in zip(*np.where(abs(x_cv_aa) > 0.1)):
-                print(f'CV(aa) {o + 1}a -> {v + 1 + nc+no}a {x_cv_aa[o, v]:10.5f}')
-            for o, v in zip(*np.where(abs(x_ov_aa) > 0.1)):
-                print(f'OV(aa) {nc+o + 1}a -> {v + 1+nc+no}a {x_ov_aa[o, v]:10.5f}')
-            for o, v in zip(*np.where(abs(x_co_bb) > 0.1)):
-                print(f'CO(bb) {o + 1}b -> {v + 1+nc}b {x_co_bb[o, v]:10.5f}')
-            for o, v in zip(*np.where(abs(x_cv_bb) > 0.1)):
-                print(f'CV(bb) {o + 1}b -> {v + 1 + nc+no}b {x_cv_bb[o, v]:10.5f}')
+            print(
+                f'D{nstate + 1}'+r"    w:"+f'{self.e[nstate] * unit.ha2eV:10.4f} eV'
+                + r"    d<S^2>:" + f'{self.dS2[nstate]:8.4f}'
+                + r"    f:" + f'{self.os[nstate]:8.4f}'
+            )
+            if self.so2st:
+                for o, v in zip(*np.where(abs(x_cv_aa) > 0.1)):
+                    print(f'    CV(0) {o + 1:3d} -> {v + 1 + nc+no:3d}    c_i: {x_cv_aa[o, v]:8.5f}    Per: {100*x_cv_aa[o,v]**2:5.2f}%')
+                for o, v in zip(*np.where(abs(x_ov_aa) > 0.1)):
+                    print(f'    OV(0) {nc+o + 1:3d} -> {v + 1+nc+no:3d}    c_i: {x_ov_aa[o, v]:8.5f}    Per: {100*x_ov_aa[o,v]**2:5.2f}%')
+                for o, v in zip(*np.where(abs(x_co_bb) > 0.1)):
+                    print(f'    CO(0) {o + 1:3d} -> {v + 1+nc:3d}    c_i: {x_co_bb[o, v]:8.5f}    Per: {100*x_co_bb[o,v]**2:5.2f}%')
+                for o, v in zip(*np.where(abs(x_cv_bb) > 0.1)):
+                    print(f'    CV(1) {o + 1:3d} -> {v + 1 + nc+no:3d}    c_i: {x_cv_bb[o, v]:8.5f}    Per: {100*x_cv_bb[o,v]**2:5.2f}%')
+            else:
+                for o, v in zip(*np.where(abs(x_cv_aa) > 0.1)):
+                    print(f'    CV(aa) {o + 1:3d} -> {v + 1 + nc+no:3d}    c_i: {x_cv_aa[o, v]:8.5f}    Per: {100*x_cv_aa[o,v]**2:5.2f}%')
+                for o, v in zip(*np.where(abs(x_ov_aa) > 0.1)):
+                    print(f'    OV(aa) {nc+o + 1:3d} -> {v + 1+nc+no:3d}    c_i: {x_ov_aa[o, v]:8.5f}    Per: {100*x_ov_aa[o,v]**2:5.2f}%')
+                for o, v in zip(*np.where(abs(x_co_bb) > 0.1)):
+                    print(f'    CO(bb) {o + 1:3d} -> {v + 1+nc:3d}    c_i: {x_co_bb[o, v]:8.5f}    Per: {100*x_co_bb[o,v]**2:5.2f}%')
+                for o, v in zip(*np.where(abs(x_cv_bb) > 0.1)):
+                    print(f'    CV(bb) {o + 1:3d} -> {v + 1 + nc+no:3d}    c_i: {x_cv_bb[o, v]:8.5f}    Per: {100*x_cv_bb[o,v]**2:5.2f}%')
 
 
 # spin-conserving spin-adapted x-tda
@@ -805,6 +824,7 @@ class X_TDA():
         dim1 = nc * nv
         dim2 = dim1 + nc * no
         dim3 = dim2 + no * nv
+        self.values = utils.so2st(self.values, nc, no, nv)
         for i in range(len(self.e)):
             cv0 = self.values[:, i][:dim1].reshape(nc, nv)
             co0 = self.values[:, i][dim1:dim2].reshape(nc, no)
@@ -939,16 +959,15 @@ class X_TDA():
 
 if __name__ == "__main__":
     mol = gto.M(
-        # atom=atom.ch2o_vacuum,
-        atom=atom.n2_,
-        # atom=atom.ch2o_vacuum,
+        # atom=atom.n2_,
+        atom=atom.ch2o_vacuum,
         # atom=atom.ch2o_Cyclohexane,
         # atom=atom.ch2o_DiethylEther,
         # atom=atom.ch2o_TetraHydroFuran,
-        basis='cc-pvdz',
+        # basis='cc-pvdz',
         # basis='def2-tzvpp',
         # basis='aug-cc-pvtz',
-        # basis='sto-3g',
+        basis='6-31g**',
         unit='A',
         # unit='B',
         charge=1,
@@ -978,9 +997,9 @@ if __name__ == "__main__":
     # xc = 'blyp'
     # xc = 'b3lyp'
     # xc = 'cam-b3lyp'
-    xc = 'wb97xd'
+    # xc = 'wb97xd'
     # xc = '0.50*HF + 0.50*B88 + GGA_C_LYP'  # BHHLYP
-    # xc = 'pbe0'
+    xc = 'pbe0'
     # xc = 'pbe38'
     # xc = 'hf'
     mf.xc = xc
@@ -992,8 +1011,11 @@ if __name__ == "__main__":
     xtda = XTDA(mol, mf)
     xtda.add_xtda = True
     xtda.nstates = 20
+    # xtda.basis = 'tensor'
     # tddft.TDA(mf) have no refer meaning
-    e_eV, os, rs, v = xtda.kernel()
+    xtda.so2st = False
+    xtda.kernel()
+    xtda.analyze()
 
     # import pandas as pd
     # pd.DataFrame(e_eV).to_csv(xc + 'xTDA.csv')
