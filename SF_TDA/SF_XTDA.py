@@ -14,7 +14,7 @@ from SF_TDA import *
 def get_irrep_occupancy_directly(mol, mf):
     results = {}
     
-    if len(mf.mo_occ)==2:  # RKS/ROKS
+    if len(mf.mo_occ)==1:  # RKS/ROKS
         mo_coeff = mf.mo_coeff
         mo_occ = mf.mo_occ
         orb_symm = symm.label_orb_symm(mol, mol.irrep_name, mol.symm_orb, mo_coeff)
@@ -704,6 +704,55 @@ class SA_SF_TDA():
             return 'A'
         else:
             return self.mol.irrep_name[direct_s[0][0]]
+    
+    
+    def deltaS2_U(self,nstate):
+        nc = self.nc
+        no = self.no
+        nv = self.nv
+        value = self.v[:,nstate]
+        x_cv_ab = value[:nc*nv].reshape(nc,nv)
+        x_co_ab = value[nc*nv:nc*nv+nc*no].reshape(nc,no)
+        x_ov_ab = value[nc*nv+nc*no:nc*nv+nc*no+no*nv].reshape(no,nv)
+        x_oo_ab = value[nc*nv+nc*no+no*nv:].reshape(no,no)
+        mo_coeff = self.mf.mo_coeff
+        orbo_a = mo_coeff[0][:, :self.nc+self.no]
+        orbv_a = mo_coeff[0][:, self.nc+self.no:]
+        orbo_b = mo_coeff[1][:, :self.nc]
+        orbv_b = mo_coeff[1][:, self.nc:]
+        S = self.mol.intor('int1e_ovlp')
+        Sccba = np.einsum('pq,pi,qj->ij', S, orbo_b, orbo_a)
+        Sccab = np.einsum('pq,pi,qj->ij', S, orbo_a, orbo_b)
+        Scvab = np.einsum('pq,pi,qj->ij', S, orbo_a, orbv_b) 
+        Svcba = np.einsum('pq,pi,qj->ij', S, orbv_b, orbo_a)
+        ds2 = (np.einsum('ia,ja,jk,ki->',x_cv_ab,x_cv_ab,Sccab[:self.nc,:],Sccba[:,:self.nc])  # 1 cv-cv
+              +np.einsum('ia,ja,jk,ki->',x_co_ab,x_co_ab,Sccab[:self.nc,:],Sccba[:,:self.nc])  # 1 co-co
+              +np.einsum('ia,ja,jk,ki->',x_ov_ab,x_ov_ab,Sccab[self.nc:,:],Sccba[:,self.nc:]) # 1 ov-ov
+              +np.einsum('ia,ja,jk,ki->',x_oo_ab,x_oo_ab,Sccab[self.nc:,:],Sccba[:,self.nc:]) # 1 oo-oo
+              +np.einsum('ia,ja,jk,ki->',x_cv_ab,x_ov_ab,Sccab[self.nc:,:],Sccba[:,:self.nc])*2 # 1 cv-ov
+              #+np.einsum('ia,ja,jk,ki->',x_ov_ab,x_cv_ab,Sccab[:self.nv,:],Sccba[:,self.nc:]) # 1 ov-cv
+              +np.einsum('ia,ja,jk,ki->',x_co_ab,x_oo_ab,Sccab[self.nc:,:],Sccba[:,:self.nc])*2 # 1 co-oo
+              #+np.einsum('ia,ja,jk,ki->',x_oo_ab,x_co_ab,Sccab[:self.nc,:],Sccba[:,self.nc:]) # 1 oo-co
+              -np.einsum('ia,ib,kb,ak->',x_cv_ab,x_cv_ab,Scvab[:,self.no:],Svcba[self.no:,:]) # 2 cv-cv
+              -np.einsum('ia,ib,kb,ak->',x_co_ab,x_co_ab,Scvab[:,:self.no],Svcba[:self.no,:]) # 2 co-co
+              -np.einsum('ia,ib,kb,ak->',x_ov_ab,x_ov_ab,Scvab[:,self.no:],Svcba[self.no:,:]) # 2 ov-ov
+              -np.einsum('ia,ib,kb,ak->',x_oo_ab,x_oo_ab,Scvab[:,:self.no],Svcba[:self.no,:]) # 2 oo-oo
+              -np.einsum('ia,ib,kb,ak->',x_cv_ab,x_co_ab,Scvab[:,:self.no],Svcba[self.no:,:])*2 # 2 cv-co
+              #-np.einsum('ia,ib,kb,ak->',x_co_ab,x_cv_ab,Scvab[:,self.no:],Svcba[:self.no,:]) # 2 co-cv
+              -np.einsum('ia,ib,kb,ak->',x_ov_ab,x_oo_ab,Scvab[:,:self.no],Svcba[self.no:,:])*2 # 2 ov-oo
+              #-np.einsum('ia,ib,kb,ak->',x_oo_ab,x_ov_ab,Scvab[:,self.no:],Svcba[:,:self.no]) # 2 oo-ov
+              +np.einsum('ia,jb,jb,ai->',x_cv_ab,x_cv_ab,Scvab[:self.nc,self.no:],Svcba[self.no:,:self.nc]) # 3 cv-cv
+              +np.einsum('ia,jb,jb,ai->',x_co_ab,x_co_ab,Scvab[:self.nc,:self.no],Svcba[:self.no,:self.nc]) # 3 co-co
+              +np.einsum('ia,jb,jb,ai->',x_ov_ab,x_ov_ab,Scvab[self.nc:,self.no:],Svcba[self.no:,:self.no]) # 3 ov-ov
+              +np.einsum('ia,jb,jb,ai->',x_oo_ab,x_oo_ab,Scvab[self.nc:,:self.no],Svcba[:self.no,self.nc:]) # 3 oo-oo
+              +np.einsum('ia,jb,jb,ai->',x_cv_ab,x_co_ab,Scvab[:self.nc,:self.no],Svcba[self.no:,:self.nc])*2 # 3 cv-co
+              +np.einsum('ia,jb,jb,ai->',x_cv_ab,x_ov_ab,Scvab[self.nc:,self.no:],Svcba[self.no:,:self.nc])*2 # 3 cv-ov
+              +np.einsum('ia,jb,jb,ai->',x_cv_ab,x_oo_ab,Scvab[self.nc:,:self.no],Svcba[self.no:,:self.nc])*2 # 3 cv-oo
+              +np.einsum('ia,jb,jb,ai->',x_co_ab,x_ov_ab,Scvab[self.nc:,self.no:],Svcba[:self.no,:self.nc])*2 # 3 co-ov
+              +np.einsum('ia,jb,jb,ai->',x_co_ab,x_oo_ab,Scvab[self.nc:,:self.no],Svcba[:self.no,:self.nc])*2 # 3 co-oo
+              +np.einsum('ia,jb,jb,ai->',x_ov_ab,x_oo_ab,Scvab[self.nc:,:self.no],Svcba[self.no:,:self.no])*2)
+        return ds2
+
 
     def analyse(self):
         nc = self.nc
@@ -764,6 +813,10 @@ class SA_SF_TDA():
                 ds2 = -self.no+1+Dp_ab
                 print(f'Excited state {nstate+1} {self.e[nstate]*27.21138505:10.5f} eV {self.e[nstate]+self.mf.e_tot:11.8f} Hartree D<S^2>={ds2:3.2f} {sym}')
                 Ds.append(ds2)
+            elif self.type_u:
+                ds2 = self.deltaS2_U(nstate)-self.no+1
+                Ds.append(ds2)
+                print(f'Excited state {nstate+1} {self.e[nstate]*27.21138505:10.5f} eV {self.e[nstate]+self.mf.e_tot:11.8f} Hartree {sym}')
             else:
                 print(f'Excited state {nstate+1} {self.e[nstate]*27.21138505:10.5f} eV {self.e[nstate]+self.mf.e_tot:11.8f} Hartree {sym}')
 
@@ -1093,3 +1146,24 @@ class SA_SF_TDA():
                 self.e = e[:nstates]
                 self.v = v[:,:nstates]
         return self.e*27.21138505, self.v
+
+
+
+if __name__ == '__main__':
+    mol = gto.M(
+            atom = """ Be """,
+            basis = 'aug-cc-pvtz',
+            charge = 0,
+            spin = 2,
+            verbose = 3,
+            symmetry='D2h',
+        )
+    print('Test with Be atom.')    
+    mf = dft.ROKS(mol)
+    mf.xc = 'bhandhlyp'
+    mf.kernel()
+    sf_tda = SA_SF_TDA(mf,SA=4)
+    e0, values = sf_tda.kernel(nstates=10,remove=True)
+    print('excited energy ',e0)
+    print('Reference energy: -2.58159612  1.94501967  2.0441558   2.04415705  3.55556409  4.0395836 4.07260624  4.07260634  4.09542032  4.09542242')
+
