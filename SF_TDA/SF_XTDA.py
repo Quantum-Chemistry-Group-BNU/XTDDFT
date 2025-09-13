@@ -816,7 +816,7 @@ class SA_SF_TDA():
             elif self.type_u:
                 ds2 = self.deltaS2_U(nstate)-self.no+1
                 Ds.append(ds2)
-                print(f'Excited state {nstate+1} {self.e[nstate]*27.21138505:10.5f} eV {self.e[nstate]+self.mf.e_tot:11.8f} Hartree {sym}')
+                print(f'Excited state {nstate+1} {self.e[nstate]*27.21138505:10.5f} eV {self.e[nstate]+self.mf.e_tot:11.8f} Hartree D<S^2>={ds2:3.2f} {sym}')
             else:
                 print(f'Excited state {nstate+1} {self.e[nstate]*27.21138505:10.5f} eV {self.e[nstate]+self.mf.e_tot:11.8f} Hartree {sym}')
 
@@ -1117,6 +1117,7 @@ class SA_SF_TDA():
         if fglobal is None:
             fglobal = (1-d_lda)*self.hyb + d_lda
         if remove:
+            #print('fglobal',fglobal)
             if self.davidson:
                 self.davison_process(foo=foo,fglobal=fglobal)
             else:
