@@ -42,7 +42,7 @@ lib.param.LIGHT_SPEED = 137.0359895000
 myhf = scf.sfx2c(scf.RHF(mol))
 myhf.kernel()
 
-c = lib.param.LIGHT_SPEED 
+c = lib.param.LIGHT_SPEED
 # set gauge origin
 z = mol.atom_charges()
 r = mol.atom_coords()
@@ -56,12 +56,12 @@ mol.set_common_origin(org)
 # 
 import sfX2C_zeeman
 h10,h11 = sfX2C_zeeman.get_zeeman(myhf,mol,c,org)
-print h10.shape,numpy.linalg.norm(h10) 
-print h11.shape,numpy.linalg.norm(h11)
+print(h10.shape,numpy.linalg.norm(h10))
+print(h11.shape,numpy.linalg.norm(h11))
 
 for i in range(3):
-   print i,numpy.linalg.norm(h10[i]+h10[i].T)
+    print(i,numpy.linalg.norm(h10[i]+h10[i].T))
 
 for i in range(3):
-   for j in range(3):
-      print i,numpy.linalg.norm(h11[i,j]-h11[i,j].T)
+    for j in range(3):
+        print(i,j,numpy.linalg.norm(h11[i,j]-h11[i,j].T))

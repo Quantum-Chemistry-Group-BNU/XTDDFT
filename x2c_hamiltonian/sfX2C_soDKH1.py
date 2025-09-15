@@ -22,6 +22,7 @@
 # 
 import numpy
 import scipy.linalg
+from functools import reduce
 
 def inv12(s):
     e,v = scipy.linalg.eigh(s)
@@ -46,108 +47,105 @@ def sfx2c1e(t, v, w, s, c):
     sih = inv12(s)
     sh = numpy.linalg.inv(inv12(s))
     rp = sih.dot(inv12(sih.dot(stilde.dot(sih))).dot(sh))
-    l1e = h[:nao,:nao] \
- 	+ h[:nao,nao:].dot(x) \
-	+ x.T.dot(h[nao:,:nao]) \
-	+ x.T.dot(h[nao:,nao:].dot(x))
+    l1e = h[:nao,:nao] + h[:nao,nao:].dot(x) + x.T.dot(h[nao:,:nao]) + x.T.dot(h[nao:,nao:].dot(x))
     h1e = rp.T.dot(l1e.dot(rp)) 
     return x,rp,h1e
 
 def get_p(dm,x,rp):
-   pLL = rp.dot(dm.dot(rp.T))
-   pLS = pLL.dot(x.T)
-   pSS = x.dot(pLL.dot(x.T))
-   return pLL,pLS,pSS
+    pLL = rp.dot(dm.dot(rp.T))
+    pLS = pLL.dot(x.T)
+    pSS = x.dot(pLL.dot(x.T))
+    return pLL,pLS,pSS
 
 def get_wso(mol):
-   nb = mol.nao_nr()
-   wso = numpy.zeros((3,nb,nb))
-   for iatom in range(mol.natm):
-      zA  = mol.atom_charge(iatom)
-      xyz = mol.atom_coord(iatom)
-      mol.set_rinv_orig(xyz)
-      wso += -zA*mol.intor('cint1e_prinvxp_sph', 3) # sign due to integration by part
-   return wso
+    nb = mol.nao_nr()
+    wso = numpy.zeros((3,nb,nb))
+    for iatom in range(mol.natm):
+        zA  = mol.atom_charge(iatom)
+        xyz = mol.atom_coord(iatom)
+        mol.set_rinv_orig(xyz)
+        wso += -zA*mol.intor('cint1e_prinvxp_sph', 3) # sign due to integration by part
+    return wso
 
 def get_kint(mol):
-   nb = mol.nao_nr() 
-   np = nb*nb
-   nq = np*np
-   ddint = mol.intor('int2e_ip1ip2_sph',9).reshape(3,3,nq)
-   kint = numpy.zeros((3,nq))
-   kint[0] = ddint[1,2]-ddint[2,1]# x = yz - zy
-   kint[1] = ddint[2,0]-ddint[0,2]# y = zx - xz
-   kint[2] = ddint[0,1]-ddint[1,0]# z = xy - yx
-   return kint.reshape(3,nb,nb,nb,nb)
+    nb = mol.nao_nr() 
+    np = nb*nb
+    nq = np*np
+    ddint = mol.intor('int2e_ip1ip2_sph',9).reshape(3,3,nq)
+    kint = numpy.zeros((3,nq))
+    kint[0] = ddint[1,2]-ddint[2,1]# x = yz - zy
+    kint[1] = ddint[2,0]-ddint[0,2]# y = zx - xz
+    kint[2] = ddint[0,1]-ddint[1,0]# z = xy - yx
+    return kint.reshape(3,nb,nb,nb,nb)
 
 def get_hso1e(wso,x,rp):
-   nb = x.shape[0]
-   hso1e = numpy.zeros((3,nb,nb))
-   for ic in range(3):
-      hso1e[ic] = reduce(numpy.dot,(rp.T,x.T,wso[ic],x,rp))
-   return hso1e
+    nb = x.shape[0]
+    hso1e = numpy.zeros((3,nb,nb))
+    for ic in range(3):
+        hso1e[ic] = reduce(numpy.dot,(rp.T,x.T,wso[ic],x,rp))
+    return hso1e
 
 def get_fso2e(kint,x,rp,pLL,pLS,pSS):
-   nb = x.shape[0]
-   fso2e = numpy.zeros((3,nb,nb))
-   for ic in range(3):
-      gsoLL = -2.0*numpy.einsum('lmkn,lk->mn',kint[ic],pSS)
-      gsoLS = -numpy.einsum('mlkn,lk->mn',kint[ic],pLS) \
-      	      -numpy.einsum('lmkn,lk->mn',kint[ic],pLS) 
-      gsoSS = -2.0*numpy.einsum('mnkl,lk',kint[ic],pLL) \
-   	      -2.0*numpy.einsum('mnlk,lk',kint[ic],pLL) \
-   	      +2.0*numpy.einsum('mlnk,lk',kint[ic],pLL)
-      fso2e[ic] = gsoLL + gsoLS.dot(x) + x.T.dot(-gsoLS.T) \
-   	     + x.T.dot(gsoSS.dot(x))
-      fso2e[ic] = reduce(numpy.dot,(rp.T,fso2e[ic],rp))
-   return fso2e
+    nb = x.shape[0]
+    fso2e = numpy.zeros((3,nb,nb))
+    for ic in range(3):
+        gsoLL  = -numpy.einsum('lmkn,lk->mn',kint[ic],pSS)*2.
+        gsoLS  = -numpy.einsum('mlkn,lk->mn',kint[ic],pLS)
+        gsoLS -=  numpy.einsum('lmkn,lk->mn',kint[ic],pLS)
+        gsoSS  = -numpy.einsum('mnkl,lk',kint[ic],pLL)*2.
+        gsoSS -=  numpy.einsum('mnlk,lk',kint[ic],pLL)*2.
+        gsoSS +=  numpy.einsum('mlnk,lk',kint[ic],pLL)*2.
+        fso2e[ic] = gsoLL + gsoLS.dot(x) + x.T.dot(-gsoLS.T) + x.T.dot(gsoSS.dot(x))
+        fso2e[ic] = reduce(numpy.dot,(rp.T,fso2e[ic],rp))
+    return fso2e
 
 def get_soDKH1_somf(myhf,mol,c,iop='x2c',debug=False):
-   xmol,contr_coeff = myhf.with_x2c.get_xmol(mol)
-   print 'get_soDKH1_somf with iop=',iop,' (np,nc)=',contr_coeff.shape
-   nb = contr_coeff.shape[0]
-   nc = contr_coeff.shape[1]
-   if iop == 'x2c': 
-      t = xmol.intor_symmetric('int1e_kin')
-      v = xmol.intor_symmetric('int1e_nuc')
-      s = xmol.intor_symmetric('int1e_ovlp')
-      w = xmol.intor_symmetric('int1e_pnucp')
-      x,rp,h1e = sfx2c1e(t, v, w, s, c)
-   elif iop == 'bp':
-      x = numpy.identity(nb)
-      rp = numpy.identity(nb)
-   dm = myhf.make_rdm1()
-   # Spin-Averaged for ROHF or UHF
-   if len(dm.shape)==3: dm = (dm[0]+dm[1])/2.0
-   dm = reduce(numpy.dot,(contr_coeff,dm,contr_coeff.T))
-   pLL,pLS,pSS = get_p(dm,x,rp)
-   wso = get_wso(xmol)
-   kint = get_kint(xmol)
-   if debug:
-      for ic in range(3):
-         print 'ic=',ic,numpy.linalg.norm(kint[ic]+kint[ic].transpose(2,3,0,1))
-   hso1e = get_hso1e(wso,x,rp)
-   fso2e = get_fso2e(kint,x,rp,pLL,pLS,pSS)
-   a4 = 0.25/c**2
-   VsoDKH1 = a4*(hso1e + fso2e)
-   if debug:
-      for ic in range(3):
-	 tmp = hso1e[ic]
-         print ic,'hso1e',numpy.linalg.norm(tmp),\
-	          	  numpy.linalg.norm(tmp+tmp.T)
-	 tmp = fso2e[ic]
-         print ic,'fso2e',numpy.linalg.norm(tmp),\
-	          	  numpy.linalg.norm(tmp+tmp.T)
-	 tmp = hso1e[ic]+fso2e[ic]
-         print ic,'vso2e',numpy.linalg.norm(tmp),\
-	          	  numpy.linalg.norm(tmp+tmp.T)
-   # Contractioin at the last step
-   VsoDKH1contr = numpy.zeros((3,nc,nc))
-   for ic in range(3):
-      VsoDKH1contr[ic] = reduce(numpy.dot,(contr_coeff.T,VsoDKH1[ic],contr_coeff))
-   if debug:
-      for ic in range(3):
-	 tmp = VsoDKH1contr[ic]
-         print ic,numpy.linalg.norm(tmp),\
-	          numpy.linalg.norm(tmp+tmp.T)
-   return VsoDKH1contr
+    xmol,contr_coeff = myhf.with_x2c.get_xmol(mol)
+    print(f"get_soDKH1_somf with iop={iop}, (np,nc)={contr_coeff.shape}")
+    nb = contr_coeff.shape[0]
+    nc = contr_coeff.shape[1]
+    if iop == 'x2c':
+        t = xmol.intor_symmetric('int1e_kin')
+        v = xmol.intor_symmetric('int1e_nuc')
+        s = xmol.intor_symmetric('int1e_ovlp')
+        w = xmol.intor_symmetric('int1e_pnucp')
+        x,rp,h1e = sfx2c1e(t, v, w, s, c)
+    elif iop == 'bp':
+        x = numpy.identity(nb)
+        rp = numpy.identity(nb)
+    dm = myhf.make_rdm1()
+    # Spin-Averaged for ROHF or UHF
+    if len(dm.shape)==3: dm = (dm[0]+dm[1])/2.0
+    dm = reduce(numpy.dot,(contr_coeff,dm,contr_coeff.T))
+    pLL,pLS,pSS = get_p(dm,x,rp)
+    wso = get_wso(xmol)
+    kint = get_kint(xmol)
+    if debug:
+        for ic in range(3):
+            print(f"ic={ic, numpy.linalg.norm(kint[ic]+kint[ic].transpose(2,3,0,1))}")
+            # print 'ic=',ic,numpy.linalg.norm(kint[ic]+kint[ic].transpose(2,3,0,1))
+    hso1e = get_hso1e(wso,x,rp)
+    a4 = 0.25/c**2
+    VsoDKH1 = a4*(hso1e + fso2e)
+    fso2e = get_fso2e(kint,x,rp,pLL,pLS,pSS)
+
+    if debug:
+        for ic in range(3):
+            tmp = hso1e[ic]
+            print(f"{ic} hso1e  norm={numpy.linalg.norm(tmp):.12e}, "
+                f"Norm(tmp+tmp.T)={numpy.linalg.norm(tmp + tmp.T):.12e}")
+            tmp = fso2e[ic]
+            print(f"{ic} fso2e  norm={numpy.linalg.norm(tmp):.12e}, "
+                f"Norm(tmp+tmp.T)={numpy.linalg.norm(tmp + tmp.T):.12e}")
+            tmp = hso1e[ic] + fso2e[ic]
+            print(f"{ic} vso2e  norm={numpy.linalg.norm(tmp):.12e}, "
+                f"Norm(tmp+tmp.T)={numpy.linalg.norm(tmp + tmp.T):.12e}")
+    VsoDKH1contr = numpy.zeros((3,nc,nc))
+    for ic in range(3):
+        VsoDKH1contr[ic] = reduce(numpy.dot,(contr_coeff.T,VsoDKH1[ic],contr_coeff))
+    if debug:
+        for ic in range(3):
+            tmp = VsoDKH1contr[ic]
+            print(f"{ic} VsoDKH1contr  norm={numpy.linalg.norm(tmp):.12e}, "
+                f"Norm(tmp+tmp.T)={numpy.linalg.norm(tmp + tmp.T):.12e}")
+    return VsoDKH1contr
