@@ -7,7 +7,7 @@ mol = gto.M(
     atom = 'I 0 0 0',
     basis = 'sto-3g',
     verbose=4,
-    symmetry=1,
+    symmetry='Dooh',
     spin = 1)
 
 from pyscf import lib
@@ -25,4 +25,5 @@ c = lib.param.LIGHT_SPEED
 import sfX2C_soDKH1 
 VsoDKH1_a = sfX2C_soDKH1.get_soDKH1_somf(myhf,mol,c,iop='bp',debug=False) #True)
 VsoDKH1_b = sfX2C_soDKH1.get_soDKH1_somf(myhf,mol,c,iop='x2c',debug=False) #True)
-print numpy.linalg.norm(VsoDKH1_a-VsoDKH1_b)
+print(f"Norm(VsoDKH1_a-VsoDKH1_b)={numpy.linalg.norm(VsoDKH1_a-VsoDKH1_b):.12f}")
+breakpoint()
