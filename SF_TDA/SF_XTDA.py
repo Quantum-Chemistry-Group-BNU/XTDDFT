@@ -9,7 +9,7 @@ from pyscf.symm import direct_prod
 #import sys
 #sys.path.append('/home/lenovo2/usrs/zhw/TDDFT')
 from SF_TDA import *
-
+au2ev = 27.21138505
 
 def get_irrep_occupancy_directly(mol, mf):
     results = {}
@@ -72,34 +72,6 @@ def mf_info(mf):
         mo_occ[0][np.where(mf.mo_occ>=1)[0]]=1
         mo_occ[1][np.where(mf.mo_occ>=2)[0]]=1
     return mo_energy,mo_occ,mo_coeff
-
-def init_guess(mf, nstates=None, wfnsym=None):
-    nstates = nstates
-    mo_energy,mo_occ,mo_coeff = mf_info(mf)
-    mol = mf.mol
-    occidxa = np.where(mo_occ[0]>0)[0]
-    occidxb = np.where(mo_occ[1]>0)[0]
-    viridxa = np.where(mo_occ[0]==0)[0]
-    viridxb = np.where(mo_occ[1]==0)[0]
-    e_ia_b2a = (mo_energy[0][viridxa,None] - mo_energy[1][occidxb]).T
-    e_ia_a2b = (mo_energy[1][viridxb,None] - mo_energy[0][occidxa]).T
-
-    e_ia_b2a = e_ia_b2a.ravel()
-    e_ia_a2b = e_ia_a2b.ravel()
-    nov_b2a = e_ia_b2a.size
-    nov_a2b = e_ia_a2b.size
-
-    nstates = min(nstates, nov_a2b)
-    e_threshold = np.sort(e_ia_a2b)[nstates-1]
-    e_threshold += 1e-5
-
-    # spin-down
-    idx = np.where(e_ia_a2b <= e_threshold)[0]
-    x0 = np.zeros((idx.size, nov_a2b))
-    for i, j in enumerate(idx):
-        x0[i, j] = 1  # Koopmans' excitations
-
-    return x0
 
 def cache_xc_kernel_sf(mf, mo_coeff, mo_occ, spin=1,max_memory=2000):
     '''Compute the fxc_sf, which can be used in SF-TDDFT/TDA
@@ -224,7 +196,7 @@ def nr_uks_fxc_sf_tda(ni, mol, grids, xc_code, dm0, dms, relativity=0, hermi=0,v
     return vmat
 
 class SA_SF_TDA():
-    def __init__(self,mf,SA=0,davidson=False):
+    def __init__(self,mf,SA=3,davidson=False,collinear=False):
         """SA=0: SF-TDA
            SA=1: only add diagonal block for dA
            SA=2: add all dA except for OO block
@@ -236,6 +208,7 @@ class SA_SF_TDA():
             self.mo_coeff = mf.mo_coeff
             self.mo_occ = mf.mo_occ
             self.type_u = True
+            self.SA = 0
         else: # ROKS
             self.mo_energy = np.array([mf.mo_energy, mf.mo_energy])
             self.mo_coeff = np.array([mf.mo_coeff, mf.mo_coeff])
@@ -243,12 +216,13 @@ class SA_SF_TDA():
             self.mo_occ[0][np.where(mf.mo_occ>=1)[0]]=1
             self.mo_occ[1][np.where(mf.mo_occ>=2)[0]]=1
             self.type_u = False
+            self.SA = SA
 
         self.mol = mf.mol
         self.nao = self.mol.nao_nr()
         self.mf = mf
-        self.SA = SA
         self.davidson=davidson
+        self.collinear = collinear
 
         self.occidx_a = np.where(self.mo_occ[0]==1)[0]
         self.viridx_a = np.where(self.mo_occ[0]==0)[0]
@@ -275,98 +249,6 @@ class SA_SF_TDA():
             xctype = None
             self.hyb = 1.0
         
-    def get_a2b(self):
-        
-        mf = self.mf
-        a_a2b = np.zeros((self.nocc_a,self.nvir_b,self.nocc_a,self.nvir_b))
-        dm = self.mf.make_rdm1()
-        vhf = self.mf.get_veff(self.mf.mol, dm)
-        h1e = self.mf.get_hcore()
-        focka = h1e + vhf[0]
-        fockb = h1e + vhf[1]
-        fockA = self.mo_coeff[0].T @ focka @ self.mo_coeff[0]
-        fockB = self.mo_coeff[1].T @ fockb @ self.mo_coeff[1]    
-        
-        try:
-            xctype = self.mf.xc
-        except:
-            xctype = None
-            eri_mo_a2b = ao2mo.general(self.mol, [self.orbo_a,self.orbo_a,self.orbv_b,self.orbv_b], compact=False)
-            eri_mo_a2b = eri_mo_a2b.reshape(self.nocc_a,self.nocc_a,self.nvir_b,self.nvir_b)
-            a_a2b -= np.einsum('ijba->iajb', eri_mo_a2b)
-            
-            
-        if xctype is not None:
-            ni = self.mf._numint
-            xctype = ni._xc_type(self.mf.xc)
-            ni.libxc.test_deriv_order(self.mf.xc, 2, raise_error=True)
-            if self.mf.nlc or ni.libxc.is_nlc(self.mf.xc):
-                logger.warn(mf, 'NLC functional found in DFT object.  Its second '
-                            'deriviative is not available. Its contribution is '
-                            'not included in the response function.')
-            omega, alpha, hyb = ni.rsh_and_hybrid_coeff(self.mf.xc, self.mol.spin)
-            print('omega alpha hyb',omega, alpha, hyb)
-            if hyb != 0:
-                eri_mo_a2b = ao2mo.general(self.mol, [self.orbo_a,self.orbo_a,self.orbv_b,self.orbv_b], compact=False)
-                eri_mo_a2b = eri_mo_a2b.reshape(self.nocc_a,self.nocc_a,self.nvir_b,self.nvir_b)
-                a_a2b -= np.einsum('ijba->iajb', eri_mo_a2b) * hyb
-                
-                
-            print(xctype)
-            dm0 = self.mf.make_rdm1()
-            if np.array(mf.mo_coeff).ndim==2:
-                dm0.mo_coeff = (mf.mo_coeff, self.mf.mo_coeff)
-                dm0.mo_occ = self.mo_occ
-            make_rho = ni._gen_rho_evaluator(mf.mol, dm0, hermi=1, with_lapl=False)[0]
-            mem_now = lib.current_memory()[0]
-            max_memory = max(2000, mf.max_memory*.8-mem_now)
-        
-        if xctype == 'LDA':
-            ao_deriv = 0
-            for ao, mask, weight, coords \
-                    in ni.block_loop(mf.mol, mf.grids, self.nao, ao_deriv, max_memory):
-                rho0a = make_rho(0, ao, mask, xctype)
-                rho0b = make_rho(1, ao, mask, xctype)
-                rho = (rho0a, rho0b)
-                _, vxc, _, _ = ni.eval_xc_eff(mf.xc, rho, deriv=1, omega=omega, xctype=xctype) # vxc.shape[2,1,N]
-                vxc_a = vxc[0,0]*weight
-                vxc_b = vxc[1,0]*weight
-                fxc_ab = (vxc_a-vxc_b)/(rho0a-rho0b+1e-9)
-                rho_o_a = lib.einsum('rp,pi->ri', ao, self.orbo_a)
-                rho_v_a = lib.einsum('rp,pi->ri', ao, self.orbv_a)
-                rho_o_b = lib.einsum('rp,pi->ri', ao, self.orbo_b)
-                rho_v_b = lib.einsum('rp,pi->ri', ao, self.orbv_b)
-                rho_ov_b2a = np.einsum('ri,ra->ria', rho_o_b, rho_v_a)
-                rho_ov_a2b = np.einsum('ri,ra->ria', rho_o_a, rho_v_b)
-                w_ov = np.einsum('ria,r->ria', rho_ov_a2b, fxc_ab)
-                iajb = lib.einsum('ria,rjb->iajb', rho_ov_a2b, w_ov)
-                a_a2b += iajb
-     
-                
-        elif xctype == 'GGA':
-            ao_deriv = 1
-            for ao, mask, weight, coords \
-                 in ni.block_loop(mf.mol, mf.grids, self.nao, ao_deriv, max_memory):#ao(4,N,nao):AO values and derivatives in x,y,z compoents in grids
-                rho0a = make_rho(0, ao, mask, xctype)#(4,N):density and "density derivatives" for x,y,z components in grids
-                rho0b = make_rho(1, ao, mask, xctype)
-                rha = np.zeros_like(rho0a)
-                rha[0] = rho0a[0]
-                rhb = np.zeros_like(rho0b)
-                rhb[0] = rho0b[0]
-                _, vxc, _, _ = ni.eval_xc_eff(mf.xc, (rha, rhb), deriv=1, omega=omega)#vxc.shape(2,4,N)
-                vxc_a = vxc[0,0]*weight #first order derivatives about \rho in \alpha
-                vxc_b = vxc[1,0]*weight #\beta
-                fxc_ab = (vxc_a-vxc_b)/(rho0a[0]-rho0b[0]+1e-9)
-                rho_o_a = lib.einsum('rp,pi->ri', ao[0], self.orbo_a) # (N,i)
-                rho_v_a = lib.einsum('rp,pi->ri', ao[0], self.orbv_a)
-                rho_o_b = lib.einsum('rp,pi->ri', ao[0], self.orbo_b)
-                rho_v_b = lib.einsum('rp,pi->ri', ao[0], self.orbv_b)
-                rho_ov_a2b = np.einsum('ri,ra->ria', rho_o_a, rho_v_b)
-                w_ov = np.einsum('ria,r->ria', rho_ov_a2b, fxc_ab)
-                iajb = lib.einsum('ria,rjb->iajb', rho_ov_a2b, w_ov)
-                a_a2b += iajb
-                
-        return a_a2b
         
     def get_Amat(self,SA=None,foo=1.0,fglobal=1.0):
         """SA=0: SF-TDA
@@ -400,7 +282,7 @@ class SA_SF_TDA():
         fockB_V = fockB[nc+no:,nc+no:]
         dim = (nc+no)*(nv+no)
         Amat = np.zeros((dim,dim))
-        sf_tda = SF_TDA(mf)
+        sf_tda = SF_TDA(mf,self.collinear)
         Amat = np.zeros_like(sf_tda.A)
         
         dim1 = nc*nv
@@ -766,6 +648,8 @@ class SA_SF_TDA():
             orb1 = None
             orb2 = None
             value = self.v[:,nstate]
+            #print('self.vects.shape', self.vects.shape)
+            #print(len(value))
             x_cv_ab = value[:nc*nv].reshape(nc,nv)
             x_co_ab = value[nc*nv:nc*nv+nc*no].reshape(nc,no)
             x_ov_ab = value[nc*nv+nc*no:nc*nv+nc*no+no*nv].reshape(no,nv)
@@ -851,6 +735,97 @@ class SA_SF_TDA():
                     vectors[nstate,-3] = x_oo_ab[o,v]
                     
         return vectors
+    def init_guess(self,mf, nstates):
+       
+        mo_energy,mo_occ,mo_coeff = mf_info(mf)
+        
+        occidxa = np.where(mo_occ[0]>0)[0]
+        occidxb = np.where(mo_occ[1]>0)[0]
+        viridxa = np.where(mo_occ[0]==0)[0]
+        viridxb = np.where(mo_occ[1]==0)[0]
+        #e_ia_b2a = (mo_energy[0][viridxa,None] - mo_energy[1][occidxb]).T
+        e_ia_a2b = (mo_energy[1][viridxb,None] - mo_energy[0][occidxa]).T
+        #cv = (mo_energy[1][self.nc+self.no:,None]-mo_energy[0][:self.nc]).T
+        #co = (mo_energy[1][self.nc:self.nc+self.no,None]-mo_energy[0][:self.nc]).T
+        #ov = (mo_energy[1][self.nc+self.no:,None]-mo_energy[0][self.nc:self.nc+self.no]).T
+        #oo = (mo_energy[1][self.nc:self.nc+self.no,None]-mo_energy[0][self.nc:self.nc+self.no]).T
+        #e_ia_a2b = np.array(list(cv.ravel()) + list(co.ravel())+list(ov.ravel())+list(oo.ravel()))
+        no=self.no
+        nc=self.nc
+        nv=self.nv
+        nvir = no+nv
+
+        e_ia_a2b = e_ia_a2b.ravel()
+        nov_a2b = e_ia_a2b.size
+
+        nstates = min(nstates, nov_a2b)
+        e_threshold = np.sort(e_ia_a2b)[nstates-1]
+        e_threshold += 1e-5
+
+        # spin-down
+        idx = np.where(e_ia_a2b <= e_threshold)[0]
+        x0 = np.zeros((idx.size, nov_a2b))
+        for i, j in enumerate(idx):
+            x0[i, j] = 1  # Koopmans' excitations
+        #if self.re:
+        #    x0 = x0[:,:-1]
+        if self.re:
+            oo = np.zeros((x0.shape[0],no*no))
+            for i in range(no):
+                oo[:,i*no:(i+1)*no] = x0[:,nc*nvir+i*nvir:nc*nvir+no+i*nvir]
+            new_x0 = np.zeros((x0.shape[0],x0.shape[1]-1))
+            new_oo = np.einsum('nx,xy->ny',oo,self.vects)
+            new_x0[:,:nc*nvir] = x0[:,:nc*nvir]
+            for i in range(no-1):
+                new_x0[:,nc*nvir+i*nvir:nc*nvir+no+i*nvir] = new_oo[:,i*no:(i+1)*no]
+                new_x0[:,nc*nvir+no+i*nvir:nc*nvir+no+nv+i*nvir] = x0[:,nc*nvir+no+i*nvir:nc*nvir+no+nv+i*nvir]
+            new_x0[:,nc*nvir+(no-1)*nvir:nc*nvir+no-1+(no-1)*nvir] = new_oo[:,-(no-1):]
+            new_x0[:,nc*nvir+(no-1)*nvir+no-1:]=x0[:,nc*nvir+(no-1)*nvir+no:]
+            x0 = new_x0.copy()
+            
+            #x0 = np.einsum('nx,xy->ny',x0,proj)
+        print('x0.shape',x0.shape)
+        #no=self.no
+        #nc=self.nc
+        #nv=self.nv
+        #nvir = no+nv
+        #co = np.zeros((x0.shape[0],nc*no))
+        #cv = np.zeros((x0.shape[0],nc*nv))
+        #ov = np.zeros((x0.shape[0],no*nv))
+        #oo = np.zeros((x0.shape[0],no*no))
+        #for i in range(nc):
+        #    co[:,i*no:i*no+no] = x0[:,i*nvir:i*nvir+no]
+        #    cv[:,i*nv:i*nv+nv] = x0[:,i*nvir+no:no+nv+i*nvir]
+        #for i in range(no):
+        #    oo[:,i*no:i*no+no] = x0[:,nc*nvir+i*nvir:nc*nvir+no+i*nvir]
+        #    ov[:,i*nv:i*nv+nv] = x0[:,nc*nvir+i*nvir+no:nc*nvir+i*nvir+no+nv]
+        #new_x0 = np.hstack([cv,co,ov,oo])
+        return x0
+    
+    def init_guess0(self,mf,nstates):
+        mo_energy,mo_occ,mo_coeff = mf_info(mf)
+        
+        D = np.zeros((nstates,self.nc*self.nv+self.nc*self.no+self.no*self.nv+self.no*self.no))
+        D = D.reshape((nstates,self.nc+self.no,self.no+self.nv))
+        dm = mf.make_rdm1()
+        vhf = mf.get_veff(mf.mol, dm)
+        h1e = mf.get_hcore()
+        fockA = h1e + vhf[0]
+        fockB = h1e + vhf[1]
+        fockA = mf.mo_coeff.T @ fockA @ mf.mo_coeff
+        fockB = mf.mo_coeff.T @ fockB @ mf.mo_coeff
+        cv1 = np.diag(fockB[self.nc+self.no:,self.nc+self.no:]).reshape(1,-1)-np.diag(fockA[:self.nc,:self.nc]).reshape(-1,1)
+        co1 = np.diag(fockB[self.nc:self.nc+self.no,self.nc:self.nc+self.no]).reshape(1,-1)-np.diag(fockA[:self.nc,:self.nc]).reshape(-1,1)
+        ov1 = np.diag(fockB[self.nc+self.no:,self.nc+self.no:]).reshape(1,-1)-np.diag(fockA[self.nc:self.nc+self.no,self.nc:self.nc+self.no]).reshape(-1,1)
+        oo1 = np.diag(fockB[self.nc:self.nc+self.no,self.nc:self.nc+self.no]).reshape(1,-1)-np.diag(fockA[self.nc:self.nc+self.no,self.nc:self.nc+self.no]).reshape(-1,1)
+        #for i in range(nstates):
+            
+        D[:,:self.nc,self.no:] += cv1
+        D[:,:self.nc,:self.no] += co1
+        D[:,self.nc:,self.no:] += ov1
+        D[:,self.nc:,:self.no] += oo1
+        
+        return D.reshape((nstates,-1))
     
     def gen_response_sf(self,hermi=0,max_memory=None,hf_correction=False):
         mf = self.mf
@@ -891,6 +866,7 @@ class SA_SF_TDA():
                 return vj,vk
         return vind
     
+    
     def gen_tda_operation_sf(self,foo,fglobal):
         mf = self.mf
         if np.array(mf.mo_coeff).ndim==3:# UKS
@@ -922,6 +898,7 @@ class SA_SF_TDA():
         nc = noccb
         nv = nvira
         no = nocca - noccb
+        nvir = no+nv
         si = no/2.0
         ndim = (nocca,nvirb)
         orbov = (orboa,orbvb)
@@ -940,9 +917,25 @@ class SA_SF_TDA():
         fockB = mo_coeff[1].T @ fockb @ mo_coeff[1]
 
         e_ia = (mo_energy[1][viridxb,None] - mo_energy[0][occidxa]).T
-        hdiag = e_ia.ravel()
+        if self.re:
+            tmp_hdiag = e_ia.ravel()
+            oo = np.zeros((self.no*self.no)) # full oo
+            for i in range(self.no):
+                oo[i*no:(i+1)*no] = tmp_hdiag[nc*nvir+nvir*i:nc*nvir+no+nvir*i]
+            new_oo = np.einsum('x,xy->y',oo,self.vects)
+            new_hdiag = np.zeros(len(tmp_hdiag)-1)
+            new_hdiag[:nc*nvir] = tmp_hdiag[:nc*nvir]
+            for i in range(self.no-1):
+                new_hdiag[nc*nvir+i*nvir:nc*nvir+no+i*nvir] = new_oo[i*no:(i+1)*no]
+                new_hdiag[nc*nvir+no+i*nvir:nc*nvir+no+i*nvir+nv] = tmp_hdiag[nc*nvir+no+i*nvir:nc*nvir+no+nv+i*nvir]
+            new_hdiag[nc*nvir+(self.no-1)*nvir:nc*nvir+(self.no-1)*nvir+no-1] = new_oo[(self.no-1)*no:]
+            new_hdiag[nc*nvir+(self.no-1)*nvir+no-1:] = tmp_hdiag[nc*nvir+(self.no-1)*nvir+no:]
+            hdiag = new_hdiag
+        else:
+            hdiag = e_ia.ravel()
 
         vresp = self.gen_response_sf(hermi=0)
+
         if self.SA > 0:
             vresp_hf = self.gen_response_sf(hermi=0,hf_correction=True)
             hf = scf.ROHF(mf.mol)
@@ -960,17 +953,28 @@ class SA_SF_TDA():
             ndim0,ndim1 = ndim # ndom0:numuber of alpha orbitals, ndim1:number of beta orbitals
             orbo,orbv = orbov # mo_coeff for alpha and beta
 
-            #zs = zs[:,:ndim0*ndim1].reshape(-1,ndim0,ndim1) # (-1,nocca,nvirb)
-            #zs = zs.reshape(-1,ndim0,ndim1) 
-            zs = np.asarray(zs0).reshape(-1,ndim0,ndim1) # (-1,nocca,nvirb)
-            #if self.re:
-            #    oo = zs[:,nc:,:no]
-            #    new_oo = self.vects@oo
-            #    zs = np.einsum('nm,x->x',self.vects,zs)
+            if self.re:
+                oo = np.zeros((zs0.shape[0],no*no-1)) # get oo from zs0, which is no*no-1
+
+                for i in range(no-1):
+                    oo[:,i*no:(i+1)*no] = zs0[:,nc*nvir+i*nvir:nc*nvir+no+i*nvir]
+                print(oo[:,(no-1)*no:].shape, zs0[:,nc*nvir+(no-1)*nvir:nc*nvir+(no-1)*nvir+no-1].shape)
+                oo[:,(no-1)*no:] = zs0[:,nc*nvir+(no-1)*nvir:nc*nvir+(no-1)*nvir+no-1] # no*no-1
+                new_oo = np.einsum('xy,ny->nx',self.vects,oo)# we want the whole matrix of oo, which is no*no
+                new_zs0 = np.zeros((zs0.shape[0],zs0.shape[1]+1)) # full matrix
+                new_zs0[:,:nc*nvir] = zs0[:,:nc*nvir]
+                for i in range(no-1):
+                    new_zs0[:,nc*nvir+i*nvir:nc*nvir+no+i*nvir] = new_oo[:,i*no:(i+1)*no]
+                    new_zs0[:,nc*nvir+no+i*nvir:nc*nvir+no+nv+i*nvir] = zs0[:,nc*nvir+no+i*nvir:nc*nvir+no+nv+i*nvir]
+                new_zs0[:,nc*nvir+(no-1)*nvir:nc*nvir+no+(no-1)*nvir] = new_oo[:,-no:]
+                new_zs0[:,nc*nvir+(no-1)*nvir+no:]=zs0[:,nc*nvir+(no-1)*nvir+no-1:]
+            else:
+                new_zs = zs0.copy()
+            #print('new_zs.shape',new_zs0.shape)
+            zs = np.asarray(new_zs0).reshape(-1,ndim0,ndim1)
             vs = np.zeros_like(zs)
             dmov = lib.einsum('xov,qv,po->xpq', zs,orbv.conj(), orbo) # (x,nmo,nmo)
             v1ao = vresp(np.asarray(dmov))   # with density and get response function
-            #print('v1ao.shape ',v1ao.shape)
             vs += lib.einsum('xpq,po,qv->xov', v1ao, orbo.conj(), orbv) # (-1,nocca,nvirb)
             #np.save('v1_t.npy',v1[:,nc:,no:])
             #vs += np.einsum('ij,ab,xjb->xia',delta_ij,fockB[noccb:,noccb:],zs)-\
@@ -985,6 +989,7 @@ class SA_SF_TDA():
                 co1 = zs[:,:nc,:no]
                 ov1 = zs[:,nc:,no:]
                 oo1 = zs[:,nc:,:no]
+                
                 cv1_mo = np.einsum('xov,qv,po->xpq', cv1, orbvb[:,no:].conj(), orboa[:,:nc]) # (-1,nmo,nmo)
                 co1_mo = np.einsum('xov,qv,po->xpq', co1, orbvb[:,:no].conj(), orboa[:,:nc]) # (-1,nmo,nmo)
                 ov1_mo = np.einsum('xov,qv,po->xpq', ov1, orbvb[:,no:].conj(), orboa[:,nc:nc+no])
@@ -1074,15 +1079,207 @@ class SA_SF_TDA():
             vs = vs + fglobal * vs_dA
             nz = zs.shape[0]
             hx = vs.reshape(nz,-1)
-            return hx
-        return vind, hdiag
 
+            if self.re:
+                new_hx = np.zeros_like(zs0)
+                new_hx[:,:nc*nvir] += hx[:,:nc*nvir]
+                oo = np.zeros((zs0.shape[0],no*no))
+                for i in range(no):
+                    oo[:,i*no:(i+1)*no] = hx[:,nc*nvir+i*nvir:nc*nvir+no+i*nvir]
+                new_oo = np.einsum('xy,nx->ny',self.vects,oo)# no*no-1
+                for i in range(no-1):
+                    new_hx[:,nc*nvir+i*nvir:nc*nvir+i*nvir+no] = new_oo[:,i*no:(i+1)*no]
+                    new_hx[:,nc*nvir+i*nvir+no:nc*nvir+i*nvir+no+nv] = hx[:,nc*nvir+no+i*nvir:nc*nvir+no+nv+i*nvir]
+                new_hx[:,nc*nvir+(no-1)*nvir:nc*nvir+(no-1)*nvir+no-1] = new_oo[:,(no-1)*no:]
+                new_hx[:,nc*nvir+(no-1)*nvir+no-1:] = hx[:,nc*nvir+(no-1)*nvir+no:]
+                hx = new_hx.copy()
+                #zs0 = zs0.copy()
+                #print('zs0.shape ',zs0.shape)
+                #print('hx.shape ',hx.shape)
+                
+            else:
+                new_hx = hx.copy()
+            #print('hx ',hx.shape)
+            debug = False
+            if debug:
+                self.hx = hx
+                if self.re:
+                    self.debug_hx_dav(hx)
+                else:
+                    self.debug_hx(hx)
+            return new_hx
+        return vind, hdiag
     
-    def davison_process(self,foo,fglobal):
-        print("Davison process...")
+    def debug_hx(self,hx): # without self.re
+        no = self.no
+        nc = self.nc
+        nv = self.nv
+        nvir = no+nv
+        ndim = hx.shape[1]
+        passed = nc*nvir
+        cv = np.zeros((nc*nv,ndim))
+        co = np.zeros((nc*no,ndim-nc*nv))
+        ov = np.zeros((no*nv,ndim-nc*nv-nc*no))
+        oo = np.zeros((no*no,no*no))
+        dim1 = nc*nv
+        dim2 = dim1+nc*no
+        dim3 = dim2+no*nv
+        for index in range(nc): # nc-> no|nv
+            for i in range(no):
+                for j in range(nc):
+                    co[index*no+i,j*no:j*no+no] = hx[index*nvir+i,j*nvir:nvir*j+no] # co-co
+                for k in range(no):
+                    co[index*no+i,nc*no+k*nv:nc*no+(k+1)*nv] = hx[index*nvir+i,passed+nvir*k+no:passed+nvir*k+no+nv] # co-ov
+                    co[index*no+i,nc*no+no*nv+k*no:nc*no+no*nv+(k+1)*no] = hx[index*nvir+i,passed+nvir*k:passed+nvir*k+no] # co-oo
+            for i in range(nv): # cv
+                for j in range(nc):
+                    cv[index*nv+i,j*nv:(j+1)*nv] = hx[index*nvir+no+i,no+j*nvir:no+j*nvir+nv] # cv-cv
+                    cv[index*nv+i,nc*nv+no*j:nc*nv+no*(j+1)] = hx[index*nvir+no+i,nvir*j:nvir*j+no] # cv-co
+                for k in range(no):
+                    cv[index*nv+i,nc*nv+nc*no+k*nv:nc*nv+nc*no+(k+1)*nv] = hx[index*nvir+no+i,passed+nvir*k+no:passed+nvir*k+no+nv] # cv-ov
+                    cv[index*nv+i,dim3+k*no:dim3+(k+1)*no] = hx[index*nvir+no+i,passed+nvir*k:passed+nvir*k+no]
+        passed = nc*(nvir)
+        for index in range(no): # no -> no|nv
+            for i in range(no):
+                for j in range(no):
+                    oo[i+index*no,j*no:j*no+no] = hx[index*nvir+passed+i,passed+j*nvir:passed+j*nvir+no] # oo-oo
+
+        for i in range(nv):
+            ov[i,no*nv:no*nv+no] = hx[passed+i+no,passed:passed+no]  # ov-oo
+            ov[i,no*nv+no:no*nv+no*2] = hx[passed+i+no,passed+nvir:passed+nvir+no]
+            for j in range(no):
+                ov[i,j*nv:(j+1)*nv] = hx[passed+i+no,passed+no+j*nvir:passed+no+nv+j*nvir]   #  ov-ov
+        
+       
+        for i in range(nv):
+            ov[nv+i,no*nv:no*nv+no] = hx[nvir+passed+i+no,passed:passed+no]  # ov-oo
+            ov[nv+i,no*nv+no:no*nv+no*2] = hx[nvir+passed+i+no,passed+nvir:passed+nvir+no]
+            for j in range(no):
+                ov[nv+i,j*nv:(j+1)*nv] = hx[nvir+passed+i+no,passed+no+j*nvir:passed+no+nv+j*nvir]
+
+        tmp_A = np.zeros_like(hx)
+        tmp_A[:dim1,:] = cv
+        tmp_A[dim1:dim2,dim1:] = co
+        tmp_A[dim2:dim3,dim2:] = ov
+        tmp_A[dim3:,dim3:] = oo
+        new_A = np.triu(tmp_A)
+        new_A_T = new_A.T + new_A - np.diag(np.diagonal(tmp_A))
+        np.save('hx.npy',new_A_T)
+        print('hx had save as "hx.npy"')
+        return None
+    
+    def debug_hx_dav(self,hx): # hx(n,ndim-1) with self.re
+        no = self.no
+        nc = self.nc
+        nv = self.nv
+        nvir = no+nv
+        ndim = hx.shape[1]
+        passed = nc*nvir
+        cv = np.zeros((nc*nv,ndim))
+        co = np.zeros((nc*no,ndim-nc*nv))
+        ov = np.zeros((no*nv,ndim-nc*nv-nc*no))
+        oo = np.zeros((no*no-1,no*no-1))
+        dim1 = nc*nv
+        dim2 = dim1+nc*no
+        dim3 = dim2+no*nv
+        for index in range(nc): # nc-> no|nv
+            for i in range(no):
+                for j in range(nc):
+                    co[index*no+i,j*no:j*no+no] = hx[index*nvir+i,j*nvir:nvir*j+no] # co-co
+                for k in range(no-1):
+                    co[index*no+i,nc*no+k*nv:nc*no+(k+1)*nv] = hx[index*nvir+i,passed+nvir*k+no:passed+nvir*k+no+nv] # co-ov
+                    co[index*no+i,nc*no+no*nv+k*no:nc*no+no*nv+(k+1)*no] = hx[index*nvir+i,passed+nvir*k:passed+nvir*k+no] # co-oo
+                co[index*no+i,nc*no+(no-1)*nv:nc*no+(no-1)*nv+nv] = hx[index*nvir+i,passed+nvir*(no-1)+no-1:passed+nvir*(no-1)+no-1+nv]#co-ov
+                co[index*no+i,nc*no+no*nv+(no-1)*no:nc*no+no*nv+(no-1)*no+no-1] = hx[index*nvir+i,passed+nvir*(no-1):passed+nvir*(no-1)+no-1]#co-oo
+            for i in range(nv): # cv
+                for j in range(nc):
+                    cv[index*nv+i,j*nv:(j+1)*nv] = hx[index*nvir+no+i,no+j*nvir:no+j*nvir+nv] # cv-cv
+                    cv[index*nv+i,nc*nv+no*j:nc*nv+no*(j+1)] = hx[index*nvir+no+i,nvir*j:nvir*j+no] # cv-co
+                for k in range(no-1):
+                    cv[index*nv+i,nc*nv+nc*no+k*nv:nc*nv+nc*no+(k+1)*nv] = hx[index*nvir+no+i,passed+nvir*k+no:passed+nvir*k+no+nv] # cv-ov
+                    cv[index*nv+i,dim3+k*no:dim3+(k+1)*no] = hx[index*nvir+no+i,passed+nvir*k:passed+nvir*k+no] # cv-oo
+                cv[index*nv+i,nc*nv+nc*no+(no-1)*nv:nc*nv+nc*no+(no-1)*nv+nv] = hx[index*nvir+no+i,passed+nvir*(no-1)+no-1:passed+nvir*(no-1)+no-1+nv] #cv-ov
+                cv[index*nv+i,dim3+(no-1)*no:dim3+(no-1)*no+no-1] = hx[index*nvir+no+i,passed+nvir*(no-1):passed+nvir*(no-1)+no-1]#cv-oo
+
+        for index in range(no-1): # no -> no|nv
+            for i in range(no):
+                for j in range(no-1):
+                    oo[i+index*no,j*no:j*no+no] = hx[index*nvir+passed+i,passed+j*nvir:passed+j*nvir+no] # oo-oo
+                oo[i+index*no,(no-1)*no:(no-1)*no+no-1] = hx[index*nvir+passed+i,passed+(no-1)*nvir:passed+(no-1)*nvir+no-1]
+            #oo[(no-1)*no+index,index*no:index*no+no] = hx[passed+(no-1)*nvir+index,passed+index*nvir:passed+index*nvir+no]
+            oo[(no-1)*no+index,(no-1)*no:(no-1)*no+no-1] = hx[passed+(no-1)*nvir+index,passed+(no-1)*nvir:passed+(no-1)*nvir+no-1]
+
+        for j in range(no-1):
+            for i in range(nv): # ov diag
+                ov[i,j*nv:(j+1)*nv] = hx[passed+no+i,passed+no:passed+no+nv] # ov-ov, 1 electron in no
+                ov[i+nv,j*nv:(j+1)*nv] = hx[passed+no-1+i+nvir,passed+no:passed+no+nv] # ov-ov
+        for i in range(nv):
+            ov[i,(no-1)*nv:no*nv] = hx[passed+no+i,passed+nvir+no-1:passed+nvir+no-1+nv] # ov-ov
+            ov[i+nv,(no-1)*nv:no*nv] = hx[passed+no-1+i+nvir,passed+nvir+no-1:passed+nvir+no-1+nv] # ov-ov
+        for j in range(no-1):
+            for i in range(nv):
+                ov[i,(j+1)*no*nv:(j+1)*no*nv+no] = hx[passed+no+i,passed+j*nvir:passed+j*nvir+no] #ov-oo
+                ov[i+nv,(j+1)*no*nv:(j+1)*no*nv+no] = hx[passed+no-1+i+nvir,passed+j*nvir:passed+j*nvir+no]#ov-oo
+        for i in range(nv):
+            ov[i,no*nv*(no-1)+no:no*nv*(no-1)+no+no-1] = hx[passed+no+i,passed+nvir*(no-1):passed+nvir*(no-1)+no-1] #ov-oo
+            ov[i+nv,no*nv*(no-1)+no:no*nv*(no-1)+no+no-1] = hx[passed+no-1+i+(no-1)*nvir,passed+nvir*(no-1):passed+nvir*(no-1)+no-1]
+
+        tmp_A = np.zeros_like(hx)
+        print('hx.shape ',hx.shape)
+        print('oo.shape ',oo.shape)
+        tmp_A[:nc*nv,:] = cv
+        tmp_A[nc*nv:nc*nv+nc*no,nc*nv:] = co
+        tmp_A[nc*nv+nc*no:nc*nv+nc*no+no*nv,nc*nv+nc*no:] = ov
+        tmp_A[nc*nv+nc*no+no*nv:,nc*nv+nc*no+no*nv:] = oo
+        new_A = np.triu(tmp_A)
+        new_A_T = new_A.T + new_A - np.diag(np.diagonal(tmp_A))
+        np.save('hx_dav.npy',new_A_T)
+        print('hx had save as "hx_dav.npy"')
+        return None
+    
+    def deal_v_davidson(self):
+        # change davidson data form like nvir|nvir|nvir|...(alpha->beta nc|no -> no|nv)  to cv|co|ov|oo
+ 
+        cv = np.zeros((self.nstates,self.nc,self.nv))
+        co = np.zeros((self.nstates,self.nc,self.no))
+        ov = np.zeros((self.nstates,self.no,self.nv))
+        if self.re:
+            oo = np.zeros((self.nstates,self.no*self.no-1))
+        else:
+            oo = np.zeros((self.nstates,self.no,self.no))
+        nvir = self.no+self.nv
+        passed = self.nc*nvir
+        if self.nstates == (self.nc+self.no)*(self.no+self.nv):
+            nstates = self.nstates-1
+        else:
+            nstates = self.nstates
+        for state in range(nstates):
+            tmp_data = self.v[:,state]
+            #print(tmp_data[passed:])
+            for i in range(self.nc):
+                cv[state,i,:] += tmp_data[i*nvir+self.no:i*nvir+self.no+self.nv]
+                co[state,i,:] += tmp_data[i*nvir:i*nvir+self.no]
+            if self.re:
+                for i in range(self.no-1):
+                    oo[state,i*self.no:(i+1)*self.no] += tmp_data[passed+i*nvir:passed+i*nvir+self.no]
+                    ov[state,i,:] += tmp_data[passed+i*nvir+self.no:passed+i*nvir+self.no+self.nv]
+                oo[state,(self.no-1)*self.no:] += tmp_data[passed+(self.no-1)*nvir:passed+(self.no-1)*nvir+self.no-1]
+                ov[state,self.no-1,:] += tmp_data[passed+(self.no-1)*nvir+self.no-1:]
+            else:
+                for i in range(self.no):
+                    oo[state,i,:] += tmp_data[passed+i*nvir:passed+i*nvir+self.no]
+                    ov[state,i,:] += tmp_data[passed+i*nvir+self.no:passed+i*nvir+self.no+self.nv]
+        
+        v = np.hstack([cv.reshape(self.nstates,-1),co.reshape(self.nstates,-1),ov.reshape(self.nstates,-1),oo.reshape(self.nstates,-1)])
+        return v.T
+    
+    def davidson_process(self,foo,fglobal):
+        print("Davidson process...")
         vind, hdiag = self.gen_tda_operation_sf(foo,fglobal)
         precond = hdiag
-        x0 = init_guess(self.mf, self.nstates)
+        #print('precode ',precond)
+        x0 = self.init_guess(self.mf, self.nstates)
+        #print('x0.shape ',x0.shape)
         converged, e, x1 = lib.davidson1(vind, x0, precond,
                               tol=1e-9,
                               nroots=self.nstates,
@@ -1090,6 +1287,8 @@ class SA_SF_TDA():
         self.converged = converged
         self.e = e
         self.v = np.array(x1).T
+        #print(self.v.shape)
+        self.v = self.deal_v_davidson()
         print('Converged ',converged)
         return None
     
@@ -1113,15 +1312,19 @@ class SA_SF_TDA():
             
     def kernel(self, nstates=1,remove=False,frozen=None,foo=1.0,d_lda=0.3,fglobal=None):
         self.re = remove
-        self.nstates = nstates
+        nov = (self.nc+self.no) * (self.no+self.nv)
+        self.nstates = min(nstates,nov)
         if fglobal is None:
             fglobal = (1-d_lda)*self.hyb + d_lda
         if remove:
             #print('fglobal',fglobal)
             if self.davidson:
-                self.davison_process(foo=foo,fglobal=fglobal)
+                self.vects = self.get_vect()
+                self.davidson_process(foo=foo,fglobal=fglobal)
             else:
                 self.A = self.get_Amat(foo=foo,fglobal=fglobal)
+                np.save('diag_A.npy',self.A)
+                print('matrix saved as diag_A.nyp.')
                 self.A = self.remove()
                 if self.A.shape[0] < 1000:
                     e,v = scipy.linalg.eigh(self.A)
@@ -1133,7 +1336,7 @@ class SA_SF_TDA():
                 self.v = v[:,:nstates]
         else:
             if self.davidson:
-                self.davison_process(foo=foo,fglobal=fglobal)
+                self.davidson_process(foo=foo,fglobal=fglobal)
             else:
                 self.A = self.get_Amat(foo=foo,fglobal=fglobal)
                 if frozen is not None:
