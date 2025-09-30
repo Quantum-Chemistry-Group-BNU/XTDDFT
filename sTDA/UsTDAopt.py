@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 import os
 import sys
-os.environ["OMP_NUM_THREADS"] = "4"
+os.environ["OMP_NUM_THREADS"] = "16"
 sys.path.append('../')
 import time
 import scipy
@@ -146,6 +146,11 @@ class UsTDA:
         logger.info(self.mf, "A matrix dim is {}".format((nc + no) * nv + nc * (no + nv)))
         logger.info(self.mf, 'nelectron is {}'.format(self.mol.nelectron))
         logger.info(self.mf, 'natm is {}'.format(self.mol.natm))
+        print('='*50)
+        print('num.orb    mo_energy_a   mo_energy_b    mo_occ_a    mo_occ_b')
+        for me, o in zip(enumerate(mf.mo_energy.T), mf.mo_occ.T):
+            ind, moei = me
+            print(f'{ind + 1:5d}    {moei[0]:10.4f}    {moei[1]:10.4f}    {o[0]:8.3f}    {o[1]:8.3f}')
 
     def gamma(self, hyb):
         R = gto.inter_distance(self.mol)  # internuclear distance array, unit is bohr
@@ -241,6 +246,8 @@ class UsTDA:
             self.frozen_nc = act_orb[0]
         else:
             self.frozen_nc = 0
+        logger.info(self.mf, 'occ. MOs in sUTDA (alpha, beta): {} {}'.format(nocc_a, nocc_b))
+        logger.info(self.mf, 'vir. MOs in sUTDA (alpha, beta): {} {}'.format(nvir_a, nvir_b))
 
         fock = self.mf.get_fock()
         fock_a = mo_coeff_a.T @ fock[0] @ mo_coeff_a
@@ -692,7 +699,7 @@ class UsTDA:
         print('my UsTDA result is')
         print(f'{"num":>4} {"energy":>8} {"wav_len"} {"osc_str":>8} {"rot_str":>8} {"deltaS2":>8}')
         for ni, ei, wli, osi, rsi, ds2i in zip(range(self.nstates), self.e_eV, unit.eVxnm/self.e_eV, self.os, rs, self.dS2):
-            print(f'{ni:4d} {ei:8.4f} {wli:8.4f} {osi:8.4f} {rsi:8.4f} {ds2i:8.4f}')
+            print(f'{ni+1:4d} {ei:8.4f} {wli:8.4f} {osi:8.4f} {rsi:8.4f} {ds2i:8.4f}')
         if self.savedata:
             pd.DataFrame(
                 np.concatenate((unit.eVxnm / np.expand_dims(self.e_eV, axis=1), np.expand_dims(self.os, axis=1)), axis=1)
@@ -836,6 +843,10 @@ class UsTDA:
         fnc = self.frozen_nc
         out_cube = [0, np.argmax(self.os)]  # only output 1st excited state and max os excited state orbital
         orbital = []  # record output orbital number
+        if self.truncate:
+            self.v = utils.so2st(self.v[:, :self.nstates], lcva=self.lcva, lova=self.lova, lcob=self.lcob, lcvb=self.lcvb)
+        else:
+            self.v = utils.so2st(self.v[:, :self.nstates], nc, no, nv)
         for nstate in range(self.nstates):
             value = self.v[:,nstate]
             x_cv_aa = value[:self.lcva]
@@ -851,51 +862,51 @@ class UsTDA:
             # out_excittype = np.argmax((np.max(abs(x_cv_aa)), np.max(abs(x_ov_aa)), np.max(abs(x_co_bb)), np.max(abs(x_cv_bb))))
             if self.truncate:
                 for i in np.where(abs(x_cv_aa) > 0.1)[0]:
-                    print(f'    CV(aa) {fnc+self.pscsfcv_i[i]+1:3d}a -> {fnc+self.pscsfcv_a[i]+1+nc+no:3d}a'
+                    print(f'    CV(0) {fnc+self.pscsfcv_i[i]+1:3d}a -> {fnc+self.pscsfcv_a[i]+1+nc+no:3d}a'
                           + f'    c_i: {x_cv_aa[i]:8.5f}    Per: {100*x_cv_aa[i]**2:5.2f}%')
                     # if nstate in out_cube and out_excittype == 0 and i == np.argmax(abs(x_cv_aa)):
                     if nstate in out_cube:
                         orbital.append(fnc+self.pscsfcv_i[i])
                         orbital.append(fnc+self.pscsfcv_a[i]+nc+no)
                 for i in np.where(abs(x_ov_aa) > 0.1)[0]:
-                    print(f'    OV(aa) {fnc+self.pscsfov_a_i[i]+1+nc:3d}a -> {fnc+self.pscsfov_a_a[i]+1+nc+no:3d}a'
+                    print(f'    OV(0) {fnc+self.pscsfov_a_i[i]+1+nc:3d}a -> {fnc+self.pscsfov_a_a[i]+1+nc+no:3d}a'
                           + f'    c_i: {x_ov_aa[i]:8.5f}    Per: {100*x_ov_aa[i]**2:5.2f}%')
                     if nstate in out_cube:
                         orbital.append(fnc+self.pscsfov_a_i[i]+nc)
                         orbital.append(fnc+self.pscsfov_a_a[i]+nc+no)
                 for i in np.where(abs(x_co_bb) > 0.1)[0]:
-                    print(f'    CO(bb) {fnc+self.pscsfco_b_i[i]+1:3d}b -> {fnc+self.pscsfco_b_a[i]+1+nc:3d}b'
+                    print(f'    CO(0) {fnc+self.pscsfco_b_i[i]+1:3d}b -> {fnc+self.pscsfco_b_a[i]+1+nc:3d}b'
                           + f'    c_i: {x_co_bb[i]:8.5f}    Per: {100*x_co_bb[i]**2:5.2f}%')
                     if nstate in out_cube:
                         orbital.append(fnc+self.pscsfco_b_i[i])
                         orbital.append(fnc+self.pscsfco_b_a[i]+nc)
                 for i in np.where(abs(x_cv_bb) > 0.1)[0]:
-                    print(f'    CV(bb) {fnc+self.pscsfcv_i[i]+1:3d}b -> {fnc+self.pscsfcv_a[i]+1+nc+no:3d}b'
+                    print(f'    CV(1) {fnc+self.pscsfcv_i[i]+1:3d}b -> {fnc+self.pscsfcv_a[i]+1+nc+no:3d}b'
                           + f'    c_i: {x_cv_bb[i]:8.5f}    Per: {100*x_cv_bb[i]**2:5.2f}%')
                     if nstate in out_cube:
                         orbital.append(fnc+self.pscsfcv_i[i])
                         orbital.append(fnc+self.pscsfcv_a[i]+nc+no)
             else:
                 for o, v in zip(*np.where(abs(x_cv_aa) > 0.1)):
-                    print(f'    CV(aa) {fnc+o + 1:3d}a -> {fnc+v + 1 + nc+no:3d}a'
+                    print(f'    CV(0) {fnc+o + 1:3d}a -> {fnc+v + 1 + nc+no:3d}a'
                           + f'    c_i: {x_cv_aa[o, v]:8.5f}    Per: {100*x_cv_aa[o, v]**2:5.2f}%')
                     if nstate in out_cube:
                         orbital.append(fnc+o)
                         orbital.append(fnc+v+nc+no)
                 for o, v in zip(*np.where(abs(x_ov_aa) > 0.1)):
-                    print(f'    OV(aa) {fnc+nc+o + 1:3d}a -> {fnc+v + 1+nc+no:3d}a'
+                    print(f'    OV(0) {fnc+nc+o + 1:3d}a -> {fnc+v + 1+nc+no:3d}a'
                           + f'     c_i: {x_ov_aa[o, v]:8.5f}    Per: {100*x_ov_aa[o, v]**2:5.2f}%')
                     if nstate in out_cube:
                         orbital.append(fnc+nc+o)
                         orbital.append(fnc+v+nc+no)
                 for o, v in zip(*np.where(abs(x_co_bb) > 0.1)):
-                    print(f'    CO(bb) {fnc+o + 1:3d}b -> {fnc+v + 1+nc:3d}b'
+                    print(f'    CO(0) {fnc+o + 1:3d}b -> {fnc+v + 1+nc:3d}b'
                           + f'    c_i: {x_co_bb[o, v]:8.5f}    Per: {100*x_co_bb[o, v]**2:5.2f}%')
                     if nstate in out_cube:
                         orbital.append(fnc+o)
                         orbital.append(fnc+v+nc)
                 for o, v in zip(*np.where(abs(x_cv_bb) > 0.1)):
-                    print(f'    CV(bb) {fnc+o + 1:3d}b -> {fnc+v + 1 + nc+no:3d}b'
+                    print(f'    CV(1) {fnc+o + 1:3d}b -> {fnc+v + 1 + nc+no:3d}b'
                           + f'    c_i: {x_cv_bb[o, v]:8.5f}    Per: {100*x_cv_bb[o, v]**2:5.2f}%')
                     if nstate in out_cube:
                         orbital.append(fnc+o)
@@ -912,9 +923,15 @@ class UsTDA:
 
 if __name__ == "__main__":
     mol = gto.M(
-        # atom=atom.n2,  # unit is Angstrom
-        # atom=atom.ch2o,
-        atom=atom.ch2o_vacuum,
+        # atom=atom.n2_,  # unit is Angstrom
+        atom=atom.ch2o,
+        # atom=atom.ch2o_vacuum,
+        # atom=atom.ttm_toluene,
+        # atom=atom.bispytm_toluene,
+        # atom=atom.ttm3ncz_toluene,
+        # atom=atom.mttm2_toluene,
+        # atom=atom.hhcrqpp2,
+        # atom=atom.ptm3ncz_cyclohexane,
         unit="A",
         # unit="B",  # https://doi.org/10.1016/j.comptc.2014.02.023 use bohr
         # basis='aug-cc-pvtz',
@@ -934,21 +951,18 @@ if __name__ == "__main__":
     # mol.basis = basis
     # mol.build()
 
-    # # add solvents
-    # t_dft0 = time.time()
-    # mf = dft.UKS(mol).SMD()
-    # # mf = dft.UKS(mol).PCM()
-    # # mf.with_solvent.method = 'COSMO'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
-    # # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
-    # # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
-    # mf.with_solvent.eps = 2.3741  # for toluene 甲苯
-    # # mf.with_solvent.eps = 35.688  # for Acetonitrile 乙腈
-
+    # add solvents
     t_dft0 = time.time()
-    mf = dft.UKS(mol)
-    # mf.init_guess = '1e'
-    # mf.init_guess = 'atom'
-    # mf.init_guess = 'huckel'
+    mf = dft.UKS(mol).SMD()
+    # mf = dft.UKS(mol).PCM()
+    # mf.with_solvent.method = 'COSMO'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
+    # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
+    # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
+    mf.with_solvent.eps = 2.3741  # for toluene 甲苯
+    # mf.with_solvent.eps = 35.688  # for Acetonitrile 乙腈
+
+    # t_dft0 = time.time()
+    # mf = dft.UKS(mol)
     mf.conv_tol = 1e-8
     mf.conv_tol_grad = 1e-5
     mf.max_cycle = 200
@@ -964,15 +978,13 @@ if __name__ == "__main__":
     # xc = 'bhhlyp'
     # mf.grids.level = 9
     mf.conv_check = False
+    # mf.level_shift = 0.6
     mf.kernel()
     t_dft1 = time.time()
     print("dft use {} s".format(t_dft1 - t_dft0))
-    # os.environ["OMP_NUM_THREADS"] = "1"  # test one core time consuming
-    print('num.orb    mo_energy_a    mo_energy_b')
-    for ind, moei in enumerate(mf.mo_energy.T):
-        print(f'{ind+1:5d}    {moei[0]:10.4f}    {moei[1]:10.4f}')
     print('=' * 50)
 
+    os.environ["OMP_NUM_THREADS"] = "1"  # test one core time-consuming
     ustda = UsTDA(mol, mf, nstates=10)
     ustda.info()
 

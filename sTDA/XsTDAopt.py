@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 import os
 import sys
-os.environ["OMP_NUM_THREADS"] = "4"
+os.environ["OMP_NUM_THREADS"] = "16"
 sys.path.append('../')
 import time
 import scipy
@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import basis_set_exchange as bse
 from numba import jit
+from joblib import Parallel, delayed
 from pyscf import dft, gto, scf, tddft, lo
 from pyscf.lib import logger
 from pyscf.tools import molden, cubegen
@@ -127,36 +128,36 @@ def iajb_f(pcsfi, pcsfa, qAk1, qAj1, qBk1, qBj1, qBk2,
     eye12 = np.eye(n12)
     eye21 = np.eye(n21)
     eye22 = np.eye(n22)
-    for i, j in zip(pcsfi, pcsfa):
+    for i, a in zip(pcsfi, pcsfa):
         iajb1 = np.einsum('nm, nmi, nm->i',
-                           qAk1[:, None, nc_c+i, no_c+j], qBk1[None, :, ncsf11, ncsf12], gamma_k)
+                           qAk1[:, None, nc_c+i, no_c+a], qBk1[None, :, ncsf11, ncsf12], gamma_k)
         iajb1 -= np.einsum('nmi, nmi, nm->i',
-                           qAj1[:, None, nc_c+i, ncsf11], qBj1[None, :, no_c+j, ncsf12], gamma_j)
-        iajb1 += np.einsum('i, i->i', eye11[nc_c + i, ncsf11], fock_vir[no_c + j, ncsf12])
-        iajb1 -= np.einsum('i, i->i', fock_occ[nc_c + i, ncsf11], eye12[no_c + j, ncsf12])
+                           qAj1[:, None, nc_c+i, ncsf11], qBj1[None, :, no_c+a, ncsf12], gamma_j)
+        iajb1 += np.einsum('i, i->i', eye11[nc_c + i, ncsf11], fock_vir[no_c + a, ncsf12])
+        iajb1 -= np.einsum('i, i->i', fock_occ[nc_c + i, ncsf11], eye12[no_c + a, ncsf12])
         iajb2 = np.einsum('nm, nmi, nm->i',
-                           qAk1[:, None, nc_c+i, no_c+j], qBk1[None, :, ncsf21, ncsf22], gamma_k)
+                           qAk1[:, None, nc_c+i, no_c+a], qBk1[None, :, ncsf21, ncsf22], gamma_k)
         iajb2 -= np.einsum('nmi, nmi, nm->i',
-                           qAj1[:, None, nc_c+i, ncsf21], qBj1[None, :, no_c+j, ncsf22], gamma_j)
-        iajb2 += np.einsum('i, i->i', eye21[nc_c + i, ncsf21], fock_vir[no_c + j, ncsf22])
-        iajb2 -= np.einsum('i, i->i', fock_occ[nc_c + i, ncsf21], eye22[no_c + j, ncsf22])
+                           qAj1[:, None, nc_c+i, ncsf21], qBj1[None, :, no_c+a, ncsf22], gamma_j)
+        iajb2 += np.einsum('i, i->i', eye21[nc_c + i, ncsf21], fock_vir[no_c + a, ncsf22])
+        iajb2 -= np.einsum('i, i->i', fock_occ[nc_c + i, ncsf21], eye22[no_c + a, ncsf22])
         iajb3 = np.einsum('nm, nmi, nm->i',
-                           qAk1[:, None, nc_c+i, no_c+j], qBk2[None, :, ncsf31, ncsf32], gamma_k)
+                           qAk1[:, None, nc_c+i, no_c+a], qBk2[None, :, ncsf31, ncsf32], gamma_k)
         iajb4 = np.einsum('nm, nmi, nm->i',
-                           qAk1[:, None, nc_c+i, no_c+j], qBk2[None, :, ncsf41, ncsf42], gamma_k)
+                           qAk1[:, None, nc_c+i, no_c+a], qBk2[None, :, ncsf41, ncsf42], gamma_k)
         if iajbtype == 'cva':
-            iajb1 += _cvaacvaa_ndc(i, j, ncsf, nc, no, nv, si, fij_a2, fij_b2, fab_a2, fab_b2)
-            iajb4 += _cvaacvbb_ndc(i, j, ncsf, nc, no, nv, si, fij_a2, fij_b2, fab_a2, fab_b2)
+            iajb1 += _cvaacvaa_ndc(i, a, ncsf, nc, no, nv, si, fij_a2, fij_b2, fab_a2, fab_b2)
+            iajb4 += _cvaacvbb_ndc(i, a, ncsf, nc, no, nv, si, fij_a2, fij_b2, fab_a2, fab_b2)
         elif iajbtype == 'cvb':
-            iajb2 += _cvbbcvbb_ndc(i, j, ncsf, nc, no, nv, si, fij_a2, fij_b2, fab_a2, fab_b2)
-            iajb3 += _cvaacvbb_ndc(i, j, ncsf, nc, no, nv, si, fij_a2, fij_b2, fab_a2, fab_b2)
+            iajb2 += _cvbbcvbb_ndc(i, a, ncsf, nc, no, nv, si, fij_a2, fij_b2, fab_a2, fab_b2)
+            iajb3 += _cvaacvbb_ndc(i, a, ncsf, nc, no, nv, si, fij_a2, fij_b2, fab_a2, fab_b2)
         if 'a' in iajbtype:
             iajbline = np.concatenate((iajb1, iajb2, iajb3, iajb4), axis=0)
         elif 'b' in iajbtype:
             iajbline = np.concatenate((iajb3, iajb4, iajb1, iajb2), axis=0)
         else:
             raise "iajbtype input error"
-        iajb += iajbline ** 2 / (iaia_ncsf - iaia[i, j] + 1e-10)
+        iajb += iajbline ** 2 / (iaia_ncsf - iaia[i, a] + 1e-10)
     return iajb
 
 
@@ -190,6 +191,11 @@ class XsTDA:
         logger.info(self.mf, "A matrix dim is {}".format((nc + no) * nv + nc * (no + nv)))
         logger.info(self.mf, 'nelectron is {}'.format(self.mol.nelectron))
         logger.info(self.mf, 'natm is {}'.format(self.mol.natm))
+        print('='*50)
+        print('num.orb    mo_energy     mo_occ')
+        for me, o in zip(enumerate(mf.mo_energy), mf.mo_occ):
+            ind, moei = me
+            print(f'{ind + 1:5d}    {moei:10.4f}    {o:8.3f}')
 
     def gamma(self, hyb):
         R = gto.inter_distance(self.mol)  # internuclear distance array, unit is bohr
@@ -268,6 +274,9 @@ class XsTDA:
             self.frozen_nc = np.min(index)
         else:
             self.frozen_nc = 0
+        logger.info(self.mf, 'double occ. MOs in sXTDA: {}'.format(nocc_b))
+        logger.info(self.mf, 'single occ. MOs in sXTDA: {}'.format(nocc_a-nocc_b))
+        logger.info(self.mf, 'vir. MOs in sXTDA: {}'.format(nvir_a))
 
         # Section: compute Fock matrix
         h1e = self.mf.get_hcore()
@@ -711,7 +720,7 @@ class XsTDA:
         print('my XsTDA result is')
         print(f'{"num":>4} {"energy":>8} {"wav_len":>8} {"osc_str":>8} {"rot_str":>8} {"deltaS2":>8}')
         for ni, ei, wli, osi, rsi, ds2i in zip(range(self.nstates), self.e_eV, unit.eVxnm/self.e_eV, self.os, rs, self.dS2):
-            print(f'{ni:4d} {ei:8.4f} {wli:8.4f} {osi:8.4f} {rsi:8.4f} {ds2i:8.4f}')
+            print(f'{ni+1:4d} {ei:8.4f} {wli:8.4f} {osi:8.4f} {rsi:8.4f} {ds2i:8.4f}')
         if self.savedata:
             pd.DataFrame(
                 np.concatenate((unit.eVxnm / np.expand_dims(self.e_eV, axis=1), np.expand_dims(self.os, axis=1)), axis=1)
@@ -895,9 +904,15 @@ class XsTDA:
 
 if __name__ == "__main__":
     mol = gto.M(
-        # atom=atom.n2,  # unit is Angstrom
-        # atom=atom.ch2o,
-        atom=atom.ch2o_vacuum,
+        # atom=atom.n2_,  # unit is Angstrom
+        atom=atom.ch2o,
+        # atom=atom.ch2o_vacuum,
+        # atom=atom.ttm_toluene,
+        # atom=atom.bispytm_toluene,
+        # atom=atom.ttm3ncz_toluene,
+        # atom=atom.mttm2_toluene,
+        # atom=atom.hhcrqpp2,
+        # atom=atom.ptm3ncz_cyclohexane,
         unit="A",
         # unit="B",  # https://doi.org/10.1016/j.comptc.2014.02.023 use bohr
         # basis='aug-cc-pvtz',
@@ -918,21 +933,18 @@ if __name__ == "__main__":
     # mol.basis = basis
     # mol.build()
 
-    # # add solvents
-    # t_dft0 = time.time()
-    # mf = dft.ROKS(mol).SMD()
-    # # mf = dft.ROKS(mol).PCM()
-    # # mf.with_solvent.method = 'COSMO'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
-    # # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
-    # # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
-    # # mf.with_solvent.eps = 2.3741  # for toluene 甲苯
-    # # mf.with_solvent.eps = 35.688  # for Acetonitrile 乙腈
-
+    # add solvents
     t_dft0 = time.time()
-    mf = dft.ROKS(mol)
-    # mf.init_guess = '1e'
-    # mf.init_guess = 'atom'
-    # mf.init_guess = 'huckel'
+    mf = dft.ROKS(mol).SMD()
+    # mf = dft.ROKS(mol).PCM()
+    # mf.with_solvent.method = 'COSMO'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
+    # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
+    # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
+    mf.with_solvent.eps = 2.3741  # for toluene 甲苯
+    # mf.with_solvent.eps = 35.688  # for Acetonitrile 乙腈
+
+    # t_dft0 = time.time()
+    # mf = dft.ROKS(mol)
     mf.conv_tol = 1e-8
     mf.conv_tol_grad = 1e-5
     mf.max_cycle = 200
@@ -948,13 +960,12 @@ if __name__ == "__main__":
     # xc = 'bhhlyp'
     # mf.grids.level = 9
     mf.conv_check = False
+    # mf.level_shift = 0.6
     mf.kernel()
     t_dft1 = time.time()
-    print('num.orb    mo_energy')
-    for ind, moei in enumerate(mf.mo_energy):
-        print(f'{ind+1:5d}    {moei:10.4f}')
     print('='*50)
 
+    os.environ["OMP_NUM_THREADS"] = "1"  # test one core time-consuming
     xstda = XsTDA(mol, mf)
     xstda.info()
     print('='*50)
