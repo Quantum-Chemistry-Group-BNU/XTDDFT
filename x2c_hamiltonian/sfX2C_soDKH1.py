@@ -99,24 +99,28 @@ def get_wso(mol):
         wso += -zA*mol.intor('cint1e_prinvxp_sph', 3) # sign due to integration by part
     return wso
 
-def get_kint(mol):
+def get_kint(mol,debug=0):
     '''
     Generate two-electron integrals K(l)mu,nu;kappa,lambda
     where mu, nu, kappa, lambda index orbitals
     ref.(49)
         K(l)mu,nu;lappa,lambda = varepsilon(lmn)(mu_m,nu|kappa_n,lambda)
         mu_m = \partial_m mu
-    where (mu_m,nu|kappa_n,lambda) come from `mol.intor('int2e_ip1ip2_sph',9)`
+    where (mu_m,nu|kappa_n,lambda) come from `int2e_ip1ip2_sph` libcint
     '''
     nb = mol.nao_nr()
     np = nb*nb # number of excitations
     nq = np*np # two single excitation
-    ddint = mol.intor('int2e_ip1ip2_sph',9).reshape(3,3,nq)
+    ddint = mol.intor('int2e_ip1ip2_sph').reshape(3,3,nq)
     kint = numpy.zeros((3,nq))
     kint[0] = ddint[1,2] - ddint[2,1] # Lx = y p_z - z p_y
     kint[1] = ddint[2,0] - ddint[0,2] # Ly = z p_x - x p_z
     kint[2] = ddint[0,1] - ddint[1,0] # Lz = x p_y - y p_x
-    return kint.reshape(3,nb,nb,nb,nb)
+    kint = kint.reshape(3,nb,nb,nb,nb)
+    if debug:
+        for n in range(0,kint.shape[0]):
+            print(f"axis-{n}, kint+kint.T={numpy.linalg.norm(kint[n]+kint[n].transpose(3,4,1,2))}")
+    return kint
 
 def get_hso1e(wso,x,rp):
     '''
@@ -153,9 +157,10 @@ def get_fso2e(kint,x,rp,pLL,pLS,pSS):
         gsoLS  = -numpy.einsum('mlkn,lk->mn',kint[ic],pLS)
         gsoLS -=  numpy.einsum('lmkn,lk->mn',kint[ic],pLS)
 
-        gsoSS  = -numpy.einsum('mnkl,lk',kint[ic],pLL)*2.
-        gsoSS -=  numpy.einsum('mnlk,lk',kint[ic],pLL)*2.
-        gsoSS +=  numpy.einsum('mlnk,lk',kint[ic],pLL)*2.
+        gsoSS  = -numpy.einsum('mnkl,lk->mn',kint[ic],pLL)*2.
+        gsoSS -=  numpy.einsum('mnlk,lk->mn',kint[ic],pLL)*2.
+        gsoSS +=  numpy.einsum('mlnk,lk->mn',kint[ic],pLL)*2.
+
         fso2e[ic] = gsoLL + gsoLS.dot(x) + x.T.dot(-gsoLS.T) + x.T.dot(gsoSS.dot(x))
         fso2e[ic] = reduce(numpy.dot,(rp.T,fso2e[ic],rp))
     return fso2e
@@ -188,7 +193,7 @@ def get_soDKH1_somf(myhf,mol,c,iop='x2c',include_mf2e=True,debug=False):
         rp = numpy.identity(nb)
     else:
         raise ValueError(f"iop={iop} not in {'x2c','bp'}")
-    dm = myhf.make_rdm1()
+    dm = myhf.make_rdm1()/2. # Here the DM matrix element is 1 or 1/2 or 0, not 2, 1, 0
     # Spin-Averaged for ROHF or UHF
     if len(dm.shape)==3: dm = (dm[0]+dm[1])/2.0
     dm = reduce(numpy.dot,(contr_coeff,dm,contr_coeff.T))
@@ -218,6 +223,7 @@ def get_soDKH1_somf(myhf,mol,c,iop='x2c',include_mf2e=True,debug=False):
                 tmp = hso1e[ic] + fso2e[ic]
                 print(f"{ic} vso2e  norm={numpy.linalg.norm(tmp):.12e}, "
                     f"Norm(tmp+tmp.T)={numpy.linalg.norm(tmp + tmp.T):.12e}")
+
     VsoDKH1contr = numpy.zeros((3,nc,nc))
     for ic in range(3):
         VsoDKH1contr[ic] = reduce(numpy.dot,(contr_coeff.T,VsoDKH1[ic],contr_coeff))
