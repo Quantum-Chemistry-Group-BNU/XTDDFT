@@ -1,13 +1,18 @@
 from pyscf import gto, dft, scf, ao2mo, lib, tddft,symm
+from pyscf.scf.uhf import spin_square
 from pyscf.dft.numint import _dot_ao_ao_sparse,_scale_ao_sparse,_tau_dot_sparse
 from pyscf.dft.gen_grid import NBINS
 import numpy as np
+import time
 from pyscf.dft import numint
 import scipy
 from functools import reduce
 from pyscf.symm import direct_prod
 #import sys
 #sys.path.append('/home/lenovo2/usrs/zhw/TDDFT')
+
+#from line_profiler import profile
+
 from SF_TDA import *
 au2ev = 27.21138505
 
@@ -194,6 +199,7 @@ def nr_uks_fxc_sf_tda(ni, mol, grids, xc_code, dm0, dms, relativity=0, hermi=0,v
     if vmat.dtype != dtype:
         vmat = np.asarray(vmat, dtype=dtype)
     return vmat
+    
 
 class SA_SF_TDA():
     def __init__(self,mf,SA=3,davidson=False,collinear=False):
@@ -223,7 +229,9 @@ class SA_SF_TDA():
         self.mf = mf
         self.davidson=davidson
         self.collinear = collinear
-
+        _,dsp1 = mf.spin_square()
+        self.ground_s = (dsp1-1)/2
+        
         self.occidx_a = np.where(self.mo_occ[0]==1)[0]
         self.viridx_a = np.where(self.mo_occ[0]==0)[0]
         self.occidx_b = np.where(self.mo_occ[1]==1)[0]
@@ -587,16 +595,38 @@ class SA_SF_TDA():
         else:
             return self.mol.irrep_name[direct_s[0][0]]
     
+    def deltaS2_U0(self,nstate):
+        mo = self.mf.mo_coeff
+        mo_occ = self.mf.mo_occ
+        occidxa = np.where(mo_occ[0]>0)[0]
+        occidxb = np.where(mo_occ[1]>0)[0]
+        viridxa = np.where(mo_occ[0]==0)[0]
+        viridxb = np.where(mo_occ[1]==0)[0]
+        mooa = mo[0][:,occidxa]
+        moob = mo[1][:,occidxb]
+        mova = mo[0][:,viridxa]
+        movb = mo[1][:,viridxb]
+        ovlp = self.mf.get_ovlp()
+        # spin transfer matrix
+        sab_oo = reduce(np.dot, (mooa.conj().T, ovlp, moob))
+        sba_oo = sab_oo.conj().T
+        sab_vo = reduce(np.dot, (mova.conj().T, ovlp, moob))
+        sba_vo = reduce(np.dot, (movb.conj().T, ovlp, mooa))
+        x_ba = self.v[:,nstate].reshape((self.nc+self.no,self.no+self.nv)).transpose(1,0)
+        P_ab = lib.einsum('ai,aj,jk,ki',x_ba.conj(),x_ba,sba_oo.T.conj(),sba_oo)\
+                  -lib.einsum('ai,bi,kb,ak',x_ba.conj(),x_ba,sba_vo.T.conj(),sba_vo)\
+                  +lib.einsum('ai,bj,jb,ai',x_ba.conj(),x_ba,sba_vo.T.conj(),sba_vo)
+        return P_ab
     
     def deltaS2_U(self,nstate):
         nc = self.nc
         no = self.no
         nv = self.nv
         value = self.v[:,nstate]
-        x_cv_ab = value[:nc*nv].reshape(nc,nv)
-        x_co_ab = value[nc*nv:nc*nv+nc*no].reshape(nc,no)
-        x_ov_ab = value[nc*nv+nc*no:nc*nv+nc*no+no*nv].reshape(no,nv)
-        x_oo_ab = value[nc*nv+nc*no+no*nv:].reshape(no,no)
+        x_cv_ab = value[:nc*nv].reshape(nc,nv).transpose(1,0)
+        x_co_ab = value[nc*nv:nc*nv+nc*no].reshape(nc,no).transpose(1,0)
+        x_ov_ab = value[nc*nv+nc*no:nc*nv+nc*no+no*nv].reshape(no,nv).transpose(1,0)
+        x_oo_ab = value[nc*nv+nc*no+no*nv:].reshape(no,no).transpose(1,0)
         mo_coeff = self.mf.mo_coeff
         orbo_a = mo_coeff[0][:, :self.nc+self.no]
         orbv_a = mo_coeff[0][:, self.nc+self.no:]
@@ -607,33 +637,42 @@ class SA_SF_TDA():
         Sccab = np.einsum('pq,pi,qj->ij', S, orbo_a, orbo_b)
         Scvab = np.einsum('pq,pi,qj->ij', S, orbo_a, orbv_b) 
         Svcba = np.einsum('pq,pi,qj->ij', S, orbv_b, orbo_a)
-        ds2 = (np.einsum('ia,ja,jk,ki->',x_cv_ab,x_cv_ab,Sccab[:self.nc,:],Sccba[:,:self.nc])  # 1 cv-cv
-              +np.einsum('ia,ja,jk,ki->',x_co_ab,x_co_ab,Sccab[:self.nc,:],Sccba[:,:self.nc])  # 1 co-co
-              +np.einsum('ia,ja,jk,ki->',x_ov_ab,x_ov_ab,Sccab[self.nc:,:],Sccba[:,self.nc:]) # 1 ov-ov
-              +np.einsum('ia,ja,jk,ki->',x_oo_ab,x_oo_ab,Sccab[self.nc:,:],Sccba[:,self.nc:]) # 1 oo-oo
-              +np.einsum('ia,ja,jk,ki->',x_cv_ab,x_ov_ab,Sccab[self.nc:,:],Sccba[:,:self.nc])*2 # 1 cv-ov
-              #+np.einsum('ia,ja,jk,ki->',x_ov_ab,x_cv_ab,Sccab[:self.nv,:],Sccba[:,self.nc:]) # 1 ov-cv
-              +np.einsum('ia,ja,jk,ki->',x_co_ab,x_oo_ab,Sccab[self.nc:,:],Sccba[:,:self.nc])*2 # 1 co-oo
-              #+np.einsum('ia,ja,jk,ki->',x_oo_ab,x_co_ab,Sccab[:self.nc,:],Sccba[:,self.nc:]) # 1 oo-co
-              -np.einsum('ia,ib,kb,ak->',x_cv_ab,x_cv_ab,Scvab[:,self.no:],Svcba[self.no:,:]) # 2 cv-cv
-              -np.einsum('ia,ib,kb,ak->',x_co_ab,x_co_ab,Scvab[:,:self.no],Svcba[:self.no,:]) # 2 co-co
-              -np.einsum('ia,ib,kb,ak->',x_ov_ab,x_ov_ab,Scvab[:,self.no:],Svcba[self.no:,:]) # 2 ov-ov
-              -np.einsum('ia,ib,kb,ak->',x_oo_ab,x_oo_ab,Scvab[:,:self.no],Svcba[:self.no,:]) # 2 oo-oo
-              -np.einsum('ia,ib,kb,ak->',x_cv_ab,x_co_ab,Scvab[:,:self.no],Svcba[self.no:,:])*2 # 2 cv-co
-              #-np.einsum('ia,ib,kb,ak->',x_co_ab,x_cv_ab,Scvab[:,self.no:],Svcba[:self.no,:]) # 2 co-cv
-              -np.einsum('ia,ib,kb,ak->',x_ov_ab,x_oo_ab,Scvab[:,:self.no],Svcba[self.no:,:])*2 # 2 ov-oo
-              #-np.einsum('ia,ib,kb,ak->',x_oo_ab,x_ov_ab,Scvab[:,self.no:],Svcba[:,:self.no]) # 2 oo-ov
-              +np.einsum('ia,jb,jb,ai->',x_cv_ab,x_cv_ab,Scvab[:self.nc,self.no:],Svcba[self.no:,:self.nc]) # 3 cv-cv
-              +np.einsum('ia,jb,jb,ai->',x_co_ab,x_co_ab,Scvab[:self.nc,:self.no],Svcba[:self.no,:self.nc]) # 3 co-co
-              +np.einsum('ia,jb,jb,ai->',x_ov_ab,x_ov_ab,Scvab[self.nc:,self.no:],Svcba[self.no:,:self.no]) # 3 ov-ov
-              +np.einsum('ia,jb,jb,ai->',x_oo_ab,x_oo_ab,Scvab[self.nc:,:self.no],Svcba[:self.no,self.nc:]) # 3 oo-oo
-              +np.einsum('ia,jb,jb,ai->',x_cv_ab,x_co_ab,Scvab[:self.nc,:self.no],Svcba[self.no:,:self.nc])*2 # 3 cv-co
-              +np.einsum('ia,jb,jb,ai->',x_cv_ab,x_ov_ab,Scvab[self.nc:,self.no:],Svcba[self.no:,:self.nc])*2 # 3 cv-ov
-              +np.einsum('ia,jb,jb,ai->',x_cv_ab,x_oo_ab,Scvab[self.nc:,:self.no],Svcba[self.no:,:self.nc])*2 # 3 cv-oo
-              +np.einsum('ia,jb,jb,ai->',x_co_ab,x_ov_ab,Scvab[self.nc:,self.no:],Svcba[:self.no,:self.nc])*2 # 3 co-ov
-              +np.einsum('ia,jb,jb,ai->',x_co_ab,x_oo_ab,Scvab[self.nc:,:self.no],Svcba[:self.no,:self.nc])*2 # 3 co-oo
-              +np.einsum('ia,jb,jb,ai->',x_ov_ab,x_oo_ab,Scvab[self.nc:,:self.no],Svcba[self.no:,:self.no])*2)
-        return ds2
+        #a = np.einsum('ai,aj,jk,ki->',x_cv_ab,x_ov_ab,Sccab[self.nc:,:],Sccba[:,:self.nc])
+        #b = np.einsum('ai,aj,jk,ki->',x_ov_ab,x_cv_ab,Sccab[:self.nc,:],Sccba[:,self.nc:])
+        #print('a-b', abs(a-b))
+        P_ab = (np.einsum('ai,aj,jk,ki->',x_cv_ab,x_cv_ab,Sccab[:self.nc,:],Sccba[:,:self.nc])  # 1 cv-cv
+              +np.einsum('ai,aj,jk,ki->',x_co_ab,x_co_ab,Sccab[:self.nc,:],Sccba[:,:self.nc])  # 1 co-co
+              +np.einsum('ai,aj,jk,ki->',x_ov_ab,x_ov_ab,Sccab[self.nc:,:],Sccba[:,self.nc:]) # 1 ov-ov
+              +np.einsum('ai,aj,jk,ki->',x_oo_ab,x_oo_ab,Sccab[self.nc:,:],Sccba[:,self.nc:]) # 1 oo-oo
+              +np.einsum('ai,aj,jk,ki->',x_cv_ab,x_ov_ab,Sccab[self.nc:,:],Sccba[:,:self.nc]) # 1 cv-ov
+              +np.einsum('ai,aj,jk,ki->',x_ov_ab,x_cv_ab,Sccab[:self.nc,:],Sccba[:,self.nc:]) # 1 ov-cv
+              +np.einsum('ai,aj,jk,ki->',x_co_ab,x_oo_ab,Sccab[self.nc:,:],Sccba[:,:self.nc]) # 1 co-oo
+              +np.einsum('ai,aj,jk,ki->',x_oo_ab,x_co_ab,Sccab[:self.nc,:],Sccba[:,self.nc:]) # 1 oo-co
+              -np.einsum('ai,bi,kb,ak->',x_cv_ab,x_cv_ab,Scvab[:,self.no:],Svcba[self.no:,:]) # 2 cv-cv
+              -np.einsum('ai,bi,kb,ak->',x_co_ab,x_co_ab,Scvab[:,:self.no],Svcba[:self.no,:]) # 2 co-co
+              -np.einsum('ai,bi,kb,ak->',x_ov_ab,x_ov_ab,Scvab[:,self.no:],Svcba[self.no:,:]) # 2 ov-ov
+              -np.einsum('ai,bi,kb,ak->',x_oo_ab,x_oo_ab,Scvab[:,:self.no],Svcba[:self.no,:]) # 2 oo-oo
+              -np.einsum('ai,bi,kb,ak->',x_cv_ab,x_co_ab,Scvab[:,:self.no],Svcba[self.no:,:]) # 2 cv-co
+              -np.einsum('ai,bi,kb,ak->',x_co_ab,x_cv_ab,Scvab[:,self.no:],Svcba[:self.no,:]) # 2 co-cv
+              -np.einsum('ai,bi,kb,ak->',x_ov_ab,x_oo_ab,Scvab[:,:self.no],Svcba[self.no:,:]) # 2 ov-oo
+              -np.einsum('ai,bi,kb,ak->',x_oo_ab,x_ov_ab,Scvab[:,self.no:],Svcba[:self.no,:]) # 2 oo-ov
+              +np.einsum('ai,bj,jb,ai->',x_cv_ab,x_cv_ab,Scvab[:self.nc,self.no:],Svcba[self.no:,:self.nc]) # 3 cv-cv
+              +np.einsum('ai,bj,jb,ai->',x_co_ab,x_co_ab,Scvab[:self.nc,:self.no],Svcba[:self.no,:self.nc]) # 3 co-co
+              +np.einsum('ai,bj,jb,ai->',x_ov_ab,x_ov_ab,Scvab[self.nc:,self.no:],Svcba[self.no:,:self.no]) # 3 ov-ov
+              +np.einsum('ai,bj,jb,ai->',x_oo_ab,x_oo_ab,Scvab[self.nc:,:self.no],Svcba[:self.no,self.nc:]) # 3 oo-oo
+              +np.einsum('ai,bj,jb,ai->',x_cv_ab,x_co_ab,Scvab[:self.nc,:self.no],Svcba[self.no:,:self.nc]) # 3 cv-co
+              +np.einsum('ai,bj,jb,ai->',x_co_ab,x_cv_ab,Scvab[:self.nc,self.no:],Svcba[:self.no,:self.nc])
+              +np.einsum('ai,bj,jb,ai->',x_cv_ab,x_ov_ab,Scvab[self.nc:,self.no:],Svcba[self.no:,:self.nc]) # 3 cv-ov
+              +np.einsum('ai,bj,jb,ai->',x_ov_ab,x_cv_ab,Scvab[:self.nc,self.no:],Svcba[self.no:,:self.no])
+              +np.einsum('ai,bj,jb,ai->',x_cv_ab,x_oo_ab,Scvab[self.nc:,:self.no],Svcba[self.no:,:self.nc]) # 3 cv-oo
+              +np.einsum('ai,bj,jb,ai->',x_oo_ab,x_cv_ab,Scvab[:self.nc,self.no:],Svcba[:self.no,self.nc:])
+              +np.einsum('ai,bj,jb,ai->',x_co_ab,x_ov_ab,Scvab[self.nc:,self.no:],Svcba[:self.no,:self.nc]) # 3 co-ov
+              +np.einsum('ai,bj,jb,ai->',x_ov_ab,x_co_ab,Scvab[:self.nc,:self.no],Svcba[self.no:,:self.no])
+              +np.einsum('ai,bj,jb,ai->',x_co_ab,x_oo_ab,Scvab[self.nc:,:self.no],Svcba[:self.no,:self.nc]) # 3 co-oo
+              +np.einsum('ai,bj,jb,ai->',x_oo_ab,x_co_ab,Scvab[:self.nc,:self.no],Svcba[:self.no,self.nc:])
+              +np.einsum('ai,bj,jb,ai->',x_ov_ab,x_oo_ab,Scvab[self.nc:,:self.no],Svcba[self.no:,:self.no]) # 3 ov-oo
+              +np.einsum('ai,bj,jb,ai->',x_oo_ab,x_ov_ab,Scvab[self.nc:,self.no:],Svcba[:self.no,self.nc:]))# 
+        return P_ab
 
 
     def analyse(self):
@@ -694,11 +733,12 @@ class SA_SF_TDA():
                 for i in range(no):
                     for j in range(no):
                         Dp_ab += x_oo_ab[i,i]*x_oo_ab[j,j]
-                ds2 = -self.no+1+Dp_ab
+                ds2 = -2*self.ground_s+1+Dp_ab
                 print(f'Excited state {nstate+1} {self.e[nstate]*27.21138505:10.5f} eV {self.e[nstate]+self.mf.e_tot:11.8f} Hartree D<S^2>={ds2:3.2f} {sym}')
                 Ds.append(ds2)
             elif self.type_u:
-                ds2 = self.deltaS2_U(nstate)-self.no+1
+                P_ab = self.deltaS2_U(nstate)
+                ds2 = P_ab - 2*self.ground_s + 1
                 Ds.append(ds2)
                 print(f'Excited state {nstate+1} {self.e[nstate]*27.21138505:10.5f} eV {self.e[nstate]+self.mf.e_tot:11.8f} Hartree D<S^2>={ds2:3.2f} {sym}')
             else:
@@ -745,10 +785,6 @@ class SA_SF_TDA():
         viridxb = np.where(mo_occ[1]==0)[0]
         #e_ia_b2a = (mo_energy[0][viridxa,None] - mo_energy[1][occidxb]).T
         e_ia_a2b = (mo_energy[1][viridxb,None] - mo_energy[0][occidxa]).T
-        #cv = (mo_energy[1][self.nc+self.no:,None]-mo_energy[0][:self.nc]).T
-        #co = (mo_energy[1][self.nc:self.nc+self.no,None]-mo_energy[0][:self.nc]).T
-        #ov = (mo_energy[1][self.nc+self.no:,None]-mo_energy[0][self.nc:self.nc+self.no]).T
-        #oo = (mo_energy[1][self.nc:self.nc+self.no,None]-mo_energy[0][self.nc:self.nc+self.no]).T
         #e_ia_a2b = np.array(list(cv.ravel()) + list(co.ravel())+list(ov.ravel())+list(oo.ravel()))
         no=self.no
         nc=self.nc
@@ -767,10 +803,11 @@ class SA_SF_TDA():
         x0 = np.zeros((idx.size, nov_a2b))
         for i, j in enumerate(idx):
             x0[i, j] = 1  # Koopmans' excitations
-        #if self.re:
-        #    x0 = x0[:,:-1]
         if self.re:
-            oo = np.zeros((x0.shape[0],no*no))
+            x0 = x0[:,:-1]
+        if False:
+        #if self.re:
+            oo = np.zeros((np.array(x0).shape[0],no*no))
             for i in range(no):
                 oo[:,i*no:(i+1)*no] = x0[:,nc*nvir+i*nvir:nc*nvir+no+i*nvir]
             new_x0 = np.zeros((x0.shape[0],x0.shape[1]-1))
@@ -784,23 +821,8 @@ class SA_SF_TDA():
             x0 = new_x0.copy()
             
             #x0 = np.einsum('nx,xy->ny',x0,proj)
-        print('x0.shape',x0.shape)
-        #no=self.no
-        #nc=self.nc
-        #nv=self.nv
-        #nvir = no+nv
-        #co = np.zeros((x0.shape[0],nc*no))
-        #cv = np.zeros((x0.shape[0],nc*nv))
-        #ov = np.zeros((x0.shape[0],no*nv))
-        #oo = np.zeros((x0.shape[0],no*no))
-        #for i in range(nc):
-        #    co[:,i*no:i*no+no] = x0[:,i*nvir:i*nvir+no]
-        #    cv[:,i*nv:i*nv+nv] = x0[:,i*nvir+no:no+nv+i*nvir]
-        #for i in range(no):
-        #    oo[:,i*no:i*no+no] = x0[:,nc*nvir+i*nvir:nc*nvir+no+i*nvir]
-        #    ov[:,i*nv:i*nv+nv] = x0[:,nc*nvir+i*nvir+no:nc*nvir+i*nvir+no+nv]
-        #new_x0 = np.hstack([cv,co,ov,oo])
-        return x0
+        #print('x0.shape',x0.shape)
+        return np.array(x0)
     
     def init_guess0(self,mf,nstates):
         mo_energy,mo_occ,mo_coeff = mf_info(mf)
@@ -948,30 +970,34 @@ class SA_SF_TDA():
             factor2 = np.sqrt((2*si+1)/(2*si-1))
             factor3 = np.sqrt((2*si)/(2*si-1))-1
             factor4 = 1/np.sqrt(2*si*(2*si-1))
-
+            
+        #@profile
         def vind(zs0): # vector-matrix product for indexed operations
             ndim0,ndim1 = ndim # ndom0:numuber of alpha orbitals, ndim1:number of beta orbitals
             orbo,orbv = orbov # mo_coeff for alpha and beta
+            start_t = time.time()
 
             if self.re:
-                oo = np.zeros((zs0.shape[0],no*no-1)) # get oo from zs0, which is no*no-1
+                oo = np.zeros((np.array(zs0).shape[0],no*no-1)) # get oo from zs0, which is no*no-1
 
                 for i in range(no-1):
-                    oo[:,i*no:(i+1)*no] = zs0[:,nc*nvir+i*nvir:nc*nvir+no+i*nvir]
-                print(oo[:,(no-1)*no:].shape, zs0[:,nc*nvir+(no-1)*nvir:nc*nvir+(no-1)*nvir+no-1].shape)
-                oo[:,(no-1)*no:] = zs0[:,nc*nvir+(no-1)*nvir:nc*nvir+(no-1)*nvir+no-1] # no*no-1
+                    #print('nc*nvir+i*nvir:nc*nvir+no+i*nvir ',nc*nvir+i*nvir,nc*nvir+no+i*nvir)
+                    oo[:,i*no:(i+1)*no] = np.array(zs0)[:,nc*nvir+i*nvir:nc*nvir+no+i*nvir]
+                #print(oo[:,(no-1)*no:].shape, zs0[:,nc*nvir+(no-1)*nvir:nc*nvir+(no-1)*nvir+no-1].shape)
+                oo[:,(no-1)*no:] = np.array(zs0)[:,nc*nvir+(no-1)*nvir:nc*nvir+(no-1)*nvir+no-1] # no*no-1
                 new_oo = np.einsum('xy,ny->nx',self.vects,oo)# we want the whole matrix of oo, which is no*no
-                new_zs0 = np.zeros((zs0.shape[0],zs0.shape[1]+1)) # full matrix
-                new_zs0[:,:nc*nvir] = zs0[:,:nc*nvir]
+                new_zs0 = np.zeros((np.array(zs0).shape[0],np.array(zs0).shape[1]+1)) # full matrix
+                new_zs0[:,:nc*nvir] = np.array(zs0)[:,:nc*nvir]
                 for i in range(no-1):
                     new_zs0[:,nc*nvir+i*nvir:nc*nvir+no+i*nvir] = new_oo[:,i*no:(i+1)*no]
-                    new_zs0[:,nc*nvir+no+i*nvir:nc*nvir+no+nv+i*nvir] = zs0[:,nc*nvir+no+i*nvir:nc*nvir+no+nv+i*nvir]
+                    new_zs0[:,nc*nvir+no+i*nvir:nc*nvir+no+nv+i*nvir] = np.array(zs0)[:,nc*nvir+no+i*nvir:nc*nvir+no+nv+i*nvir]
                 new_zs0[:,nc*nvir+(no-1)*nvir:nc*nvir+no+(no-1)*nvir] = new_oo[:,-no:]
-                new_zs0[:,nc*nvir+(no-1)*nvir+no:]=zs0[:,nc*nvir+(no-1)*nvir+no-1:]
+                new_zs0[:,nc*nvir+(no-1)*nvir+no:]=np.array(zs0)[:,nc*nvir+(no-1)*nvir+no-1:]
             else:
-                new_zs = zs0.copy()
+                new_zs0 = zs0.copy()
             #print('new_zs.shape',new_zs0.shape)
             zs = np.asarray(new_zs0).reshape(-1,ndim0,ndim1)
+            #print('zs.shape ',zs.shape)
             vs = np.zeros_like(zs)
             dmov = lib.einsum('xov,qv,po->xpq', zs,orbv.conj(), orbo) # (x,nmo,nmo)
             v1ao = vresp(np.asarray(dmov))   # with density and get response function
@@ -982,6 +1008,8 @@ class SA_SF_TDA():
             vs += np.einsum('ab,xib->xia',fockB[noccb:,noccb:],zs)-\
                    np.einsum('ij,xja->xia',fockA[:nocca,:nocca],zs)
             vs_dA = np.zeros_like(vs)
+            end_t = time.time()
+            #print(f'USF times use {(end_t-start_t)/3600} hours')
 
             if self.SA > 0:
         
@@ -994,14 +1022,14 @@ class SA_SF_TDA():
                 co1_mo = np.einsum('xov,qv,po->xpq', co1, orbvb[:,:no].conj(), orboa[:,:nc]) # (-1,nmo,nmo)
                 ov1_mo = np.einsum('xov,qv,po->xpq', ov1, orbvb[:,no:].conj(), orboa[:,nc:nc+no])
                 oo1_mo = np.einsum('xov,qv,po->xpq', oo1, orbvb[:,:no].conj(), orboa[:,nc:nc+no])
-                v1ao_cv1_j,v1ao_cv1_k = vresp_hf(np.asarray(cv1_mo)) # (-1,nmo,nmo)
+                _,v1ao_cv1_k = vresp_hf(np.asarray(cv1_mo)) # (-1,nmo,nmo)
                 v1ao_co1_j,v1ao_co1_k = vresp_hf(np.asarray(co1_mo))
                 v1ao_ov1_j,v1ao_ov1_k = vresp_hf(np.asarray(ov1_mo))
-                v1ao_oo1_j,v1ao_oo1_k = vresp_hf(np.asarray(oo1_mo))
-                v1_cv1_j = np.einsum('xpq,po,qv->xov',v1ao_cv1_j,orbo.conj(), orbv) # (-1,nocca,nvirb)
+                _,v1ao_oo1_k = vresp_hf(np.asarray(oo1_mo))
+                #v1_cv1_j = np.einsum('xpq,po,qv->xov',v1ao_cv1_j,orbo.conj(), orbv) # (-1,nocca,nvirb)
                 v1_co1_j = np.einsum('xpq,po,qv->xov',v1ao_co1_j,orbo.conj(), orbv)
                 v1_ov1_j = np.einsum('xpq,po,qv->xov',v1ao_ov1_j,orbo.conj(), orbv)
-                v1_oo1_j = np.einsum('xpq,po,qv->xov',v1ao_oo1_j,orbo.conj(), orbv)
+                #v1_oo1_j = np.einsum('xpq,po,qv->xov',v1ao_oo1_j,orbo.conj(), orbv)
                 v1_cv1_k = np.einsum('xpq,po,qv->xov',v1ao_cv1_k,orbo.conj(), orbv) # (-1,nocca,nvirb)
                 v1_co1_k = np.einsum('xpq,po,qv->xov',v1ao_co1_k,orbo.conj(), orbv)
                 v1_ov1_k = np.einsum('xpq,po,qv->xov',v1ao_ov1_k,orbo.conj(), orbv)
@@ -1079,11 +1107,13 @@ class SA_SF_TDA():
             vs = vs + fglobal * vs_dA
             nz = zs.shape[0]
             hx = vs.reshape(nz,-1)
+            end_da = time.time()
+            #print(f'Delta A times use {(end_da-end_t)/3600} hours')
 
             if self.re:
                 new_hx = np.zeros_like(zs0)
                 new_hx[:,:nc*nvir] += hx[:,:nc*nvir]
-                oo = np.zeros((zs0.shape[0],no*no))
+                oo = np.zeros((np.array(zs0).shape[0],no*no))
                 for i in range(no):
                     oo[:,i*no:(i+1)*no] = hx[:,nc*nvir+i*nvir:nc*nvir+no+i*nvir]
                 new_oo = np.einsum('xy,nx->ny',self.vects,oo)# no*no-1
@@ -1274,16 +1304,22 @@ class SA_SF_TDA():
         return v.T
     
     def davidson_process(self,foo,fglobal):
-        print("Davidson process...")
+        #print("Davidson process...")
         vind, hdiag = self.gen_tda_operation_sf(foo,fglobal)
         precond = hdiag
         #print('precode ',precond)
+        #print('init_guess.. ')
+        start_t = time.time()
         x0 = self.init_guess(self.mf, self.nstates)
+        end_t = time.time()
+        #print(f'init_guess times use {(end_t-start_t)/3600:6.4f} hours')
         #print('x0.shape ',x0.shape)
         converged, e, x1 = lib.davidson1(vind, x0, precond,
-                              tol=1e-9,
+                              tol=1e-8,
                               nroots=self.nstates,
                               max_cycle=300)
+        end_time = time.time()
+        #print(f'davidson time use {(end_time-end_t)/3600} hours')
         self.converged = converged
         self.e = e
         self.v = np.array(x1).T
@@ -1323,8 +1359,8 @@ class SA_SF_TDA():
                 self.davidson_process(foo=foo,fglobal=fglobal)
             else:
                 self.A = self.get_Amat(foo=foo,fglobal=fglobal)
-                np.save('diag_A.npy',self.A)
-                print('matrix saved as diag_A.nyp.')
+                #np.save('diag_A.npy',self.A)
+                #print('matrix saved as diag_A.nyp.')
                 self.A = self.remove()
                 if self.A.shape[0] < 1000:
                     e,v = scipy.linalg.eigh(self.A)
