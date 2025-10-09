@@ -1,39 +1,35 @@
 #!/usr/bin/env python
 import os
 import sys
-os.environ["OMP_NUM_THREADS"] = "4"
+os.environ["OMP_NUM_THREADS"] = "16"
 sys.path.append('../')
+sys.path.append('../../')
 import time
 import scipy
 import numpy as np
 import pandas as pd
 import basis_set_exchange as bse
 from numba import jit
-from functools import reduce
+from joblib import Parallel, delayed
 from pyscf import dft, gto, scf, tddft, lo
 from pyscf.lib import logger
 from pyscf.tools import molden, cubegen
 
 import tools
 from eta import eta
-from utils import atom, unit, utils
-'''lots of code can optimize,
-1. according to pyscf constructing method, use index to divide A matrix to each block
-2. create qAkcv_aa ... qBkcv_bb instead of create qAk_aa ... qBj_bb
-3. construct A matrix block line by block line
-'''
+from utils import unit, atom, utils
 '''U and X opt file select same CSF in CVaa and CVbb'''
 
 
 def iaia_f(qAk_ss, qAj_ss, qBk_tt, qBj_tt, gamma_k, gamma_j, fock_vir, n1, fock_occ, n2):
     # _ss, _tt represent spin, like qAk_aa ...
     # return iaiak is for add diagonal correction
-    iaiak = np.einsum('nmia, nmia, nm->ia', qAk_ss[:, None, ...], qBk_tt[None, ...], gamma_k)
-    iaiaj = np.einsum('nmii, nmaa, nm->ia', qAj_ss[:, None, ...], qBj_tt[None, ...], gamma_j)
+    iaiak = np.einsum('nmia, nmia, nm->ia', qAk_ss[:, None, ...], qBk_tt[None, ...], gamma_k, optimize=True)
+    iaiaj = np.einsum('nmii, nmaa, nm->ia', qAj_ss[:, None, ...], qBj_tt[None, ...], gamma_j, optimize=True)
     iaiak = iaiak.reshape(-1)
     iaiaj = iaiaj.reshape(-1)
-    fock = np.einsum('i, a->ia', np.ones(n1), np.diag(fock_vir))
-    fock -= np.einsum('i, a->ia', np.diag(fock_occ), np.ones(n2))
+    fock = np.einsum('i, a->ia', np.ones(n1), np.diag(fock_vir), optimize=True)
+    fock -= np.einsum('i, a->ia', np.diag(fock_occ), np.ones(n2), optimize=True)
     fock = fock.reshape(-1)
     iaia = iaiak.reshape(-1) - iaiaj.reshape(-1) + fock.reshape(-1)
     return iaia, iaiak
@@ -49,7 +45,7 @@ def devide_csf_p_n(iaia, t):
 def devide_csf_ps(pcsf, ncsf, scsf):
     pscsfcv_a_i = np.concatenate((pcsf[0], ncsf[0][scsf[scsf<len(ncsf[0])]]), axis=0)
     pscsfcv_a_a = np.concatenate((pcsf[1], ncsf[1][scsf[scsf<len(ncsf[1])]]), axis=0)
-    # pscsfcv_a_ind = np.argsort(pscsfcv_a_i, stable=True)
+    # pscsfcv_a_ind = np.argsort(pscsfcv_a_i, stable=True)  # numpy version: 2.2.6
     pscsfcv_a_ind = np.argsort(pscsfcv_a_i, kind="stable")
     pscsfcv_a_i = pscsfcv_a_i[pscsfcv_a_ind]
     pscsfcv_a_a = pscsfcv_a_a[pscsfcv_a_ind]
@@ -59,8 +55,8 @@ def devide_csf_ps(pcsf, ncsf, scsf):
 
 
 def intersec(nc, csfcv_a, csfcv_b):
-    csfcv0 = np.array([], dtype=np.int64)
-    csfcv1 = np.array([], dtype=np.int64)
+    csfcv0 = np.array([], dtype=np.int64)  # temp name, no actually meaning
+    csfcv1 = np.array([], dtype=np.int64)  # temp name, no actually meaning
     for i in range(nc):
         inda = np.where(csfcv_a[0] == i)[0]
         indb = np.where(csfcv_b[0] == i)[0]
@@ -71,8 +67,8 @@ def intersec(nc, csfcv_a, csfcv_b):
 
 
 def union(nc, csfcv_a, csfcv_b):
-    csfcv0 = np.array([], dtype=np.int64)
-    csfcv1 = np.array([], dtype=np.int64)
+    csfcv0 = np.array([], dtype=np.int64)  # temp name, no actually meaning
+    csfcv1 = np.array([], dtype=np.int64)  # temp name, no actually meaning
     for i in range(nc):
         inda = np.where(csfcv_a[0] == i)[0]
         indb = np.where(csfcv_b[0] == i)[0]
@@ -82,38 +78,95 @@ def union(nc, csfcv_a, csfcv_b):
     return (csfcv0, csfcv1)
 
 
-def iajb_f(pcsfi, pcsfa, qAk1, qAj1, qBk1, qBj1, qBk2,
+def iajb_f(i, a, qAk1, qAj1, qBk1, qBj1, qBk2,
            n11, n12, n21, n22, fock_occ, fock_vir,
            ncsf11, ncsf12, ncsf21, ncsf22, ncsf31, ncsf32, ncsf41, ncsf42,
-           iajb, iaia_ncsf, iaia, gamma_k, gamma_j, iajbtype, nc=0, no=0):
+           iaia_ncsf, iaia, gamma_k, gamma_j, iajbtype, nc=0, no=0):
     # TODO(WHB): add comment
-    for i, j in zip(pcsfi, pcsfa):
-        iajbk1 = np.einsum('nm, nmi, nm->i',
-                           qAk1[:, None, nc+i, no+j], qBk1[None, :, ncsf11, ncsf12], gamma_k)
-        iajbj1 = np.einsum('nmi, nmi, nm->i',
-                           qAj1[:, None, nc+i, ncsf11], qBj1[None, :, no+j, ncsf12], gamma_j)
-        iajbk2 = np.einsum('nm, nmi, nm->i',
-                           qAk1[:, None, nc+i, no+j], qBk1[None, :, ncsf21, ncsf22], gamma_k)
-        iajbj2 = np.einsum('nmi, nmi, nm->i',
-                           qAj1[:, None, nc+i, ncsf21], qBj1[None, :, no+j, ncsf22], gamma_j)
-        iajbk3 = np.einsum('nm, nmi, nm->i',
-                           qAk1[:, None, nc+i, no+j], qBk2[None, :, ncsf31, ncsf32], gamma_k)
-        iajbk4 = np.einsum('nm, nmi, nm->i',
-                           qAk1[:, None, nc+i, no+j], qBk2[None, :, ncsf41, ncsf42], gamma_k)
-        iajbf1 = np.einsum('i, i->i', np.eye(n11)[nc+i, ncsf11], fock_vir[no+j, ncsf12])
-        iajbf1 -= np.einsum('i, i->i', fock_occ[nc+i, ncsf11], np.eye(n12)[no+j, ncsf12])
-        iajbf2 = np.einsum('i, i->i', np.eye(n21)[nc+i, ncsf21], fock_vir[no+j, ncsf22])
-        iajbf2 -= np.einsum('i, i->i', fock_occ[nc+i, ncsf21], np.eye(n22)[no+j, ncsf22])
-        iajb1 = iajbk1 - iajbj1 + iajbf1
-        iajb2 = iajbk2 - iajbj2 + iajbf2
-        if 'a' in iajbtype:
-            iajbline = np.concatenate((iajb1, iajb2, iajbk3, iajbk4), axis=0)
-        elif 'b' in iajbtype:
-            iajbline = np.concatenate((iajbk3, iajbk4, iajb1, iajb2), axis=0)
-        else:
-            raise "iajbtype input error"
-        iajb += iajbline ** 2 / (iaia_ncsf - iaia[i, j] + 1e-10)
+    eye11 = np.eye(n11)
+    eye12 = np.eye(n12)
+    eye21 = np.eye(n21)
+    eye22 = np.eye(n22)
+    iajbk1 = np.einsum('nm, nmi, nm->i',
+                       qAk1[:, None, nc+i, no+a], qBk1[None, :, ncsf11, ncsf12], gamma_k, optimize=True)
+    iajbj1 = np.einsum('nmi, nmi, nm->i',
+                       qAj1[:, None, nc+i, ncsf11], qBj1[None, :, no+a, ncsf12], gamma_j, optimize=True)
+    iajbk2 = np.einsum('nm, nmi, nm->i',
+                       qAk1[:, None, nc+i, no+a], qBk1[None, :, ncsf21, ncsf22], gamma_k, optimize=True)
+    iajbj2 = np.einsum('nmi, nmi, nm->i',
+                       qAj1[:, None, nc+i, ncsf21], qBj1[None, :, no+a, ncsf22], gamma_j, optimize=True)
+    iajbk3 = np.einsum('nm, nmi, nm->i',
+                       qAk1[:, None, nc+i, no+a], qBk2[None, :, ncsf31, ncsf32], gamma_k, optimize=True)
+    iajbk4 = np.einsum('nm, nmi, nm->i',
+                       qAk1[:, None, nc+i, no+a], qBk2[None, :, ncsf41, ncsf42], gamma_k, optimize=True)
+    iajbf1 = np.einsum('i, i->i', eye11[nc+i, ncsf11], fock_vir[no+a, ncsf12], optimize=True)
+    iajbf1 -= np.einsum('i, i->i', fock_occ[nc+i, ncsf11], eye12[no+a, ncsf12], optimize=True)
+    iajbf2 = np.einsum('i, i->i', eye21[nc+i, ncsf21], fock_vir[no+a, ncsf22], optimize=True)
+    iajbf2 -= np.einsum('i, i->i', fock_occ[nc+i, ncsf21], eye22[no+a, ncsf22], optimize=True)
+    iajb1 = iajbk1 - iajbj1 + iajbf1
+    iajb2 = iajbk2 - iajbj2 + iajbf2
+    if 'a' in iajbtype:
+        iajbline = np.concatenate((iajb1, iajb2, iajbk3, iajbk4), axis=0)
+    elif 'b' in iajbtype:
+        iajbline = np.concatenate((iajbk3, iajbk4, iajb1, iajb2), axis=0)
+    else:
+        raise "iajbtype input error"
+    iajb = iajbline ** 2 / (iaia_ncsf - iaia[i, a] + 1e-10)
     return iajb
+
+
+def cAcvacva(i, a, pscsfcv_i, pscsfcv_a, qAk_aa, qBk_aa, qAj_aa, qBj_aa, gamma_k, gamma_j,
+             fock_a_occ, fock_a_vir, nc, no, nv):
+    # this function contract cv(aa)-cv(aa) block of A matrix
+    A = np.einsum('nm, nmp, nm->p',
+                  qAk_aa[:, None, i, a], qBk_aa[None, :, pscsfcv_i, pscsfcv_a], gamma_k, optimize=True)
+    A -= np.einsum('nmp, nmp, nm->p',
+                   qAj_aa[:, None, i, pscsfcv_i], qBj_aa[None, :, a, pscsfcv_a], gamma_j, optimize=True)
+    A -= np.einsum('p, p->p', fock_a_occ[i, pscsfcv_i], np.eye(nv)[a, pscsfcv_a], optimize=True)
+    A += np.einsum('p, p->p', np.eye(nc)[i, pscsfcv_i], fock_a_vir[a, pscsfcv_a], optimize=True)
+    return A
+
+
+def cAcvacvb(i, a, pscsfcv_i, pscsfcv_a, qAk_aa, qBk_bb, gamma_k,
+             nc, no, nv):
+    A = np.einsum('nm, nmp, nm->p',
+                  qAk_aa[:, None, i, a], qBk_bb[None, :, pscsfcv_i, no + pscsfcv_a], gamma_k, optimize=True)
+    return A
+
+
+def cAcvbcvb(i, a, pscsfcv_i, pscsfcv_a, qAk_bb, qBk_bb, qAj_bb, qBj_bb, gamma_k, gamma_j,
+             fock_b_occ, fock_b_vir, nc, no, nv):
+    A = np.einsum('nm, nmp, nm->p',
+                  qAk_bb[:, None, i, no + a], qBk_bb[None, :, pscsfcv_i, no + pscsfcv_a], gamma_k, optimize=True)
+    A -= np.einsum('nmp, nmp, nm->p',
+                   qAj_bb[:, None, i, pscsfcv_i], qBj_bb[None, :, no + a, no + pscsfcv_a], gamma_j, optimize=True)
+    A -= np.einsum('p, p->p', fock_b_occ[i, pscsfcv_i], np.eye(no + nv)[no + a, no + pscsfcv_a], optimize=True)
+    A += np.einsum('p, p->p', np.eye(nc)[i, pscsfcv_i], fock_b_vir[no + a, no + pscsfcv_a], optimize=True)
+    return A
+
+
+def constractA(pscsfcv_i, pscsfcv_a, nc, no, nv, gamma_k, gamma_j,
+               qAk_aa, qBk_aa, qAj_aa, qBj_aa, qAk_bb,qBk_bb, qAj_bb, qBj_bb,
+               fock_a_occ, fock_a_vir, fock_b_occ, fock_b_vir, njob):
+    Acvacva = Parallel(n_jobs=njob, backend='threading')(
+        delayed(cAcvacva)(
+            i, a, pscsfcv_i, pscsfcv_a, qAk_aa, qBk_aa, qAj_aa, qBj_aa, gamma_k, gamma_j,
+            fock_a_occ, fock_a_vir, nc, no, nv,
+        ) for i, a in zip(pscsfcv_i, pscsfcv_a)
+    )
+    Acvacvb = Parallel(n_jobs=njob, backend='threading')(
+        delayed(cAcvacvb)(
+            i, a, pscsfcv_i, pscsfcv_a, qAk_aa, qBk_bb, gamma_k,
+            nc, no, nv,
+        ) for i, a in zip(pscsfcv_i, pscsfcv_a)
+    )
+    Acvbcvb = Parallel(n_jobs=njob, backend='threading')(
+        delayed(cAcvbcvb)(
+            i, a, pscsfcv_i, pscsfcv_a, qAk_bb, qBk_bb, qAj_bb, qBj_bb, gamma_k, gamma_j,
+            fock_b_occ, fock_b_vir, nc, no, nv,
+        ) for i, a in zip(pscsfcv_i, pscsfcv_a)
+    )
+    return Acvacva, Acvacvb, Acvbcvb
 
 
 class UsTDA:
@@ -126,6 +179,7 @@ class UsTDA:
         self.correct = correct
         self.paramtype = paramtype
         self.savedata = savedata
+        self.njob = int(os.environ.get("OMP_NUM_THREADS"))
 
     def info(self):
         mo_occ = self.mf.mo_occ
@@ -146,6 +200,11 @@ class UsTDA:
         logger.info(self.mf, "A matrix dim is {}".format((nc + no) * nv + nc * (no + nv)))
         logger.info(self.mf, 'nelectron is {}'.format(self.mol.nelectron))
         logger.info(self.mf, 'natm is {}'.format(self.mol.natm))
+        print('='*50)
+        print('num.orb    mo_energy_a   mo_energy_b    mo_occ_a    mo_occ_b')
+        for me, o in zip(enumerate(mf.mo_energy.T), mf.mo_occ.T):
+            ind, moei = me
+            print(f'{ind + 1:5d}    {moei[0]:10.4f}    {moei[1]:10.4f}    {o[0]:8.3f}    {o[1]:8.3f}')
 
     def gamma(self, hyb):
         R = gto.inter_distance(self.mol)  # internuclear distance array, unit is bohr
@@ -175,6 +234,7 @@ class UsTDA:
         return gj, gk
 
     def kernel(self):
+        t_all_0 = time.time()  # record kernel begin time
         mo_energy = self.mf.mo_energy
         mo_coeff = self.mf.mo_coeff
         mo_occ = self.mf.mo_occ
@@ -195,6 +255,7 @@ class UsTDA:
         # check XC functional hybrid proportion
         ni = self.mf._numint
         omega, alpha, hyb = ni.rsh_and_hybrid_coeff(self.mf.xc, mol.spin)
+        print("=" * 50)
         print('hyb', hyb)
         # record full A matrix diagonal element, to calculate overlap
         pscsf_fdiag_a = np.zeros((nocc_a, nvir_a), dtype=bool)
@@ -237,12 +298,19 @@ class UsTDA:
             nvir_b = len(viridx_b)
             mo_coeff_a = mo_coeff_a[:, act_orb[0]:act_orb[1]+1]
             mo_coeff_b = mo_coeff_b[:, act_orb[0]:act_orb[1]+1]
+            logger.info(self.mf, 'occ. MO cut-off (eV): {}'.format(mo_energy[0, act_orb[0]]*unit.ha2eV))
+            logger.info(self.mf, 'vir. MO cut-off (eV): {}'.format(mo_energy[1, act_orb[1]]*unit.ha2eV))
         if self.cas:
             self.frozen_nc = act_orb[0]
         else:
             self.frozen_nc = 0
+        logger.info(self.mf, 'occ. MOs in sUTDA (alpha, beta): {} {}'.format(nocc_a, nocc_b))
+        logger.info(self.mf, 'vir. MOs in sUTDA (alpha, beta): {} {}'.format(nvir_a, nvir_b))
 
+        t0 = time.time()
         fock = self.mf.get_fock()
+        t1 = time.time()
+        t_getfock = t1 - t0
         fock_a = mo_coeff_a.T @ fock[0] @ mo_coeff_a
         fock_b = mo_coeff_b.T @ fock[1] @ mo_coeff_b
 
@@ -264,14 +332,20 @@ class UsTDA:
         qBj_aa = []
         qBj_bb = []
         for (shl0,shl1,p0,p1) in ao_slices:
-            qAk_aa.append(np.einsum('mi, ma->ia', C_prime_a[p0:p1, :nocc_a], C_prime_a[p0:p1, nocc_a:]))  # exchange
-            qAj_aa.append(np.einsum('mi, mj->ij', C_prime_a[p0:p1, :nocc_a], C_prime_a[p0:p1, :nocc_a]))  # coulomb
-            qAk_bb.append(np.einsum('mi, ma->ia', C_prime_b[p0:p1, :nocc_b], C_prime_b[p0:p1, nocc_b:]))  # exchange
-            qAj_bb.append(np.einsum('mi, mj->ij', C_prime_b[p0:p1, :nocc_b], C_prime_b[p0:p1, :nocc_b]))  # coulomb
-            qBj_aa.append(np.einsum('ma, mb->ab', C_prime_a[p0:p1, nocc_a:], C_prime_a[p0:p1, nocc_a:]))  # coulomb
-            qBj_bb.append(np.einsum('ma, mb->ab', C_prime_b[p0:p1, nocc_b:], C_prime_b[p0:p1, nocc_b:]))  # coulomb
+            # exchange
+            qAk_aa.append(np.einsum('mi, ma->ia',C_prime_a[p0:p1, :nocc_a], C_prime_a[p0:p1, nocc_a:], optimize=True))
+            # coulomb
+            qAj_aa.append(np.einsum('mi, mj->ij', C_prime_a[p0:p1, :nocc_a], C_prime_a[p0:p1, :nocc_a], optimize=True))
+            # exchange
+            qAk_bb.append(np.einsum('mi, ma->ia', C_prime_b[p0:p1, :nocc_b], C_prime_b[p0:p1, nocc_b:], optimize=True))
+            # coulomb
+            qAj_bb.append(np.einsum('mi, mj->ij', C_prime_b[p0:p1, :nocc_b], C_prime_b[p0:p1, :nocc_b], optimize=True))
+            # coulomb
+            qBj_aa.append(np.einsum('ma, mb->ab', C_prime_a[p0:p1, nocc_a:], C_prime_a[p0:p1, nocc_a:], optimize=True))
+            # coulomb
+            qBj_bb.append(np.einsum('ma, mb->ab',C_prime_b[p0:p1, nocc_b:], C_prime_b[p0:p1, nocc_b:], optimize=True))
         qAk_aa = np.array(qAk_aa)
-        qBk_aa = np.array(qAk_aa)
+        qBk_aa = np.array(qAk_aa)  # for easy to understand and easy to compare with formula
         qAk_bb = np.array(qAk_bb)
         qBk_bb = np.array(qAk_bb)
         qAj_aa = np.array(qAj_aa)
@@ -336,6 +410,7 @@ class UsTDA:
 
             # # encapsulate to a function, same with upper code
             # CV(aa)-CV(aa)
+            t0 = time.time()
             iaiacv_a, iaiakcv_a = iaia_f(qAk_aa[:, :nc, :], qAj_aa[:, :nc, :nc],
                                          qBk_aa[:, :nc, :], qBj_aa[...], gamma_k, gamma_j,
                                          fock_a_vir, nc, fock_a_occ[:nc, :nc], nv)
@@ -359,8 +434,11 @@ class UsTDA:
                 delta_k = delta_max / (1 + (iaiak / sigma_k) ** 4)
                 iaia += delta_k
             del iaiacv_a, iaiaov_a, iaiaco_b, iaiacv_b, iaiakcv_a, iaiakov_a, iaiakco_b, iaiakcv_b, iaiak
+            t1 = time.time()
+            t_pcsf = t1-t0
 
             # Section: select P-CSF and construct nondiagonal A matrix
+            t0 = time.time()
             iaiacv_a = iaia[:nc*nv].reshape(nc, nv)
             iaiaov_a = iaia[nc*nv:(nc+no)*nv].reshape(no, nv)
             iaiaco_b = iaia[(nc+no)*nv:(nc+no)*nv+nc*no].reshape(nc, no)
@@ -382,31 +460,77 @@ class UsTDA:
             iajb = np.zeros(len(ncsfcv[0])+len(ncsfov_a[0])+len(ncsfco_b[0])+len(ncsfcv[0]))
             iaia_ncsf = np.concatenate((iaiacv_a[ncsfcv[0], ncsfcv[1]], iaiaov_a[ncsfov_a[0], ncsfov_a[1]],
                                    iaiaco_b[ncsfco_b[0], ncsfco_b[1]], iaiacv_b[ncsfcv[0], ncsfcv[1]]), axis=0)
-            iajb = iajb_f(
-                pcsfcv[0], pcsfcv[1], qAk_aa, qAj_aa, qBk_aa, qBj_aa, qBk_bb,
-                nc, nv, nc + no, nv, fock_a_occ, fock_a_vir,
-                ncsfcv[0], ncsfcv[1], nc+ncsfov_a[0], ncsfov_a[1], ncsfco_b[0], ncsfco_b[1], ncsfcv[0], no+ncsfcv[1],
-                iajb, iaia_ncsf, iaiacv_a, gamma_k, gamma_j, 'cva'
+            iajb_sjob = Parallel(n_jobs=self.njob, backend='threading')(
+                delayed(iajb_f)(
+                    i, a, qAk_aa, qAj_aa, qBk_aa, qBj_aa, qBk_bb,
+                    nc, nv, nc + no, nv, fock_a_occ, fock_a_vir,
+                    ncsfcv[0], ncsfcv[1], nc + ncsfov_a[0], ncsfov_a[1], ncsfco_b[0], ncsfco_b[1], ncsfcv[0], no + ncsfcv[1],
+                    iaia_ncsf, iaiacv_a, gamma_k, gamma_j, 'cva'
+                ) for i, a in zip(pcsfcv[0], pcsfcv[1])
             )
-            iajb = iajb_f(
-                pcsfov_a[0], pcsfov_a[1], qAk_aa, qAj_aa, qBk_aa, qBj_aa, qBk_bb,
-                nc + no, nv, nc + no, nv, fock_a_occ, fock_a_vir,
-                ncsfcv[0], ncsfcv[1], nc+ncsfov_a[0], ncsfov_a[1], ncsfco_b[0], ncsfco_b[1], ncsfcv[0], no+ncsfcv[1],
-                iajb, iaia_ncsf, iaiaov_a, gamma_k, gamma_j, 'ova', nc, 0
+            # iajb = iajb_f(
+            #     pcsfcv[0], pcsfcv[1], qAk_aa, qAj_aa, qBk_aa, qBj_aa, qBk_bb,
+            #     nc, nv, nc + no, nv, fock_a_occ, fock_a_vir,
+            #     ncsfcv[0], ncsfcv[1], nc + ncsfov_a[0], ncsfov_a[1], ncsfco_b[0], ncsfco_b[1], ncsfcv[0], no + ncsfcv[1],
+            #     iajb, iaia_ncsf, iaiacv_a, gamma_k, gamma_j, 'cva'
+            # )
+            iajb += np.sum(iajb_sjob, axis=0)
+            iajb_sjob = Parallel(n_jobs=self.njob, backend='threading')(
+                delayed(iajb_f)(
+                    i, a, qAk_aa, qAj_aa, qBk_aa, qBj_aa, qBk_bb,
+                    nc + no, nv, nc + no, nv, fock_a_occ, fock_a_vir,
+                    ncsfcv[0], ncsfcv[1], nc+ncsfov_a[0], ncsfov_a[1], ncsfco_b[0], ncsfco_b[1], ncsfcv[0], no+ncsfcv[1],
+                    iaia_ncsf, iaiaov_a, gamma_k, gamma_j, 'ova', nc, 0
+                ) for i, a in zip(pcsfov_a[0], pcsfov_a[1])
             )
-            iajb = iajb_f(
-                pcsfco_b[0], pcsfco_b[1], qAk_bb, qAj_bb, qBk_bb, qBj_bb, qBk_aa,
-                nc, no + nv, nc, no + nv, fock_b_occ, fock_b_vir,
-                ncsfco_b[0], ncsfco_b[1], ncsfcv[0], no+ncsfcv[1], ncsfcv[0], ncsfcv[1], nc+ncsfov_a[0], ncsfov_a[1],
-                iajb, iaia_ncsf, iaiaco_b, gamma_k, gamma_j, 'cob'
+            iajb += np.sum(iajb_sjob, axis=0)
+            iajb_sjob = Parallel(n_jobs=self.njob, backend='threading')(
+                delayed(iajb_f)(
+                    i, a, qAk_bb, qAj_bb, qBk_bb, qBj_bb, qBk_aa,
+                    nc, no + nv, nc, no + nv, fock_b_occ, fock_b_vir,
+                    ncsfco_b[0], ncsfco_b[1], ncsfcv[0], no+ncsfcv[1], ncsfcv[0], ncsfcv[1], nc+ncsfov_a[0], ncsfov_a[1],
+                    iaia_ncsf, iaiaco_b, gamma_k, gamma_j, 'cob'
+                ) for i, a in zip(pcsfco_b[0], pcsfco_b[1])
             )
-            iajb = iajb_f(
-                pcsfcv[0], pcsfcv[1], qAk_bb, qAj_bb, qBk_bb, qBj_bb, qBk_aa,
-                nc, no + nv, nc, no + nv, fock_b_occ, fock_b_vir,
-                ncsfco_b[0], ncsfco_b[1], ncsfcv[0], no+ncsfcv[1], ncsfcv[0], ncsfcv[1], nc+ncsfov_a[0], ncsfov_a[1],
-                iajb, iaia_ncsf, iaiacv_b, gamma_k, gamma_j, 'cvb', 0, no
+            iajb += np.sum(iajb_sjob, axis=0)
+            iajb_sjob = Parallel(n_jobs=self.njob, backend='threading')(
+                delayed(iajb_f)(
+                    i, a, qAk_bb, qAj_bb, qBk_bb, qBj_bb, qBk_aa,
+                    nc, no + nv, nc, no + nv, fock_b_occ, fock_b_vir,
+                    ncsfco_b[0], ncsfco_b[1], ncsfcv[0], no+ncsfcv[1], ncsfcv[0], ncsfcv[1], nc+ncsfov_a[0], ncsfov_a[1],
+                    iaia_ncsf, iaiacv_b, gamma_k, gamma_j, 'cvb', 0, no
+                ) for i, a in zip(pcsfcv[0], pcsfcv[1])
             )
-            del iaia, iaia_ncsf, iaiacv_a, iaiaov_a, iaiaco_b, iaiacv_b
+            iajb += np.sum(iajb_sjob, axis=0)
+            t1 = time.time()
+            t_scsf = t1 - t0
+
+            # iajb = iajb_f(
+            #     pcsfcv[0], pcsfcv[1], qAk_aa, qAj_aa, qBk_aa, qBj_aa, qBk_bb,
+            #     nc, nv, nc + no, nv, fock_a_occ, fock_a_vir,
+            #     ncsfcv[0], ncsfcv[1], nc + ncsfov_a[0], ncsfov_a[1], ncsfco_b[0], ncsfco_b[1], ncsfcv[0], no + ncsfcv[1],
+            #     iajb, iaia_ncsf, iaiacv_a, gamma_k, gamma_j, 'cva'
+            # )
+            # iajb = iajb_f(
+            #     pcsfov_a[0], pcsfov_a[1], qAk_aa, qAj_aa, qBk_aa, qBj_aa, qBk_bb,
+            #     nc + no, nv, nc + no, nv, fock_a_occ, fock_a_vir,
+            #     ncsfcv[0], ncsfcv[1], nc + ncsfov_a[0], ncsfov_a[1], ncsfco_b[0], ncsfco_b[1], ncsfcv[0], no + ncsfcv[1],
+            #     iajb, iaia_ncsf, iaiaov_a, gamma_k, gamma_j, 'ova', nc, 0
+            # )
+            # iajb = iajb_f(
+            #     pcsfco_b[0], pcsfco_b[1], qAk_bb, qAj_bb, qBk_bb, qBj_bb, qBk_aa,
+            #     nc, no + nv, nc, no + nv, fock_b_occ, fock_b_vir,
+            #     ncsfco_b[0], ncsfco_b[1], ncsfcv[0], no + ncsfcv[1], ncsfcv[0], ncsfcv[1], nc + ncsfov_a[0], ncsfov_a[1],
+            #     iajb, iaia_ncsf, iaiaco_b, gamma_k, gamma_j, 'cob'
+            # )
+            # iajb = iajb_f(
+            #     pcsfcv[0], pcsfcv[1], qAk_bb, qAj_bb, qBk_bb, qBj_bb, qBk_aa,
+            #     nc, no + nv, nc, no + nv, fock_b_occ, fock_b_vir,
+            #     ncsfco_b[0], ncsfco_b[1], ncsfcv[0], no + ncsfcv[1], ncsfcv[0], ncsfcv[1], nc + ncsfov_a[0], ncsfov_a[1],
+            #     iajb, iaia_ncsf, iaiacv_b, gamma_k, gamma_j, 'cvb', 0, no
+            # )
+            # del iaia, iaia_ncsf, iaiacv_a, iaiaov_a, iaiaco_b, iaiacv_b
+
             # for i, j in zip(pcsfcv[0], pcsfcv[1]):
             #     iajbcv_a = np.einsum('nm, nmi, nm->i', qAk_aa[:, None, i, j], qBk_aa[None, :, ncsfcv[0], ncsfcv[1]], gamma_k)
             #     iajbcv_a -= np.einsum('nmi, nmi, nm->i', qAj_aa[:, None, i, ncsfcv[0]], qBj_aa[None, :, j, ncsfcv[1]], gamma_j)
@@ -465,38 +589,7 @@ class UsTDA:
             # del iajbkcv_a, iajbkov_a, iajbkco_b, iajbkcv_b, iajbcv_a, iajbov_a, iajbco_b, iajbcv_b,\
             #     iaia, iajbline, iaia_ncsf, iaiacv_a, iaiaov_a, iaiaco_b, iaiacv_b
 
-            scsf = np.where(iajb>=1e-4)[0]
-            # # CV(aa)
-            # pscsfcv_a_i = np.concatenate((pcsfcv[0], ncsfcv[0][scsf[scsf<len(ncsfcv[0])]]), axis=0)
-            # pscsfcv_a_a = np.concatenate((pcsfcv[1], ncsfcv[1][scsf[scsf<len(ncsfcv[1])]]), axis=0)
-            # pscsfcv_a_ind = np.argsort(pscsfcv_a_i, stable=True)
-            # pscsfcv_a_i = pscsfcv_a_i[pscsfcv_a_ind]
-            # pscsfcv_a_a = pscsfcv_a_a[pscsfcv_a_ind]
-            # scsf -= len(ncsfcv[0])
-            # scsf = np.delete(scsf, np.where(scsf<0))
-            # # OV(aa)
-            # pscsfov_a_i = np.concatenate((pcsfov_a[0], ncsfov_a[0][scsf[scsf<len(ncsfov_a[0])]]), axis=0)
-            # pscsfov_a_a = np.concatenate((pcsfov_a[1], ncsfov_a[1][scsf[scsf<len(ncsfov_a[1])]]), axis=0)
-            # pscsfov_a_ind = np.argsort(pscsfov_a_i, stable=True)
-            # pscsfov_a_i = pscsfov_a_i[pscsfov_a_ind]
-            # pscsfov_a_a = pscsfov_a_a[pscsfov_a_ind]
-            # scsf -= len(ncsfov_a[0])
-            # scsf = np.delete(scsf, np.where(scsf < 0))
-            # # CO(bb)
-            # pscsfco_b_i = np.concatenate((pcsfco_b[0], ncsfco_b[0][scsf[scsf<len(ncsfco_b[0])]]), axis=0)
-            # pscsfco_b_a = np.concatenate((pcsfco_b[1], ncsfco_b[1][scsf[scsf<len(ncsfco_b[1])]]), axis=0)
-            # pscsfco_b_ind = np.argsort(pscsfco_b_i, stable=True)
-            # pscsfco_b_i = pscsfco_b_i[pscsfco_b_ind]
-            # pscsfco_b_a = pscsfco_b_a[pscsfco_b_ind]
-            # scsf -= len(ncsfco_b[0])
-            # scsf = np.delete(scsf, np.where(scsf < 0))
-            # # CV(bb)
-            # pscsfcv_b_i = np.concatenate((pcsfcv[0], ncsfcv[0][scsf[scsf<len(ncsfcv[0])]]), axis=0)
-            # pscsfcv_b_a = np.concatenate((pcsfcv[1], ncsfcv[1][scsf[scsf<len(ncsfcv[1])]]), axis=0)
-            # pscsfcv_b_ind = np.argsort(pscsfcv_b_i, stable=True)
-            # pscsfcv_b_i = pscsfcv_b_i[pscsfcv_b_ind]
-            # pscsfcv_b_a = pscsfcv_b_a[pscsfcv_b_ind]
-
+            scsf = np.where(iajb >= 1e-4)[0]
             # # encapsulate to a function, same with upper code
             # CV(aa)
             pscsfcv_a_i, pscsfcv_a_a, scsf = devide_csf_ps(pcsfcv, ncsfcv, scsf)
@@ -540,108 +633,232 @@ class UsTDA:
         pscsf_fdiag = pscsf_fdiag[order]
 
         # Section: construct A
+        t0 = time.time()
         A = np.zeros((Adim, Adim))
-        qAkcv_aa = qAk_aa[:, pscsfcv_i, pscsfcv_a]
-        qAkov_aa = qAk_aa[:, nc+pscsfov_a_i, pscsfov_a_a]
-        qAkco_bb = qAk_bb[:, pscsfco_b_i, pscsfco_b_a]
-        qAkcv_bb = qAk_bb[:, pscsfcv_i, no+pscsfcv_a]
-        qBkcv_aa = np.array(qAkcv_aa)
-        qBkov_aa = np.array(qAkov_aa)
-        qBkco_bb = np.array(qAkco_bb)
-        qBkcv_bb = np.array(qAkcv_bb)
+        # qAkcv_aa = qAk_aa[:, pscsfcv_i, pscsfcv_a]
+        # qAkov_aa = qAk_aa[:, nc+pscsfov_a_i, pscsfov_a_a]
+        # qAkco_bb = qAk_bb[:, pscsfco_b_i, pscsfco_b_a]
+        # qAkcv_bb = qAk_bb[:, pscsfcv_i, no+pscsfcv_a]
+        # qBkcv_aa = np.array(qAkcv_aa)
+        # qBkov_aa = np.array(qAkov_aa)
+        # qBkco_bb = np.array(qAkco_bb)
+        # qBkcv_bb = np.array(qAkcv_bb)
         lcva = len(pscsfcv_i)
         lova = len(pscsfov_a_i)
         lcob = len(pscsfco_b_i)
         lcvb = len(pscsfcv_i)
-        if self.correct:
-            delta_max = 0.5 / unit.ha2eV
-            sigma_k = 0.1 / unit.ha2eV
-        # CV(aa)-CV(aa)
-        int2ekcv_a = np.einsum('nmi, nma, nm->ia', qAkcv_aa[:, None, ...], qBkcv_aa[None, ...], gamma_k)
-        int2ejcv_a = np.zeros_like(int2ekcv_a)
+        # if self.correct:
+        #     delta_max = 0.5 / unit.ha2eV
+        #     sigma_k = 0.1 / unit.ha2eV
+        # # # CV(aa)-CV(aa)
+        # # # do not line by line construct int2ekcv_a is for self.correct
+        # # int2ekcv_a = np.einsum('nmi, nma, nm->ia', qAkcv_aa[:, None, ...], qBkcv_aa[None, ...], gamma_k)
+        # for i, a, p in zip(pscsfcv_i, pscsfcv_a, range(lcva)):
+        #     A[p, :lcva] += np.einsum('nm, nmp, nm->p', qAk_aa[:, None, i, a], qBk_aa[None, :, pscsfcv_i, pscsfcv_a], gamma_k)
+        #     A[p, :lcva] -= np.einsum('nmp, nmp, nm->p', qAj_aa[:, None, i, pscsfcv_i], qBj_aa[None, :, a, pscsfcv_a], gamma_j)
+        #     A[p, :lcva] -= np.einsum('p, p->p', fock_a_occ[i, pscsfcv_i], np.eye(nv)[a, pscsfcv_a])
+        #     A[p, :lcva] += np.einsum('p, p->p', np.eye(nc)[i, pscsfcv_i], fock_a_vir[a, pscsfcv_a])
+        #     A[p, :lcva] += (
+        #         0.5 * (1 - np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
+        #             np.einsum('p, p->p', np.eye(nc)[i, pscsfcv_i], fab_b2[no+a, no+pscsfcv_a])
+        #             - np.einsum('p, p->p', np.eye(nc)[i, pscsfcv_i], fab_a2[a, pscsfcv_a])
+        #         )
+        #         + 0.5 * (-1 + np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
+        #                 np.einsum('p, p->p', np.eye(no+nv)[no+a, no+pscsfcv_a], fij_b2[i, pscsfcv_i])
+        #                 - np.einsum('p, p->p', np.eye(nv)[a, pscsfcv_a], fij_a2[i, pscsfcv_i])
+        #         )
+        #     )
+        # # A[:lcva, :lcva] += int2ekcv_a
+        # # if self.correct:
+        # #     delta_k = delta_max / (1 + (np.diag(int2ekcv_a) / sigma_k) ** 4)
+        # #     A[:lcva, :lcva] += np.diag(delta_k)
+        # # del int2ekcv_a
+
+        # CV(aa)-CV(aa), CV(aa)-CV(bb), CV(bb)-CV(bb)
+        Acvacva, Acvacvb, Acvbcvb = constractA(
+            pscsfcv_i, pscsfcv_a, nc, no, nv, gamma_k, gamma_j,
+            qAk_aa, qBk_aa, qAj_aa, qBj_aa, qAk_bb, qBk_bb, qAj_bb, qBj_bb,
+            fock_a_occ, fock_a_vir, fock_b_occ, fock_b_vir, self.njob
+        )
+        A[:lcva, :lcva] = Acvacva
+        A[:lcva, lcva+lova+lcob:] = Acvacvb
+        A[lcva+lova+lcob:, lcva+lova+lcob:] = Acvbcvb
+        del Acvacva, Acvacvb, Acvbcvb
+
+        # # CV(aa)-OV(aa)
+        # int2ekcvaova = np.einsum('nmi, nma, nm->ia', qAkcv_aa[:, None, ...], qBkov_aa[None, ...], gamma_k)
+        # int2ejcvaova = np.zeros_like(int2ekcvaova)
         for i, a, p in zip(pscsfcv_i, pscsfcv_a, range(lcva)):
-            int2ejcv_a[p, :] = np.einsum('nmp, nmp, nm->p', qAj_aa[:, None, i, pscsfcv_i], qBj_aa[None, :, a, pscsfcv_a], gamma_j)
-            A[p, :lcva] -= np.einsum('p, p->p', fock_a_occ[i, pscsfcv_i], np.eye(nv)[a, pscsfcv_a])
-            A[p, :lcva] += np.einsum('p, p->p', np.eye(nc)[i, pscsfcv_i], fock_a_vir[a, pscsfcv_a])
-        A[:lcva, :lcva] += int2ekcv_a - int2ejcv_a
-        if self.correct:
-            delta_k = delta_max / (1 + (np.diag(int2ekcv_a) / sigma_k) ** 4)
-            A[:lcva, :lcva] += np.diag(delta_k)
-        del int2ekcv_a, int2ejcv_a
-        # CV(aa)-OV(aa)
-        int2ekcvaova = np.einsum('nmi, nma, nm->ia', qAkcv_aa[:, None, ...], qBkov_aa[None, ...], gamma_k)
-        int2ejcvaova = np.zeros_like(int2ekcvaova)
+            # int2ejcvaova[p, :] = np.einsum('nmp, nmp, nm->p', qAj_aa[:, None, i, nc+pscsfov_a_i], qBj_aa[None, :, a, pscsfov_a_a], gamma_j)
+            A[p, lcva:lcva+lova] += np.einsum(
+                'nm, nmp, nm->p',
+                qAk_aa[:, None, i, a], qBk_aa[None, :, nc+pscsfov_a_i, pscsfov_a_a], gamma_k, optimize=True
+            )
+            A[p, lcva:lcva+lova] -= np.einsum(
+                'nmp, nmp, nm->p',
+                qAj_aa[:, None, i, nc+pscsfov_a_i], qBj_aa[None, :, a, pscsfov_a_a], gamma_j, optimize=True
+            )
+            A[p, lcva:lcva+lova] -= np.einsum(
+                'p, p->p', fock_a_occ[i, nc+pscsfov_a_i], np.eye(nv)[a, pscsfov_a_a], optimize=True
+            )
+            A[p, lcva:lcva+lova] += np.einsum(
+                'p, p->p', np.eye(nc+no)[i, nc+pscsfov_a_i], fock_a_vir[a, pscsfov_a_a], optimize=True
+            )
+        # A[:lcva, lcva:lcva+lova] += int2ekcvaova - int2ejcvaova
+        # del int2ekcvaova, int2ejcvaova
+
+        # # CV(aa)-CO(bb)
+        # A[:lcva, lcva+lova:lcva+lova+lcob] = np.einsum('nmi, nma, nm->ia', qAkcv_aa[:, None, ...], qBkco_bb[None, ...], gamma_k)
         for i, a, p in zip(pscsfcv_i, pscsfcv_a, range(lcva)):
-            int2ejcvaova[p, :] = np.einsum('nmp, nmp, nm->p', qAj_aa[:, None, i, nc+pscsfov_a_i], qBj_aa[None, :, a, pscsfov_a_a], gamma_j)
-            A[p, lcva:lcva+lova] -= np.einsum('p, p->p', fock_a_occ[i, nc+pscsfov_a_i], np.eye(nv)[a, pscsfov_a_a])
-            A[p, lcva:lcva+lova] += np.einsum('p, p->p', np.eye(nc+no)[i, nc+pscsfov_a_i], fock_a_vir[a, pscsfov_a_a])
-        A[:lcva, lcva:lcva+lova] += int2ekcvaova - int2ejcvaova
-        del int2ekcvaova, int2ejcvaova
-        # CV(aa)-CO(bb)
-        A[:lcva, lcva+lova:lcva+lova+lcob] = np.einsum('nmi, nma, nm->ia', qAkcv_aa[:, None, ...], qBkco_bb[None, ...], gamma_k)
-        # CV(aa)-CV(bb)
-        A[:lcva, lcva+lova+lcob:] = np.einsum('nmi, nma, nm->ia', qAkcv_aa[:, None, ...], qBkcv_bb[None, ...], gamma_k)
+            A[p, lcva+lova:lcva+lova+lcob] += np.einsum(
+                'nm, nmp, nm->p',
+                qAk_aa[:, None, i, a], qBk_bb[None, :, pscsfco_b_i, pscsfco_b_a], gamma_k, optimize=True
+            )
+
+        # # # CV(aa)-CV(bb)
+        # # A[:lcva, lcva+lova+lcob:] = np.einsum('nmi, nma, nm->ia', qAkcv_aa[:, None, ...], qBkcv_bb[None, ...], gamma_k)
+        # for i, a, p in zip(pscsfcv_i, pscsfcv_a, range(lcva)):
+        #     A[p, lcva+lova+lcob:] += np.einsum('nm, nmp, nm->p', qAk_aa[:, None, i, a], qBk_bb[None, :, pscsfcv_i, no+pscsfcv_a], gamma_k)
+        #     A[p, lcva+lova+lcob:] += (0.5 * 1 / (2 * si) * (
+        #         np.einsum('p, p->p', np.eye(nc)[i, pscsfcv_i], fab_b2[no+a, no+pscsfcv_a])
+        #         - np.einsum('p, p->p', np.eye(nc)[i, pscsfcv_i], fab_a2[a, pscsfcv_a])
+        #         + np.einsum('p, p->p', np.eye(no+nv)[no+a, no+pscsfcv_a], fij_b2[i, pscsfcv_i])
+        #         - np.einsum('p, p->p', np.eye(nv)[a, pscsfcv_a], fij_a2[i, pscsfcv_i])
+        #     ))
+
         # OV(aa)-CV(aa)
         A[lcva:lcva+lova, :lcva] = A[:lcva, lcva:lcva+lova].T
-        # OV(aa)-OV(aa)
-        int2ekov_a = np.einsum('nmi, nma, nm->ia', qAkov_aa[:, None, ...], qBkov_aa[None, ...], gamma_k)
-        int2ejov_a = np.zeros_like(int2ekov_a)
+
+        # # OV(aa)-OV(aa)
+        # int2ekov_a = np.einsum('nmi, nma, nm->ia', qAkov_aa[:, None, ...], qBkov_aa[None, ...], gamma_k)
+        # int2ejov_a = np.zeros_like(int2ekov_a)
         for i, a, p in zip(pscsfov_a_i, pscsfov_a_a, range(lova)):
-            int2ejov_a[p, :] = np.einsum('nmp, nmp, nm->p', qAj_aa[:, None, nc+i, nc+pscsfov_a_i], qBj_aa[None, :, a, pscsfov_a_a], gamma_j)
-            A[lcva+p, lcva:lcva+lova] -= np.einsum('p, p->p', fock_a_occ[nc+i, nc+pscsfov_a_i], np.eye(nv)[a, pscsfov_a_a])
-            A[lcva+p, lcva:lcva+lova] += np.einsum('p, p->p', np.eye(nc+no)[nc+i, nc+pscsfov_a_i], fock_a_vir[a, pscsfov_a_a])
-        A[lcva:lcva+lova, lcva:lcva+lova] += int2ekov_a - int2ejov_a
-        if self.correct:
-            delta_k = delta_max / (1 + (np.diag(int2ekov_a) / sigma_k) ** 4)
-            A[lcva:lcva+lova, lcva:lcva+lova] += np.diag(delta_k)
-        del int2ekov_a, int2ejov_a
-        # OV(aa)-CO(bb)
-        A[lcva:lcva+lova, lcva+lova:lcva+lova+lcob] = np.einsum('nmi, nma, nm->ia', qAkov_aa[:, None, ...], qBkco_bb[None, ...], gamma_k)
-        # OV(aa)-CV(bb)
-        A[lcva:lcva+lova, lcva+lova+lcob:] = np.einsum('nmi, nma, nm->ia', qAkov_aa[:, None, ...], qBkcv_bb[None, ...], gamma_k)
+            # int2ejov_a[p, :] = np.einsum('nmp, nmp, nm->p', qAj_aa[:, None, nc+i, nc+pscsfov_a_i], qBj_aa[None, :, a, pscsfov_a_a], gamma_j)
+            A[lcva+p, lcva:lcva+lova] += np.einsum(
+                'nm, nmp, nm->p',
+                qAk_aa[:, None, nc+i, a], qBk_aa[None, :, nc+pscsfov_a_i, pscsfov_a_a], gamma_k, optimize=True
+            )
+            A[lcva+p, lcva:lcva+lova] -= np.einsum(
+                'nmp, nmp, nm->p',
+                qAj_aa[:, None, nc+i, nc+pscsfov_a_i], qBj_aa[None, :, a, pscsfov_a_a], gamma_j, optimize=True
+            )
+            A[lcva+p, lcva:lcva+lova] -= np.einsum(
+                'p, p->p', fock_a_occ[nc+i, nc+pscsfov_a_i], np.eye(nv)[a, pscsfov_a_a], optimize=True
+            )
+            A[lcva+p, lcva:lcva+lova] += np.einsum(
+                'p, p->p', np.eye(nc+no)[nc+i, nc+pscsfov_a_i], fock_a_vir[a, pscsfov_a_a], optimize=True
+            )
+        # A[lcva:lcva+lova, lcva:lcva+lova] += int2ekov_a - int2ejov_a
+        # if self.correct:
+        #     delta_k = delta_max / (1 + (np.diag(int2ekov_a) / sigma_k) ** 4)
+        #     A[lcva:lcva+lova, lcva:lcva+lova] += np.diag(delta_k)
+        # del int2ekov_a, int2ejov_a
+
+        # # OV(aa)-CO(bb)
+        # A[lcva:lcva+lova, lcva+lova:lcva+lova+lcob] = np.einsum('nmi, nma, nm->ia', qAkov_aa[:, None, ...], qBkco_bb[None, ...], gamma_k)
+        for i, a, p in zip(pscsfov_a_i, pscsfov_a_a, range(lova)):
+            A[lcva+p, lcva+lova:lcva+lova+lcob] += np.einsum(
+                'nm, nmp, nm->p',
+                qAk_aa[:, None, nc+i, a], qBk_bb[None, :, pscsfco_b_i, pscsfco_b_a], gamma_k, optimize=True
+            )
+
+        # # OV(aa)-CV(bb)
+        # A[lcva:lcva+lova, lcva+lova+lcob:] = np.einsum('nmi, nma, nm->ia', qAkov_aa[:, None, ...], qBkcv_bb[None, ...], gamma_k)
+        for i, a, p in zip(pscsfov_a_i, pscsfov_a_a, range(lova)):
+            A[lcva+p, lcva+lova+lcob:] += np.einsum(
+                'nm, nmp, nm->p',
+                qAk_aa[:,None,nc+i,a], qBk_bb[None,:,pscsfcv_i,no+pscsfcv_a], gamma_k, optimize=True
+            )
+
         # CO(bb)-CV(aa)
         A[lcva+lova:lcva+lova+lcob, :lcva] = A[:lcva, lcva+lova:lcva+lova+lcob].T
+
         # CO(bb)-OV(aa)
         A[lcva+lova:lcva+lova+lcob, lcva:lcva+lova] = A[lcva:lcva+lova, lcva+lova:lcva+lova+lcob].T
-        # CO(bb)-CO(bb)
-        int2ekco_b = np.einsum('nmi, nma, nm->ia', qAkco_bb[:, None, ...], qBkco_bb[None, ...], gamma_k)
-        int2ejco_b = np.zeros_like(int2ekco_b)
+
+        # # CO(bb)-CO(bb)
+        # int2ekco_b = np.einsum('nmi, nma, nm->ia', qAkco_bb[:, None, ...], qBkco_bb[None, ...], gamma_k)
+        # int2ejco_b = np.zeros_like(int2ekco_b)
         for i, a, p in zip(pscsfco_b_i, pscsfco_b_a, range(lcob)):
-            int2ejco_b[p, :] = np.einsum('nmp, nmp, nm->p', qAj_bb[:, None, i, pscsfco_b_i], qBj_bb[None, :, a, pscsfco_b_a], gamma_j)
-            A[lcva+lova+p, lcva+lova:lcva+lova+lcob] -= np.einsum('p, p->p', fock_b_occ[i, pscsfco_b_i], np.eye(no+nv)[a, pscsfco_b_a])
-            A[lcva+lova+p, lcva+lova:lcva+lova+lcob] += np.einsum('p, p->p', np.eye(nc)[i, pscsfco_b_i], fock_b_vir[a, pscsfco_b_a])
-        A[lcva+lova:lcva+lova+lcob, lcva+lova:lcva+lova+lcob] += int2ekco_b - int2ejco_b
-        if self.correct:
-            delta_k = delta_max / (1 + (np.diag(int2ekco_b) / sigma_k) ** 4)
-            A[lcva+lova:lcva+lova+lcob, lcva+lova:lcva+lova+lcob] += np.diag(delta_k)
-        del int2ekco_b, int2ejco_b
-        # CO(bb)-CV(bb)
-        int2ekcobcvb = np.einsum('nmi, nma, nm->ia', qAkco_bb[:, None, ...], qBkcv_bb[None, ...], gamma_k)
-        int2ejcobcvb = np.zeros_like(int2ekcobcvb)
+            # int2ejco_b[p, :] = np.einsum('nmp, nmp, nm->p', qAj_bb[:, None, i, pscsfco_b_i], qBj_bb[None, :, a, pscsfco_b_a], gamma_j)
+            A[lcva+lova+p, lcva+lova:lcva+lova+lcob] += np.einsum(
+                'nm, nmp, nm->p',
+                qAk_bb[:, None, i, a],qBk_bb[None, :, pscsfco_b_i, pscsfco_b_a], gamma_k, optimize=True
+            )
+            A[lcva+lova+p, lcva+lova:lcva+lova+lcob] -= np.einsum(
+                'nmp, nmp, nm->p',
+                qAj_bb[:, None, i, pscsfco_b_i], qBj_bb[None, :, a, pscsfco_b_a], gamma_j, optimize=True
+            )
+            A[lcva+lova+p, lcva+lova:lcva+lova+lcob] -= np.einsum(
+                'p, p->p', fock_b_occ[i, pscsfco_b_i], np.eye(no+nv)[a, pscsfco_b_a], optimize=True
+            )
+            A[lcva+lova+p, lcva+lova:lcva+lova+lcob] += np.einsum(
+                'p, p->p', np.eye(nc)[i, pscsfco_b_i], fock_b_vir[a, pscsfco_b_a], optimize=True
+            )
+        # A[lcva+lova:lcva+lova+lcob, lcva+lova:lcva+lova+lcob] += int2ekco_b - int2ejco_b
+        # if self.correct:
+        #     delta_k = delta_max / (1 + (np.diag(int2ekco_b) / sigma_k) ** 4)
+        #     A[lcva+lova:lcva+lova+lcob, lcva+lova:lcva+lova+lcob] += np.diag(delta_k)
+        # del int2ekco_b, int2ejco_b
+
+        # # CO(bb)-CV(bb)
+        # int2ekcobcvb = np.einsum('nmi, nma, nm->ia', qAkco_bb[:, None, ...], qBkcv_bb[None, ...], gamma_k)
+        # int2ejcobcvb = np.zeros_like(int2ekcobcvb)
         for i, a, p in zip(pscsfco_b_i, pscsfco_b_a, range(lcob)):
-            int2ejcobcvb[p, :] = np.einsum('nmp, nmp, nm->p', qAj_bb[:, None, i, pscsfcv_i], qBj_bb[None, :, a, no+pscsfcv_a], gamma_j)
-            A[lcva+lova+p, lcva+lova+lcob:] -= np.einsum('p, p->p', fock_b_occ[i, pscsfcv_i], np.eye(no+nv)[a, no+pscsfcv_a])
-            A[lcva+lova+p, lcva+lova+lcob:] += np.einsum('p, p->p', np.eye(nc)[i, pscsfcv_i], fock_b_vir[a, no+pscsfcv_a])
-        A[lcva+lova:lcva+lova+lcob, lcva+lova+lcob:] += int2ekcobcvb - int2ejcobcvb
-        del int2ekcobcvb, int2ejcobcvb
+            # int2ejcobcvb[p, :] = np.einsum('nmp, nmp, nm->p', qAj_bb[:, None, i, pscsfcv_i], qBj_bb[None, :, a, no+pscsfcv_a], gamma_j)
+            A[lcva+lova+p, lcva+lova+lcob:] += np.einsum(
+                'nm, nmp, nm->p',
+                qAk_bb[:, None, i, a], qBk_bb[None, :, pscsfcv_i, no+pscsfcv_a], gamma_k, optimize=True
+            )
+            A[lcva+lova+p, lcva+lova+lcob:] -= np.einsum(
+                'nmp, nmp, nm->p',
+                qAj_bb[:, None, i, pscsfcv_i], qBj_bb[None, :, a, no+pscsfcv_a], gamma_j, optimize=True
+            )
+            A[lcva+lova+p, lcva+lova+lcob:] -= np.einsum(
+                'p, p->p', fock_b_occ[i, pscsfcv_i], np.eye(no+nv)[a, no+pscsfcv_a], optimize=True
+            )
+            A[lcva+lova+p, lcva+lova+lcob:] += np.einsum(
+                'p, p->p', np.eye(nc)[i, pscsfcv_i], fock_b_vir[a, no+pscsfcv_a], optimize=True
+            )
+        # A[lcva+lova:lcva+lova+lcob, lcva+lova+lcob:] += int2ekcobcvb - int2ejcobcvb
+        # del int2ekcobcvb, int2ejcobcvb
+
         # CV(bb)-CV(aa)
         A[lcva+lova+lcob:, :lcva] = A[:lcva, lcva+lova+lcob:].T
+
         # CV(bb)-OV(aa)
         A[lcva+lova+lcob:, lcva:lcva+lova] = A[lcva:lcva+lova, lcva+lova+lcob:].T
+
         # CV(bb)-CO(bb)
         A[lcva+lova+lcob:, lcva+lova:lcva+lova+lcob] = A[lcva+lova:lcva+lova+lcob, lcva+lova+lcob:].T
-        # CV(bb)-CV(bb)
-        int2ekcv_b = np.einsum('nmi, nma, nm->ia', qAkcv_bb[:, None, ...], qBkcv_bb[None, ...], gamma_k)
-        int2ejcv_b = np.zeros_like(int2ekcv_b)
-        for i, a, p in zip(pscsfcv_i, pscsfcv_a, range(lcvb)):
-            int2ejcv_b[p, :] = np.einsum('nmp, nmp, nm->p', qAj_bb[:, None, i, pscsfcv_i], qBj_bb[None, :, no+a, no+pscsfcv_a], gamma_j)
-            A[lcva+lova+lcob+p, lcva+lova+lcob:] -= np.einsum('p, p->p', fock_b_occ[i, pscsfcv_i], np.eye(no+nv)[no+a, no+pscsfcv_a])
-            A[lcva+lova+lcob+p, lcva+lova+lcob:] += np.einsum('p, p->p', np.eye(nc)[i, pscsfcv_i], fock_b_vir[no+a, no+pscsfcv_a])
-        A[lcva+lova+lcob:, lcva+lova+lcob:] += int2ekcv_b - int2ejcv_b
-        if self.correct:
-            delta_k = delta_max / (1 + (np.diag(int2ekcv_b) / sigma_k) ** 4)
-            A[lcva+lova+lcob:, lcva+lova+lcob:] += np.diag(delta_k)
-        del int2ekcv_b, int2ejcv_b
+        t1 = time.time()
+        t_cA = t1 - t0
+
+        # # # CV(bb)-CV(bb)
+        # # int2ekcv_b = np.einsum('nmi, nma, nm->ia', qAkcv_bb[:, None, ...], qBkcv_bb[None, ...], gamma_k)
+        # # int2ejcv_b = np.zeros_like(int2ekcv_b)
+        # for i, a, p in zip(pscsfcv_i, pscsfcv_a, range(lcvb)):
+        #     # int2ejcv_b[p, :] = np.einsum('nmp, nmp, nm->p', qAj_bb[:, None, i, pscsfcv_i], qBj_bb[None, :, no+a, no+pscsfcv_a], gamma_j)
+        #     A[lcva+lova+lcob+p, lcva+lova+lcob:] += np.einsum('nm, nmp, nm->p', qAk_bb[:, None, i, no+a], qBk_bb[None, :, pscsfcv_i, no+pscsfcv_a], gamma_k)
+        #     A[lcva+lova+lcob+p, lcva+lova+lcob:] -= np.einsum('nmp, nmp, nm->p', qAj_bb[:, None, i, pscsfcv_i], qBj_bb[None, :, no+a, no+pscsfcv_a], gamma_j)
+        #     A[lcva+lova+lcob+p, lcva+lova+lcob:] -= np.einsum('p, p->p', fock_b_occ[i, pscsfcv_i], np.eye(no+nv)[no+a, no+pscsfcv_a])
+        #     A[lcva+lova+lcob+p, lcva+lova+lcob:] += np.einsum('p, p->p', np.eye(nc)[i, pscsfcv_i], fock_b_vir[no+a, no+pscsfcv_a])
+        #     A[lcva+lova+lcob+p, lcva+lova+lcob:] += (
+        #         0.5 * (-1 + np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
+        #             np.einsum('p, p->p', np.eye(nc)[i, pscsfcv_i], fab_b2[no+a, no+pscsfcv_a])
+        #             - np.einsum('p, p->p', np.eye(nc)[i, pscsfcv_i], fab_a2[a, pscsfcv_a])
+        #         )
+        #         + 0.5 * (1 - np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
+        #             np.einsum('p, p->p', np.eye(no+nv)[no+a, no+pscsfcv_a], fij_b2[i, pscsfcv_i])
+        #             - np.einsum('p, p->p', np.eye(nv)[a, pscsfcv_a], fij_a2[i, pscsfcv_i])
+        #         )
+        #     )
+        # # # A[lcva+lova+lcob:, lcva+lova+lcob:] += int2ekcv_b - int2ejcv_b
+        # # A[lcva+lova+lcob:, lcva+lova+lcob:] += int2ekcv_b
+        # # if self.correct:
+        # #     delta_k = delta_max / (1 + (np.diag(int2ekcv_b) / sigma_k) ** 4)
+        # #     A[lcva+lova+lcob:, lcva+lova+lcob:] += np.diag(delta_k)
+        # # del int2ekcv_b
 
         # define some class variety, simple to use
         self.mo_coeff_a = mo_coeff_a
@@ -664,40 +881,68 @@ class UsTDA:
         self.lcob = lcob
         self.lcvb = lcvb
 
+        t0 = time.time()
         self.e, self.v = scipy.linalg.eigh(A)
+        t1 = time.time()
+        t_diagA = t1 - t0
         self.e_eV = self.e[:self.nstates] * unit.ha2eV
         # logger.info(self.mf, "my stda result is \n{}".format(self.e_eV))
         self.v = self.v[:, :self.nstates]
         if self.truncate:
             self.xycv_a = self.v.T[:, :lcva]  # V_cv_a
-            self.xyov_a = self.v.T[:, lcva:lcva+lova]  # V_ov_a
-            self.xyco_b = self.v.T[:, lcva+lova:lcva+lova+lcob]  # V_co_b
-            self.xycv_b = self.v.T[:, lcva+lova+lcob:]  # V_cv_b
+            self.xyov_a = self.v.T[:, lcva:lcva + lova]  # V_ov_a
+            self.xyco_b = self.v.T[:, lcva + lova:lcva + lova + lcob]  # V_co_b
+            self.xycv_b = self.v.T[:, lcva + lova + lcob:]  # V_cv_b
         else:
-            self.xycv_a = self.v.T[:, :nc*nv]  # V_cv_a
-            self.xyov_a = self.v.T[:, nc*nv:(nc+no)*nv]  # V_ov_a
-            self.xyco_b = self.v.T[:, (nc+no)*nv:(nc+no)*nv+nc*no]  # V_co_b
-            self.xycv_b = self.v.T[:, (nc+no)*nv+nc*no:]  # V_cv_b
+            self.xycv_a = self.v.T[:, :nc * nv]  # V_cv_a
+            self.xyov_a = self.v.T[:, nc * nv:(nc + no) * nv]  # V_ov_a
+            self.xyco_b = self.v.T[:, (nc + no) * nv:(nc + no) * nv + nc * no]  # V_co_b
+            self.xycv_b = self.v.T[:, (nc + no) * nv + nc * no:]  # V_cv_b
+        t0 = time.time()
         self.os = self.osc_str()  # oscillator strength
+        t1 = time.time()
+        t_os = t1 - t0
         # before calculate rot_str, check whether mol is chiral mol
+        t0 = time.time()
         if gto.mole.chiral_mol(mol):
             rs = self.rot_str()
         else:
             rs = np.zeros(self.nstates)
             # logger.info(self.mf, 'molecule do not have chiral')
+        t1 = time.time()
+        t_rs = t1 - t0
+        t0 = time.time()
         self.dS2 = self.deltaS2()
+        t1 = time.time()
+        t_dS2 = t1 - t0
         # logger.info(self.mf, 'oscillator strength (length form) \n{}'.format(self.os))
         # logger.info(self.mf, 'rotatory strength (cgs unit) \n{}'.format(self.rs))
         # logger.info(self.mf, 'deltaS2 is \n{}'.format(dS2))
+        t0 = time.time()
         print('my UsTDA result is')
         print(f'{"num":>4} {"energy":>8} {"wav_len"} {"osc_str":>8} {"rot_str":>8} {"deltaS2":>8}')
-        for ni, ei, wli, osi, rsi, ds2i in zip(range(self.nstates), self.e_eV, unit.eVxnm/self.e_eV, self.os, rs, self.dS2):
-            print(f'{ni:4d} {ei:8.4f} {wli:8.4f} {osi:8.4f} {rsi:8.4f} {ds2i:8.4f}')
+        for ni, ei, wli, osi, rsi, ds2i in zip(range(self.nstates), self.e_eV, unit.eVxnm / self.e_eV, self.os, rs, self.dS2):
+            print(f'{ni + 1:4d} {ei:8.4f} {wli:8.4f} {osi:8.4f} {rsi:8.4f} {ds2i:8.4f}')
         if self.savedata:
             pd.DataFrame(
                 np.concatenate((unit.eVxnm / np.expand_dims(self.e_eV, axis=1), np.expand_dims(self.os, axis=1)), axis=1)
             ).to_csv('uvspec_data.csv', index=False, header=None)
+        t1 = time.time()
+        t_analyze = t1 - t0
         # np.save("energy_ustda.npy", self.e)
+        t_all_1 = time.time()  # record kernel end time
+        t_all = t_all_1 - t_all_0
+        print('='*50)
+        print("contract Fock matrix use          {:8.4f} s".format(t_getfock))
+        if self.truncate:
+            print("select PCSF use                   {:8.4f} s".format(t_pcsf))
+            print("select SCSF use                   {:8.4f} s".format(t_scsf))
+        print("contract A matrix use             {:8.4f} s".format(t_cA))
+        print("diagonal A matrix use             {:8.4f} s".format(t_diagA))
+        print("calculate oscillator strength use {:8.4f} s".format(t_os))
+        print("calculate rotator strength use    {:8.4f} s".format(t_rs))
+        print("calculate delta S^2 use           {:8.4f} s".format(t_dS2))
+        print("sU-TDA use                        {:8.4f} s".format(t_all))
         return self.e_eV, self.os, rs, self.v, pscsf_fdiag
 
     def deltaS2(self):
@@ -836,6 +1081,11 @@ class UsTDA:
         fnc = self.frozen_nc
         out_cube = [0, np.argmax(self.os)]  # only output 1st excited state and max os excited state orbital
         orbital = []  # record output orbital number
+        if self.truncate:
+            self.v = utils.so2st(self.v[:, :self.nstates], lcva=self.lcva, lova=self.lova, lcob=self.lcob, lcvb=self.lcvb)
+        else:
+            self.v = utils.so2st(self.v[:, :self.nstates], nc, no, nv)
+        print("=" * 50)
         for nstate in range(self.nstates):
             value = self.v[:,nstate]
             x_cv_aa = value[:self.lcva]
@@ -851,51 +1101,51 @@ class UsTDA:
             # out_excittype = np.argmax((np.max(abs(x_cv_aa)), np.max(abs(x_ov_aa)), np.max(abs(x_co_bb)), np.max(abs(x_cv_bb))))
             if self.truncate:
                 for i in np.where(abs(x_cv_aa) > 0.1)[0]:
-                    print(f'    CV(aa) {fnc+self.pscsfcv_i[i]+1:3d}a -> {fnc+self.pscsfcv_a[i]+1+nc+no:3d}a'
+                    print(f'    CV(0) {fnc+self.pscsfcv_i[i]+1:3d}a -> {fnc+self.pscsfcv_a[i]+1+nc+no:3d}a'
                           + f'    c_i: {x_cv_aa[i]:8.5f}    Per: {100*x_cv_aa[i]**2:5.2f}%')
                     # if nstate in out_cube and out_excittype == 0 and i == np.argmax(abs(x_cv_aa)):
                     if nstate in out_cube:
                         orbital.append(fnc+self.pscsfcv_i[i])
                         orbital.append(fnc+self.pscsfcv_a[i]+nc+no)
                 for i in np.where(abs(x_ov_aa) > 0.1)[0]:
-                    print(f'    OV(aa) {fnc+self.pscsfov_a_i[i]+1+nc:3d}a -> {fnc+self.pscsfov_a_a[i]+1+nc+no:3d}a'
+                    print(f'    OV(0) {fnc+self.pscsfov_a_i[i]+1+nc:3d}a -> {fnc+self.pscsfov_a_a[i]+1+nc+no:3d}a'
                           + f'    c_i: {x_ov_aa[i]:8.5f}    Per: {100*x_ov_aa[i]**2:5.2f}%')
                     if nstate in out_cube:
                         orbital.append(fnc+self.pscsfov_a_i[i]+nc)
                         orbital.append(fnc+self.pscsfov_a_a[i]+nc+no)
                 for i in np.where(abs(x_co_bb) > 0.1)[0]:
-                    print(f'    CO(bb) {fnc+self.pscsfco_b_i[i]+1:3d}b -> {fnc+self.pscsfco_b_a[i]+1+nc:3d}b'
+                    print(f'    CO(0) {fnc+self.pscsfco_b_i[i]+1:3d}b -> {fnc+self.pscsfco_b_a[i]+1+nc:3d}b'
                           + f'    c_i: {x_co_bb[i]:8.5f}    Per: {100*x_co_bb[i]**2:5.2f}%')
                     if nstate in out_cube:
                         orbital.append(fnc+self.pscsfco_b_i[i])
                         orbital.append(fnc+self.pscsfco_b_a[i]+nc)
                 for i in np.where(abs(x_cv_bb) > 0.1)[0]:
-                    print(f'    CV(bb) {fnc+self.pscsfcv_i[i]+1:3d}b -> {fnc+self.pscsfcv_a[i]+1+nc+no:3d}b'
+                    print(f'    CV(1) {fnc+self.pscsfcv_i[i]+1:3d}b -> {fnc+self.pscsfcv_a[i]+1+nc+no:3d}b'
                           + f'    c_i: {x_cv_bb[i]:8.5f}    Per: {100*x_cv_bb[i]**2:5.2f}%')
                     if nstate in out_cube:
                         orbital.append(fnc+self.pscsfcv_i[i])
                         orbital.append(fnc+self.pscsfcv_a[i]+nc+no)
             else:
                 for o, v in zip(*np.where(abs(x_cv_aa) > 0.1)):
-                    print(f'    CV(aa) {fnc+o + 1:3d}a -> {fnc+v + 1 + nc+no:3d}a'
+                    print(f'    CV(0) {fnc+o + 1:3d}a -> {fnc+v + 1 + nc+no:3d}a'
                           + f'    c_i: {x_cv_aa[o, v]:8.5f}    Per: {100*x_cv_aa[o, v]**2:5.2f}%')
                     if nstate in out_cube:
                         orbital.append(fnc+o)
                         orbital.append(fnc+v+nc+no)
                 for o, v in zip(*np.where(abs(x_ov_aa) > 0.1)):
-                    print(f'    OV(aa) {fnc+nc+o + 1:3d}a -> {fnc+v + 1+nc+no:3d}a'
+                    print(f'    OV(0) {fnc+nc+o + 1:3d}a -> {fnc+v + 1+nc+no:3d}a'
                           + f'     c_i: {x_ov_aa[o, v]:8.5f}    Per: {100*x_ov_aa[o, v]**2:5.2f}%')
                     if nstate in out_cube:
                         orbital.append(fnc+nc+o)
                         orbital.append(fnc+v+nc+no)
                 for o, v in zip(*np.where(abs(x_co_bb) > 0.1)):
-                    print(f'    CO(bb) {fnc+o + 1:3d}b -> {fnc+v + 1+nc:3d}b'
+                    print(f'    CO(0) {fnc+o + 1:3d}b -> {fnc+v + 1+nc:3d}b'
                           + f'    c_i: {x_co_bb[o, v]:8.5f}    Per: {100*x_co_bb[o, v]**2:5.2f}%')
                     if nstate in out_cube:
                         orbital.append(fnc+o)
                         orbital.append(fnc+v+nc)
                 for o, v in zip(*np.where(abs(x_cv_bb) > 0.1)):
-                    print(f'    CV(bb) {fnc+o + 1:3d}b -> {fnc+v + 1 + nc+no:3d}b'
+                    print(f'    CV(1) {fnc+o + 1:3d}b -> {fnc+v + 1 + nc+no:3d}b'
                           + f'    c_i: {x_cv_bb[o, v]:8.5f}    Per: {100*x_cv_bb[o, v]**2:5.2f}%')
                     if nstate in out_cube:
                         orbital.append(fnc+o)
@@ -912,9 +1162,15 @@ class UsTDA:
 
 if __name__ == "__main__":
     mol = gto.M(
-        # atom=atom.n2,  # unit is Angstrom
-        # atom=atom.ch2o,
-        atom=atom.ch2o_vacuum,
+        # atom=atom.n2_,  # unit is Angstrom
+        atom=atom.ch2o,
+        # atom=atom.ch2o_vacuum,
+        # atom=atom.ttm_toluene,
+        # atom=atom.bispytm_toluene,
+        # atom=atom.ttm3ncz_toluene,
+        # atom=atom.mttm2_toluene,
+        # atom=atom.hhcrqpp2,
+        # atom=atom.ptm3ncz_cyclohexane,
         unit="A",
         # unit="B",  # https://doi.org/10.1016/j.comptc.2014.02.023 use bohr
         # basis='aug-cc-pvtz',
@@ -934,21 +1190,18 @@ if __name__ == "__main__":
     # mol.basis = basis
     # mol.build()
 
-    # # add solvents
-    # t_dft0 = time.time()
-    # mf = dft.UKS(mol).SMD()
-    # # mf = dft.UKS(mol).PCM()
-    # # mf.with_solvent.method = 'COSMO'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
-    # # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
-    # # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
-    # mf.with_solvent.eps = 2.3741  # for toluene 甲苯
-    # # mf.with_solvent.eps = 35.688  # for Acetonitrile 乙腈
-
+    # add solvents
     t_dft0 = time.time()
-    mf = dft.UKS(mol)
-    # mf.init_guess = '1e'
-    # mf.init_guess = 'atom'
-    # mf.init_guess = 'huckel'
+    mf = dft.UKS(mol).SMD()
+    # mf = dft.UKS(mol).PCM()
+    # mf.with_solvent.method = 'COSMO'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
+    # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
+    # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
+    mf.with_solvent.eps = 2.3741  # for toluene 甲苯
+    # mf.with_solvent.eps = 35.688  # for Acetonitrile 乙腈
+
+    # t_dft0 = time.time()
+    # mf = dft.UKS(mol)
     mf.conv_tol = 1e-8
     mf.conv_tol_grad = 1e-5
     mf.max_cycle = 200
@@ -964,49 +1217,18 @@ if __name__ == "__main__":
     # xc = 'bhhlyp'
     # mf.grids.level = 9
     mf.conv_check = False
+    # mf.level_shift = 0.6
     mf.kernel()
     t_dft1 = time.time()
     print("dft use {} s".format(t_dft1 - t_dft0))
-    # os.environ["OMP_NUM_THREADS"] = "1"  # test one core time consuming
-    print('num.orb    mo_energy_a    mo_energy_b')
-    for ind, moei in enumerate(mf.mo_energy.T):
-        print(f'{ind+1:5d}    {moei[0]:10.4f}    {moei[1]:10.4f}')
     print('=' * 50)
 
+    # os.environ["OMP_NUM_THREADS"] = "1"  # test one core time-consuming
     ustda = UsTDA(mol, mf, nstates=10)
     ustda.info()
-
-    # # three kind approximation
-    # # A12
-    # print("=" * 50)
-    # t0 = time.time()
-    # ustda.nstates = 12
-    # ustda.truncate = 0.0
-    # ustda.cas = False
-    # ustda.paramtype = 'os'
-    # e_eV, os, rs, v, pscsf = ustda.kernel()
-    # t1 = time.time()
-    # print("ustda use {} s".format(t1-t0))
-
-    # # A123
-    # print("="*50)
-    # t0 = time.time()
-    # ustda.nstates = 12
-    # ustda.truncate = 20.0
-    # ustda.cas = False
-    # ustda.paramtype = 'os'
-    # e_eV, os, rs, v, pscsf = ustda.kernel()
-    # t1 = time.time()
-    # print("ustda use {} s".format(t1 - t0))
-
-    # A1234
-    print("="*50)
-    t0 = time.time()
     ustda.nstates = 12
     ustda.truncate = 20.0
     ustda.cas = True
     ustda.paramtype = 'os'
     e_eV, os, rs, v, pscsf = ustda.kernel()
-    t1 = time.time()
-    print("ustda use {} s".format(t1 - t0))
     # ustda.analyze(out_filename='vacuum-UsTDA')

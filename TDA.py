@@ -10,7 +10,7 @@ from pyscf import dft, gto, scf, tddft, ao2mo, lib
 from pyscf.lib import logger
 from utils import atom, unit
 '''
-most coda refer to pyscf code
+most code refer to pyscf code
 '''
 
 
@@ -75,7 +75,7 @@ class TDA:
         # delta_ij = np.eye(nocc)
         # delta_ab = np.eye(nvir)
 
-        def add_hf_(a, hyb=1):
+        def add_hf_(a, hyb=1.0):
             # hyb=1 is CIS
             eri_mo = ao2mo.general(mol, [mo, mo, mo, mo], compact=False)
             eri_mo = eri_mo.reshape(nmo, nmo, nmo, nmo)

@@ -1181,7 +1181,7 @@ bispytm_vacuum = '''
     N   -2.572906 -3.747607 0.014984
 '''
 
-# unit is Angstrom, ub3lyp/6-31g**
+# unit is Angstrom, ub3lyp/6-31g** 6D10F, gaussian
 bispytm_toluene = '''
     Cl   2.703829   -0.405754   -2.127453
     Cl   2.703829    0.405752    2.127454
