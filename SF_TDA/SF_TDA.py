@@ -203,7 +203,7 @@ class SF_TDA_down():
         nocc_b = orbo_b.shape[1]
         nvir_b = orbv_b.shape[1]
         
-        a_b2a = np.zeros((nocc_b,nvir_a,nocc_b,nvir_a))
+        #a_b2a = np.zeros((nocc_b,nvir_a,nocc_b,nvir_a))
         a_a2b = np.zeros((nocc_a,nvir_b,nocc_a,nvir_b))
         delta_ij = np.eye(nocc_a)
         delta_ab = np.eye(nvir_b)
@@ -215,13 +215,13 @@ class SF_TDA_down():
         fockA = mo_coeff[0].T @ focka @ mo_coeff[0]
         fockB = mo_coeff[1].T @ fockb @ mo_coeff[1]
         
-        a = (a_b2a, a_a2b)
+        #a = (a_b2a, a_a2b)
         nc = nocc_b
         nv = nvir_a
         no = nocc_a-nocc_b
         
         
-        def add_hf_(a, hyb=1):
+        def add_hf_(a_a2b, hyb=1):
             
             #eri_a_b2a = ao2mo.general(mol, [orbo_b,orbo_b,orbv_a,orbv_a], compact=False)
             eri_mo = ao2mo.general(mol, [orbo_a,orbo_a,orbv_b,orbv_b], compact=False)
@@ -229,16 +229,16 @@ class SF_TDA_down():
             #eri_a_b2a = eri_a_b2a.reshape(nocc_b,nocc_b,nvir_a,nvir_a)
             eri_mo = eri_mo.reshape(nocc_a,nocc_a,nvir_b,nvir_b)
 
-            a_b2a, a_a2b = a
+            #a_b2a, a_a2b = a
 
             #a_b2a-= np.einsum('ijba->iajb', eri_a_b2a) * hyb
-            a_a2b-= np.einsum('ijba->iajb', eri_mo) * hyb
+            a_a2b -= np.einsum('ijba->iajb', eri_mo) * hyb
             del eri_mo
             
         try:
             xctype = mf.xc
         except:
-            xctype = None
+            xctype = None # only work for HF 
             eri_mo_a2b = ao2mo.general(mol, [orbo_a,orbo_a,orbv_b,orbv_b], compact=False)
             eri_a_a2b = eri_mo_a2b.reshape(nocc_a,nocc_a,nvir_b,nvir_b)
             a_a2b -= np.einsum('ijba->iajb', eri_a_a2b)
@@ -254,7 +254,7 @@ class SF_TDA_down():
             omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, mf.mol.spin)
             print('omega alpha hyb',omega, alpha, hyb)
             if hyb != 0:
-                add_hf_(a,hyb)
+                add_hf_(a_a2b,hyb)
 
             xctype = ni._xc_type(mf.xc)
             print(xctype)
@@ -286,11 +286,11 @@ class SF_TDA_down():
                 rho_v_a = lib.einsum('rp,pi->ri', ao, orbv_a)
                 rho_o_b = lib.einsum('rp,pi->ri', ao, orbo_b)
                 rho_v_b = lib.einsum('rp,pi->ri', ao, orbv_b)
-                rho_ov_b2a = np.einsum('ri,ra->ria', rho_o_b, rho_v_a)
+                #rho_ov_b2a = np.einsum('ri,ra->ria', rho_o_b, rho_v_a)
                 rho_ov_a2b = np.einsum('ri,ra->ria', rho_o_a, rho_v_b)
-                w_ov = np.einsum('ria,r->ria', rho_ov_b2a, fxc_ab)
-                iajb = lib.einsum('ria,rjb->iajb', rho_ov_b2a, w_ov)
-                a_b2a += iajb
+                #w_ov = np.einsum('ria,r->ria', rho_ov_b2a, fxc_ab)
+                #iajb = lib.einsum('ria,rjb->iajb', rho_ov_b2a, w_ov)
+                #a_b2a += iajb
                 w_ov = np.einsum('ria,r->ria', rho_ov_a2b, fxc_ab)
                 iajb = lib.einsum('ria,rjb->iajb', rho_ov_a2b, w_ov)
                 a_a2b += iajb
