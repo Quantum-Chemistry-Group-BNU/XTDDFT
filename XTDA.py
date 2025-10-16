@@ -959,15 +959,15 @@ class X_TDA():
 
 if __name__ == "__main__":
     mol = gto.M(
-        # atom=atom.n2_,
-        atom=atom.ch2o_vacuum,
+        atom=atom.n2_,
+        # atom=atom.ch2o_vacuum,
         # atom=atom.ch2o_Cyclohexane,
         # atom=atom.ch2o_DiethylEther,
         # atom=atom.ch2o_TetraHydroFuran,
-        # basis='cc-pvdz',
+        basis='cc-pvdz',
         # basis='def2-tzvpp',
         # basis='aug-cc-pvtz',
-        basis='6-31g**',
+        # basis='6-31g**',
         unit='A',
         # unit='B',
         charge=1,
@@ -995,11 +995,11 @@ if __name__ == "__main__":
     mf = dft.ROKS(mol)  # use ROKS is for use ROKS orbital, in paper assume ROKS orbital same with UKS orbital
     # xc = 'svwn'
     # xc = 'blyp'
-    # xc = 'b3lyp'
+    xc = 'b3lyp'
     # xc = 'cam-b3lyp'
     # xc = 'wb97xd'
     # xc = '0.50*HF + 0.50*B88 + GGA_C_LYP'  # BHHLYP
-    xc = 'pbe0'
+    # xc = 'pbe0'
     # xc = 'pbe38'
     # xc = 'hf'
     mf.xc = xc
@@ -1009,9 +1009,8 @@ if __name__ == "__main__":
     mf.max_cycle = 200
     mf.kernel()
     xtda = XTDA(mol, mf)
-    xtda.add_xtda = True
     xtda.nstates = 20
-    # xtda.basis = 'tensor'
+    xtda.basis = 'tensor'
     # tddft.TDA(mf) have no refer meaning
     xtda.so2st = False
     xtda.kernel()
