@@ -580,6 +580,7 @@ class SA_SF_TDA():
     def calculate_irrep(self,orb1,orb2):
         orb_sym = self.mf.get_orbsym(self.mf.mo_coeff)
         ground_sym = self.mf.get_wfnsym()
+        print('ground_irrep ',ground_sym)
         #print('orb_sym',orb_sym)
         #print(orb1,orb2)
         if self.type_u:
@@ -595,7 +596,7 @@ class SA_SF_TDA():
         else:
             return self.mol.irrep_name[direct_s[0][0]]
     
-    def deltaS2_U0(self,nstate):
+    def deltaS2_U(self,nstate):
         mo = self.mf.mo_coeff
         mo_occ = self.mf.mo_occ
         occidxa = np.where(mo_occ[0]>0)[0]
@@ -607,22 +608,39 @@ class SA_SF_TDA():
         mova = mo[0][:,viridxa]
         movb = mo[1][:,viridxb]
         ovlp = self.mf.get_ovlp()
+        #S = self.mol.intor('int1e_ovlp')
+        #print('s ovlp',np.allclose(S,ovlp))
         # spin transfer matrix
         sab_oo = reduce(np.dot, (mooa.conj().T, ovlp, moob))
+        #Sccba = np.einsum('pq,pi,qj->ij', ovlp, moob, mooa)
         sba_oo = sab_oo.conj().T
+        #print('allclose ',np.allclose(sba_oo,Sccba))
         sab_vo = reduce(np.dot, (mova.conj().T, ovlp, moob))
         sba_vo = reduce(np.dot, (movb.conj().T, ovlp, mooa))
-        x_ba = self.v[:,nstate].reshape((self.nc+self.no,self.no+self.nv)).transpose(1,0)
+        #x_ba = self.v[:,nstate].reshape((self.nc+self.no,self.no+self.nv)).transpose(1,0)
+        value = self.v[:,nstate]
+        nc = self.nc
+        no = self.no
+        nv = self.nv
+        x_cv_ab = value[:nc*nv].reshape(nc,nv)
+        x_co_ab = value[nc*nv:nc*nv+nc*no].reshape(nc,no)
+        x_ov_ab = value[nc*nv+nc*no:nc*nv+nc*no+no*nv].reshape(no,nv)
+        x_oo_ab = value[nc*nv+nc*no+no*nv:].reshape(no,no)
+        tmp1 = np.hstack([x_co_ab,x_cv_ab])
+        tmp2 = np.hstack([x_oo_ab,x_ov_ab])
+        x_ba = np.concatenate([tmp1,tmp2],axis=0).transpose(1,0)
         P_ab = lib.einsum('ai,aj,jk,ki',x_ba.conj(),x_ba,sba_oo.T.conj(),sba_oo)\
                   -lib.einsum('ai,bi,kb,ak',x_ba.conj(),x_ba,sba_vo.T.conj(),sba_vo)\
                   +lib.einsum('ai,bj,jb,ai',x_ba.conj(),x_ba,sba_vo.T.conj(),sba_vo)
         return P_ab
     
-    def deltaS2_U(self,nstate):
+    def deltaS2_U0(self,nstate):
         nc = self.nc
         no = self.no
         nv = self.nv
         value = self.v[:,nstate]
+        #print('norm: ',np.linalg.norm(value))
+        value = value/np.linalg.norm(value)
         x_cv_ab = value[:nc*nv].reshape(nc,nv).transpose(1,0)
         x_co_ab = value[nc*nv:nc*nv+nc*no].reshape(nc,no).transpose(1,0)
         x_ov_ab = value[nc*nv+nc*no:nc*nv+nc*no+no*nv].reshape(no,nv).transpose(1,0)
@@ -738,7 +756,8 @@ class SA_SF_TDA():
                 Ds.append(ds2)
             elif self.type_u:
                 P_ab = self.deltaS2_U(nstate)
-                ds2 = P_ab - 2*self.ground_s + 1
+                #ds2 = P_ab - 2*self.ground_s + 1
+                ds2 = P_ab - self.no + 1
                 Ds.append(ds2)
                 print(f'Excited state {nstate+1} {self.e[nstate]*27.21138505:10.5f} eV {self.e[nstate]+self.mf.e_tot:11.8f} Hartree D<S^2>={ds2:3.2f} {sym}')
             else:
@@ -748,13 +767,20 @@ class SA_SF_TDA():
             print('  ')
         return Ds,syms
     
-    def recoder(self): # for HF molecule in 6-31G
+    def recoder(self): # pec for HF molecule in 6-31G
         print("Return first three excited vectors(CO(3->5 4->5) OO(6->5) or OO(5->5 6->6) configurations).")
         dim1 = self.nc*self.nv
         dim2 = dim1 + self.nc*self.no
         dim3 = dim2 + self.no*self.nv
-        vectors = np.zeros((4,5))
-        for nstate in range(4):
+        if abs(self.e[0]-self.e[1]) < 1e-5:
+            index = 3
+        else:
+            index = 1
+        #vectors = np.zeros((4,5))
+        print('index ',index)
+        for nstate in range(index-1,index):
+            cos = 0
+            oos = 0
             value = self.v[:,nstate]
             #x_cv_ab = value[:dim1].reshape(nc,nv)
             x_co_ab = value[dim1:dim2].reshape(self.nc,self.no)
@@ -763,18 +789,23 @@ class SA_SF_TDA():
                 x_oo_ab = (self.vects @ value[dim3:].reshape(-1,1)).reshape(self.no,self.no)
             else:
                 x_oo_ab = value[dim3:].reshape(self.no,self.no)
-            for o,v in zip(* np.where(abs(x_co_ab)>0.1)):  
-                vectors[nstate,o-self.no] = x_co_ab[o,v]
-            for o,v in zip(* np.where(abs(x_oo_ab)>0.1)):
-                if o == v:
-                    if o+self.nc+1 == 5:
-                        vectors[nstate,-2] = x_oo_ab[o,v]
-                    else:
-                        vectors[nstate,-1] = x_oo_ab[o,v]
-                else:
-                    vectors[nstate,-3] = x_oo_ab[o,v]
-                    
-        return vectors
+            for o,v in zip(* np.where(abs(x_co_ab)>1e-3)):
+                if o == 2 and v == 0:  
+                    cos += abs(x_co_ab[o,v])
+            for o,v in zip(* np.where(abs(x_oo_ab)>1e-3)):
+                if o == 1 and  v == 0:
+                    oos += abs(x_oo_ab[o,v])
+                #if o == v:
+                #    if o+self.nc+1 == 5:
+                #        vectors[nstate,-2] = x_oo_ab[o,v]
+                #    else:
+                #        vectors[nstate,-1] = x_oo_ab[o,v]
+                #else:
+                #    vectors[nstate,-3] = x_oo_ab[o,v]
+        print('Recoder the abs of OO(6->5) and CO(3->5) excitation.')      
+        print(oos,cos)      
+        return np.array([oos,cos])
+
     def init_guess(self,mf, nstates):
        
         mo_energy,mo_occ,mo_coeff = mf_info(mf)
@@ -999,14 +1030,14 @@ class SA_SF_TDA():
             zs = np.asarray(new_zs0).reshape(-1,ndim0,ndim1)
             #print('zs.shape ',zs.shape)
             vs = np.zeros_like(zs)
-            dmov = lib.einsum('xov,qv,po->xpq', zs,orbv.conj(), orbo) # (x,nmo,nmo)
+            dmov = lib.einsum('xov,qv,po->xpq', zs,orbv.conj(), orbo,optimize=True) # (x,nmo,nmo)
             v1ao = vresp(np.asarray(dmov))   # with density and get response function
-            vs += lib.einsum('xpq,po,qv->xov', v1ao, orbo.conj(), orbv) # (-1,nocca,nvirb)
+            vs += lib.einsum('xpq,po,qv->xov', v1ao, orbo.conj(), orbv,optimize=True) # (-1,nocca,nvirb)
             #np.save('v1_t.npy',v1[:,nc:,no:])
             #vs += np.einsum('ij,ab,xjb->xia',delta_ij,fockB[noccb:,noccb:],zs)-\
             #       np.einsum('ab,ij,xjb->xia',delta_ab,fockA[:nocca,:nocca],zs)
             vs += np.einsum('ab,xib->xia',fockB[noccb:,noccb:],zs)-\
-                   np.einsum('ij,xja->xia',fockA[:nocca,:nocca],zs)
+                   np.einsum('ij,xja->xia',fockA[:nocca,:nocca],zs,optimize=True)
             vs_dA = np.zeros_like(vs)
             end_t = time.time()
             #print(f'USF times use {(end_t-start_t)/3600} hours')
@@ -1018,22 +1049,22 @@ class SA_SF_TDA():
                 ov1 = zs[:,nc:,no:]
                 oo1 = zs[:,nc:,:no]
                 
-                cv1_mo = np.einsum('xov,qv,po->xpq', cv1, orbvb[:,no:].conj(), orboa[:,:nc]) # (-1,nmo,nmo)
-                co1_mo = np.einsum('xov,qv,po->xpq', co1, orbvb[:,:no].conj(), orboa[:,:nc]) # (-1,nmo,nmo)
-                ov1_mo = np.einsum('xov,qv,po->xpq', ov1, orbvb[:,no:].conj(), orboa[:,nc:nc+no])
-                oo1_mo = np.einsum('xov,qv,po->xpq', oo1, orbvb[:,:no].conj(), orboa[:,nc:nc+no])
+                cv1_mo = np.einsum('xov,qv,po->xpq', cv1, orbvb[:,no:].conj(), orboa[:,:nc],optimize=True) # (-1,nmo,nmo)
+                co1_mo = np.einsum('xov,qv,po->xpq', co1, orbvb[:,:no].conj(), orboa[:,:nc],optimize=True) # (-1,nmo,nmo)
+                ov1_mo = np.einsum('xov,qv,po->xpq', ov1, orbvb[:,no:].conj(), orboa[:,nc:nc+no],optimize=True)
+                oo1_mo = np.einsum('xov,qv,po->xpq', oo1, orbvb[:,:no].conj(), orboa[:,nc:nc+no],optimize=True)
                 _,v1ao_cv1_k = vresp_hf(np.asarray(cv1_mo)) # (-1,nmo,nmo)
                 v1ao_co1_j,v1ao_co1_k = vresp_hf(np.asarray(co1_mo))
                 v1ao_ov1_j,v1ao_ov1_k = vresp_hf(np.asarray(ov1_mo))
                 _,v1ao_oo1_k = vresp_hf(np.asarray(oo1_mo))
                 #v1_cv1_j = np.einsum('xpq,po,qv->xov',v1ao_cv1_j,orbo.conj(), orbv) # (-1,nocca,nvirb)
-                v1_co1_j = np.einsum('xpq,po,qv->xov',v1ao_co1_j,orbo.conj(), orbv)
-                v1_ov1_j = np.einsum('xpq,po,qv->xov',v1ao_ov1_j,orbo.conj(), orbv)
+                v1_co1_j = np.einsum('xpq,po,qv->xov',v1ao_co1_j,orbo.conj(), orbv,optimize=True)
+                v1_ov1_j = np.einsum('xpq,po,qv->xov',v1ao_ov1_j,orbo.conj(), orbv,optimize=True)
                 #v1_oo1_j = np.einsum('xpq,po,qv->xov',v1ao_oo1_j,orbo.conj(), orbv)
-                v1_cv1_k = np.einsum('xpq,po,qv->xov',v1ao_cv1_k,orbo.conj(), orbv) # (-1,nocca,nvirb)
-                v1_co1_k = np.einsum('xpq,po,qv->xov',v1ao_co1_k,orbo.conj(), orbv)
-                v1_ov1_k = np.einsum('xpq,po,qv->xov',v1ao_ov1_k,orbo.conj(), orbv)
-                v1_oo1_k = np.einsum('xpq,po,qv->xov',v1ao_oo1_k,orbo.conj(), orbv)
+                v1_cv1_k = np.einsum('xpq,po,qv->xov',v1ao_cv1_k,orbo.conj(), orbv,optimize=True) # (-1,nocca,nvirb)
+                v1_co1_k = np.einsum('xpq,po,qv->xov',v1ao_co1_k,orbo.conj(), orbv,optimize=True)
+                v1_ov1_k = np.einsum('xpq,po,qv->xov',v1ao_ov1_k,orbo.conj(), orbv,optimize=True)
+                v1_oo1_k = np.einsum('xpq,po,qv->xov',v1ao_oo1_k,orbo.conj(), orbv,optimize=True)
 
                 # cv1 - cv1
                 #vs[:,:nc,no:] += (np.einsum('ji,ab,xjb->xia',iden_C,fockB_hf[nc+no:,nc+no:],zs[:,:nc,no:])-\
