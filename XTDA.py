@@ -3,6 +3,7 @@ import os
 import sys
 os.environ["OMP_NUM_THREADS"] = "4"
 sys.path.append('/')
+sys.path.append('./../')
 import scipy
 import numpy as np
 import pandas as pd
@@ -23,10 +24,10 @@ class XTDA:
     def kernel(self):
         if self.basis == 'tensor':
             self.x_tda = X_TDA(self.mf)
-            e, v = self.x_tda.kernel(nstates=self.nstates)
+            self.e, self.v = self.x_tda.kernel(nstates=self.nstates)
             self.x_tda.analyze()
             # x_tda.analyze_TDM()
-            return e, v
+            return self.e, self.v
         elif self.basis == 'orbital':
             pass
         else:
@@ -373,6 +374,7 @@ class XTDA:
             order = np.delete(order, (nc+no)*nv+oi*nv+oi+1)
         self.order = order
 
+        print(f'Dimension of A matrix = {A.shape}, order of excitation is CV(0), OV(0), CO(0), CV(1)')
         self.e, self.v = scipy.linalg.eigh(A)
         # print("my xTDA result is \n{}".format(self.e[:self.nstates] * unit.ha2eV))
         self.e_eV = self.e[:self.nstates] * unit.ha2eV
@@ -404,6 +406,9 @@ class XTDA:
             pd.DataFrame(
                 np.concatenate((unit.eVxnm / np.expand_dims(self.e_eV, axis=1), np.expand_dims(self.os, axis=1)), axis=1)
             ).to_csv('uvspec_data.csv', index=False, header=None)
+        if self.so2st:
+            print(f"Remark: the obtained CI coefficient X is under spin orbital basis!")
+            print(f"        if one want to obtain X under spin tensor basis, please run xtda.analyze.")
         return self.e[:self.nstates], os, rs, self.v
 
     def deltaS2(self):
@@ -717,7 +722,7 @@ class X_TDA():
 
     def get_matA(self, info_eris):
         dim = 2 * self.nc * self.nv + self.nc * self.no + self.nv * self.no
-        print('Dimension of A matrix ', dim)
+        print(f'Dimension of A matrix = {dim}, order of excitation is CV(0), CO(0), OV(0), CV(1)')
         A = np.zeros((dim, dim))
         no = self.no
         nv = self.nv
@@ -933,7 +938,7 @@ class X_TDA():
             x_ov0 = value[dim2:dim3].reshape(no, nv)
             x_cv1 = value[dim3:].reshape(nc, nv)
             Dp_ab = 0.
-            print(f'Excited state {i + 1} {self.e[i] * 27.21138505:12.5f} eV')
+            print(f'Excited state {i + 1} {self.e[i] * unit.ha2eV:12.5f} eV')
 
             for o, v in zip(*np.where(abs(x_cv0) > 0.1)):
                 # print(f'CV(0) {o+1}b -> {v+1+self.nc+self.no}b {x_cv_bb[o,v]:10.5f} {100*x_cv_bb[o,v]**2:2.2f}%')
@@ -955,7 +960,7 @@ class X_TDA():
         self.e = e[:nstates]
         self.values = v[:, :nstates]
         self.nstates = nstates
-        return self.e * 27.21138505, self.values
+        return self.e * unit.ha2eV, self.values
 
 if __name__ == "__main__":
     mol = gto.M(

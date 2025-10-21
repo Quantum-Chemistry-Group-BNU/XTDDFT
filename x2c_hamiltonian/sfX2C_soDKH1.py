@@ -173,13 +173,15 @@ def get_soDKH1_somf(myhf,mol,c,iop='x2c',include_mf2e=True,debug=False):
         mol: mole
         c: speed of light
         iop: x2c or bp
+        include_mf2e: include fso2e or not
+        debug: print extra matrix info
     return
         Vso in ao basis
     '''
     print(f"Begin to generate Vso")
     time0 = time.time()
     xmol,contr_coeff = myhf.with_x2c.get_xmol(mol) # change basis
-    print(f"get_soDKH1_somf with iop={iop}, (np,nc)={contr_coeff.shape}")
+    print(f"get_soDKH1_somf with iop={iop}, SOMF={include_mf2e}, (nb,nc)={contr_coeff.shape}")
     nb = contr_coeff.shape[0]
     nc = contr_coeff.shape[1]
     if iop == 'x2c':
@@ -193,9 +195,12 @@ def get_soDKH1_somf(myhf,mol,c,iop='x2c',include_mf2e=True,debug=False):
         rp = numpy.identity(nb)
     else:
         raise ValueError(f"iop={iop} not in {'x2c','bp'}")
-    dm = myhf.make_rdm1()/2. # Here the DM matrix element is 1 or 1/2 or 0, not 2, 1, 0
+    dm = myhf.make_rdm1()
     # Spin-Averaged for ROHF or UHF
-    if len(dm.shape)==3: dm = (dm[0]+dm[1])/2.0
+    if len(dm.shape)==3: 
+        dm = (dm[0]+dm[1])/2.
+    else: # Here the DM matrix element is 1 or 1/2 or 0, not 2, 1, 0
+        dm = dm/2.
     dm = reduce(numpy.dot,(contr_coeff,dm,contr_coeff.T))
     pLL,pLS,pSS = get_p(dm,x,rp) # ref.(50)
     wso = get_wso(xmol)
