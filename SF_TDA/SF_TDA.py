@@ -1,19 +1,10 @@
-from pyscf import gto, dft, scf, ao2mo, lib, tddft
 import numpy as np
+import scipy, sys
+from pyscf import gto, dft, scf, ao2mo, lib, tddft
 from pyscf.dft import numint
-import scipy
 from functools import reduce
 
-import sys
-
-from pyscf import gto, dft, scf, ao2mo, lib, tddft
-import numpy as np
-from pyscf.dft import numint
-import scipy
-from functools import reduce
-
-import sys
-au2ev = 27.21138505
+from utils import unit
 
 def SF_TDA(mf,collinear=False,isf=-1):
     if isf == -1: # down
@@ -54,9 +45,9 @@ class SF_TDA_up():
         nocc_b = orbo_b.shape[1]
         nvir_b = orbv_b.shape[1]
         nmo_a = nocc_a + nvir_a
-        nc = nocc_b
-        nv = nvir_a
-        no = nocc_a-nocc_b
+        self.nc = nc = nocc_b
+        self.nv = nv = nvir_a
+        self.no = no = nocc_a-nocc_b
         delta_ij = np.eye(nocc_a)
         delta_ab = np.eye(nvir_b)
 
@@ -166,11 +157,25 @@ class SF_TDA_up():
                 a_b2a += iajb
         elif xctype == None:
             add_hf_(a_b2a, hyb=1)
-        self.A = (a_b2a + np.einsum('ij,ab->iajb',delta_ij[no:,no:],fockA[nc+no:,nc+no:])-np.einsum('ij,ab->iajb',fockB[:nc,:nc],delta_ab[no:,no:])).reshape((nc*nv,nc*nv))
+        self.A = (a_b2a + np.einsum('ij,ab->iajb',delta_ij[no:,no:],fockA[nc+no:,nc+no:])\
+                  -np.einsum('ij,ab->iajb',fockB[:nc,:nc],delta_ab[no:,no:])).reshape((nc*nv,nc*nv))
         
-    def kernel(self,nstates=1):
-        e,v = scipy.linalg.eigh(self.A)
-        return e[:nstates]*au2ev,v[:,:nstates]
+    def kernel(self,nstates=None):
+        if nstates==None:
+            nstates=self.nstates
+        self.e,self.v = scipy.linalg.eigh(self.A)
+        return self.e[:nstates]*unit.ha2eV,self.v[:,:nstates]
+    
+    def analyse(self):
+        nc = self.nc
+        nv = self.nv
+        for nstate in range(self.nstates):
+            value = self.v[:,nstate]
+            x_cv_ab = value[:nc*nv].reshape(nc,nv)
+            print(f'Excited state {nstate+1} {self.e[nstate]*unit.ha2eV:10.5f} eV')
+            for o,v in zip(* np.where(abs(x_cv_ab)>0.1)):
+                print(f'{100*x_cv_ab[o,v]**2:3.0f}% CV(ab) {o+1}a -> {v+1+self.nc+self.no}b {x_cv_ab[o,v]:10.5f}')
+            print(' ')
 
 # spin_down
 class SF_TDA_down():
@@ -415,7 +420,7 @@ class SF_TDA_down():
                 for j in range(no):
                     Dp_ab += x_oo_ab[i,i]*x_oo_ab[j,j]
                     
-            print(f'Excited state {nstate+1} {self.e[nstate]*27.21138505:10.5f} eV D<S^2>={-no+1+Dp_ab:5.2f}')
+            print(f'Excited state {nstate+1} {self.e[nstate]*unit.ha2eV:10.5f} eV D<S^2>={-no+1+Dp_ab:5.2f}')
             for o,v in zip(* np.where(abs(x_cv_ab)>0.1)):
                 print(f'{100*x_cv_ab[o,v]**2:3.0f}% CV(ab) {o+1}a -> {v+1+self.nc+self.no}b {x_cv_ab[o,v]:10.5f}')
             for o,v in zip(* np.where(abs(x_co_ab)>0.1)):
@@ -432,4 +437,4 @@ class SF_TDA_down():
         self.e = e
         self.v = v
         self.nstates = nstates
-        return e[:nstates]*27.21138505, v[:,:nstates]
+        return e[:nstates]*unit.ha2eV, v[:,:nstates]
