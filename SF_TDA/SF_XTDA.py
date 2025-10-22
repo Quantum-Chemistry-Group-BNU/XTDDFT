@@ -6,8 +6,10 @@ import numpy as np
 import time
 from pyscf.dft import numint
 import scipy
-from functools import reduce
+from functools import reduce, partial
 from pyscf.symm import direct_prod
+from pyscf import lib
+from pyscf.dft import numint, xc_deriv, numint2c
 #import sys
 #sys.path.append('/home/lenovo2/usrs/zhw/TDDFT')
 
@@ -15,6 +17,150 @@ from pyscf.symm import direct_prod
 
 from SF_TDA import *
 au2ev = 27.21138505
+
+MGGA_DENSITY_LAPL = False
+
+def __mcfun_fn_eval_xc(ni, xc_code, xctype, rho, deriv):
+    evfk = ni.eval_xc_eff(xc_code, rho, deriv=deriv, xctype=xctype)
+    for order in range(1, deriv+1):
+        if evfk[order] is not None:
+            evfk[order] = xc_deriv.ud2ts(evfk[order])
+    return evfk
+
+# This function can be merged with pyscf.dft.numint2c.mcfun_eval_xc_adapter()
+# This function should be a class function in the Numint2c class.
+def mcfun_eval_xc_adapter_sf(ni, xc_code):
+    '''Wrapper to generate the eval_xc function required by mcfun
+
+    Kwargs:
+        dim: int
+            eval_xc_eff_sf is for mc collinear sf tddft/ tda case.add().
+    '''
+
+    try:
+        import mcfun
+    except ImportError:
+        raise ImportError('This feature requires mcfun library.\n'
+                          'Try install mcfun with `pip install mcfun`')
+
+    xctype = ni._xc_type(xc_code)
+    fn_eval_xc = partial(__mcfun_fn_eval_xc, ni, xc_code, xctype)
+    nproc = lib.num_threads()
+
+    def eval_xc_eff(xc_code, rho, deriv=1, omega=None, xctype=None,
+                verbose=None):
+        return mcfun.eval_xc_eff_sf(
+            fn_eval_xc, rho, deriv,
+            collinear_samples=ni.collinear_samples, workers=nproc)
+    return eval_xc_eff
+
+# This function should be a class function in the Numint2c class.
+def cache_xc_kernel_sf_mc(self, mol, grids, xc_code, mo_coeff, mo_occ, spin=1,max_memory=2000):
+    '''Compute the fxc_sf, which can be used in SF-TDDFT/TDA
+    '''
+    xctype = self._xc_type(xc_code)
+    if xctype == 'GGA':
+        ao_deriv = 1
+    elif xctype == 'MGGA':
+        ao_deriv = 2 if MGGA_DENSITY_LAPL else 1
+    else:
+        ao_deriv = 0
+    with_lapl = MGGA_DENSITY_LAPL
+
+    assert mo_coeff[0].ndim == 2
+    assert spin == 1
+
+    nao = mo_coeff[0].shape[0]
+    rhoa = []
+    rhob = []
+
+    ni = numint.NumInt()
+    for ao, mask, weight, coords \
+            in self.block_loop(mol, grids, nao, ao_deriv, max_memory=max_memory):
+        rhoa.append(ni.eval_rho2(mol, ao, mo_coeff[0], mo_occ[0], mask, xctype, with_lapl))
+        rhob.append(ni.eval_rho2(mol, ao, mo_coeff[1], mo_occ[1], mask, xctype, with_lapl))
+    rho_ab = (np.hstack(rhoa), np.hstack(rhob))
+    rho_ab = np.asarray(rho_ab)
+    rho_tmz = np.zeros_like(rho_ab)
+    rho_tmz[0] += rho_ab[0]+rho_ab[1]
+    rho_tmz[1] += rho_ab[0]-rho_ab[1]
+    eval_xc = mcfun_eval_xc_adapter_sf(self, xc_code)
+    fxc_sf = eval_xc(xc_code, rho_tmz, deriv=2, xctype=xctype)
+    return fxc_sf
+
+
+def nr_uks_fxc_sf_tda_mc(ni, mol, grids, xc_code, dm0, dms, relativity=0, hermi=0,rho0=None,
+                      vxc=None, fxc=None, extype=0, max_memory=2000, verbose=None):
+    if isinstance(dms, np.ndarray):
+        dtype = dms.dtype
+    else:
+        dtype = np.result_type(*dms)
+    if hermi != 1 and dtype != np.double:
+        raise NotImplementedError('complex density matrix')
+
+    xctype = ni._xc_type(xc_code)
+
+    nao = dms.shape[-1]
+    make_rhosf, nset = ni._gen_rho_evaluator(mol, dms, hermi, False, grids)[:2]
+
+    def block_loop(ao_deriv):
+        p1 = 0
+        for ao, mask, weight, coords \
+                in ni.block_loop(mol, grids, nao, ao_deriv, max_memory=max_memory):
+            p0, p1 = p1, p1 + weight.size
+            _fxc = fxc[...,p0:p1]
+            for i in range(nset):
+                rho1sf = make_rhosf(i, ao, mask, xctype)
+                if xctype == 'LDA':
+                    # *2.0 becausue kernel xx,yy parts.
+                    wv = rho1sf * _fxc[0,0]*2.0 *weight
+                else:
+                    # *2.0 becausue kernel xx,yy parts.
+                    wv = lib.einsum('bg,abg->ag',rho1sf,_fxc*2.0)*weight
+                yield i, ao, mask, wv
+
+    ao_loc = mol.ao_loc_nr()
+    cutoff = grids.cutoff * 1e2
+    nbins = NBINS * 2 - int(NBINS * np.log(cutoff) / np.log(grids.cutoff))
+    pair_mask = mol.get_overlap_cond() < -np.log(ni.cutoff)
+    vmat = np.zeros((nset,nao,nao))
+    aow = None
+    if xctype == 'LDA':
+        ao_deriv = 0
+        for i, ao, mask, wv in block_loop(ao_deriv):
+            _dot_ao_ao_sparse(ao, ao, wv, nbins, mask, pair_mask, ao_loc,
+                              hermi, vmat[i])
+    elif xctype == 'GGA':
+        ao_deriv = 1
+        for i, ao, mask, wv in block_loop(ao_deriv):
+            wv[0] *= .5
+            aow = _scale_ao_sparse(ao, wv, mask, ao_loc, out=aow)
+            _dot_ao_ao_sparse(ao[0], aow, None, nbins, mask, pair_mask, ao_loc,
+                              hermi=0, out=vmat[i])
+
+        # [(\nabla mu) nu + mu (\nabla nu)] * fxc_jb = ((\nabla mu) nu f_jb) + h.c.
+        vmat = lib.hermi_sum(vmat.reshape(-1,nao,nao), axes=(0,2,1)).reshape(nset,nao,nao)
+
+    elif xctype == 'MGGA':
+        assert not MGGA_DENSITY_LAPL
+        ao_deriv = 1
+        v1 = np.zeros_like(vmat)
+        for i, ao, mask, wv in block_loop(ao_deriv):
+            wv[0] *= .5
+            wv[4] *= .5
+            aow = _scale_ao_sparse(ao[:4], wv[:4], mask, ao_loc, out=aow)
+            _dot_ao_ao_sparse(ao[0], aow, None, nbins, mask, pair_mask, ao_loc,
+                              hermi=0, out=vmat[i])
+            _tau_dot_sparse(ao, ao, wv[4], nbins, mask, pair_mask, ao_loc, out=v1[i])
+
+        vmat = lib.hermi_sum(vmat.reshape(-1,nao,nao), axes=(0,2,1)).reshape(nset,nao,nao)
+        vmat += v1
+
+    if isinstance(dms, np.ndarray) and dms.ndim == 2:
+        vmat = vmat[:,0]
+    if vmat.dtype != dtype:
+        vmat = np.asarray(vmat, dtype=dtype)
+    return vmat
 
 def get_irrep_occupancy_directly(mol, mf):
     results = {}
@@ -862,13 +1008,16 @@ class SA_SF_TDA():
                 mem_now = lib.current_memory()[0]
                 max_memory = max(2000, mf.max_memory*.8-mem_now)
 
-            vxc = cache_xc_kernel_sf(mf, mo_coeff, mo_occ,1,max_memory) # XC kerkel 
+            ni = numint2c.NumInt2C()
+            ni.collinear = 'mcol'
+            ni.collinear_samples = 200
+            fxc = cache_xc_kernel_sf_mc(ni,mol, mf.grids, mf.xc, mo_coeff, mo_occ, spin=1)[2]
             dm0 = None
 
             def vind(dm1):
-                v1 = nr_uks_fxc_sf_tda(ni,mol, mf.grids, mf.xc, dm0, dm1, 0, hermi, # XC * dm1
-                                        vxc, max_memory=max_memory)
-
+                in2 = numint.NumInt()
+                v1 = nr_uks_fxc_sf_tda_mc(in2,mol, mf.grids, mf.xc, dm0, dm1, 0, hermi,
+                                    None, None, fxc, max_memory=max_memory)
                 if not hybrid:
                     # No with_j because = 0 in spin flip part.
                     pass
