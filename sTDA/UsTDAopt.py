@@ -951,11 +951,11 @@ class UsTDA:
         orbo_b = self.mo_coeff_b[:, self.occidx_b]
         orbv_b = self.mo_coeff_b[:, self.viridx_b]
         S = self.mol.intor('int1e_ovlp')
-        Sccba = np.einsum('pq,pi,qj->ij', S, orbo_b, orbo_a)
-        Sccab = np.einsum('pq,pi,qj->ij', S, orbo_a, orbo_b)
-        Svcab = np.einsum('pq,pi,qj->ij', S, orbv_a, orbo_b)
-        Svcba = np.einsum('pq,pi,qj->ij', S, orbv_b, orbo_a)
-        Svvab = np.einsum('pq,pi,qj->ij', S, orbv_a, orbv_b)
+        Sccba = np.einsum('pq,pi,qj->ij', S, orbo_b, orbo_a, optimize=True)
+        Sccab = np.einsum('pq,pi,qj->ij', S, orbo_a, orbo_b, optimize=True)
+        Svcab = np.einsum('pq,pi,qj->ij', S, orbv_a, orbo_b, optimize=True)
+        Svcba = np.einsum('pq,pi,qj->ij', S, orbv_b, orbo_a, optimize=True)
+        Svvab = np.einsum('pq,pi,qj->ij', S, orbv_a, orbv_b, optimize=True)
         if self.truncate:
             # here can not use truncate csfs to calculate dS2,
             # so transform to norm (not truncate) format to calculate
@@ -973,22 +973,22 @@ class UsTDA:
             xyco_b = self.xyco_b.reshape(self.nstates, self.nc, self.no)
             xycv_b = self.xycv_b.reshape(self.nstates, self.nc, self.nv)
         dS2 = (
-            np.einsum('nia,nja,ki,jk->n', xycv_a,xycv_a, Sccba[:, :self.nc], Sccba.T[:self.nc, :])  # first term cvacva
-            + np.einsum('nia,nja,ki,jk->n', xyov_a, xyov_a, Sccba[:, self.nc:], Sccba.T[self.nc:, :])  # first term ovaova
-            + np.einsum('nia,nja,ki,jk->n', xyov_a, xycv_a, Sccba[:, self.nc:], Sccba.T[:self.nc, :])  # first term ovacva
-            + np.einsum('nia,nja,ki,jk->n', xycv_a, xyov_a, Sccba[:, :self.nc], Sccba.T[self.nc:, :])  # first term cvaova
-            - np.einsum('nia,nib,ak,kb->n', xycv_a, xycv_a, Svcab, Svcab.T)  # second term  cva
-            - np.einsum('nia,nib,ak,kb->n', xyov_a, xyov_a, Svcab, Svcab.T)  # second term ova
-            + np.einsum('nia,nja,ki,jk->n', xycv_b, xycv_b, Sccab, Sccab.T)  # third term  cvb
-            + np.einsum('nia,nja,ki,jk->n', xyco_b, xyco_b, Sccab, Sccab.T)  # third term cob
-            - np.einsum('nia,nib,ak,kb->n', xyco_b, xyco_b, Svcba[:self.no, :], Svcba.T[:, :self.no])  # forth term cobcob
-            - np.einsum('nia,nib,ak,kb->n', xycv_b, xycv_b, Svcba[self.no:, :], Svcba.T[:, self.no:])  # forth term cvbcvb
-            - np.einsum('nia,nib,ak,kb->n', xyco_b, xycv_b, Svcba[:self.no, :], Svcba.T[:, self.no:])  # forth term cobcvb
-            - np.einsum('nia,nib,ak,kb->n', xycv_b, xyco_b, Svcba[self.no:, :], Svcba.T[:, :self.no])  # forth term cvbcob
-            - 2 * np.einsum('nia,njb,ji,ab->n', xycv_a, xycv_b, Sccba[:, :self.nc], Svvab[:, self.no:])  # fifth term cvacvb
-            - 2 * np.einsum('nia,njb,ji,ab->n', xycv_a, xyco_b, Sccba[:, :self.nc], Svvab[:, :self.no])  # fifth term cvacob
-            - 2 * np.einsum('nia,njb,ji,ab->n', xyov_a, xycv_b, Sccba[:, self.nc:], Svvab[:, self.no:])  # fifth term ovacvb
-            - 2 * np.einsum('nia,njb,ji,ab->n', xyov_a, xyco_b, Sccba[:, self.nc:], Svvab[:, :self.no])  # fifth term ovacob
+            np.einsum('nia,nja,ki,jk->n', xycv_a,xycv_a, Sccba[:, :self.nc], Sccba.T[:self.nc, :], optimize=True)  # first term cvacva
+            + np.einsum('nia,nja,ki,jk->n', xyov_a, xyov_a, Sccba[:, self.nc:], Sccba.T[self.nc:, :], optimize=True)  # first term ovaova
+            + np.einsum('nia,nja,ki,jk->n', xyov_a, xycv_a, Sccba[:, self.nc:], Sccba.T[:self.nc, :], optimize=True)  # first term ovacva
+            + np.einsum('nia,nja,ki,jk->n', xycv_a, xyov_a, Sccba[:, :self.nc], Sccba.T[self.nc:, :], optimize=True)  # first term cvaova
+            - np.einsum('nia,nib,ak,kb->n', xycv_a, xycv_a, Svcab, Svcab.T, optimize=True)  # second term  cva
+            - np.einsum('nia,nib,ak,kb->n', xyov_a, xyov_a, Svcab, Svcab.T, optimize=True)  # second term ova
+            + np.einsum('nia,nja,ki,jk->n', xycv_b, xycv_b, Sccab, Sccab.T, optimize=True)  # third term  cvb
+            + np.einsum('nia,nja,ki,jk->n', xyco_b, xyco_b, Sccab, Sccab.T, optimize=True)  # third term cob
+            - np.einsum('nia,nib,ak,kb->n', xyco_b, xyco_b, Svcba[:self.no, :], Svcba.T[:, :self.no], optimize=True)  # forth term cobcob
+            - np.einsum('nia,nib,ak,kb->n', xycv_b, xycv_b, Svcba[self.no:, :], Svcba.T[:, self.no:], optimize=True)  # forth term cvbcvb
+            - np.einsum('nia,nib,ak,kb->n', xyco_b, xycv_b, Svcba[:self.no, :], Svcba.T[:, self.no:], optimize=True)  # forth term cobcvb
+            - np.einsum('nia,nib,ak,kb->n', xycv_b, xyco_b, Svcba[self.no:, :], Svcba.T[:, :self.no], optimize=True)  # forth term cvbcob
+            - 2 * np.einsum('nia,njb,ji,ab->n', xycv_a, xycv_b, Sccba[:, :self.nc], Svvab[:, self.no:], optimize=True)  # fifth term cvacvb
+            - 2 * np.einsum('nia,njb,ji,ab->n', xycv_a, xyco_b, Sccba[:, :self.nc], Svvab[:, :self.no], optimize=True)  # fifth term cvacob
+            - 2 * np.einsum('nia,njb,ji,ab->n', xyov_a, xycv_b, Sccba[:, self.nc:], Svvab[:, self.no:], optimize=True)  # fifth term ovacvb
+            - 2 * np.einsum('nia,njb,ji,ab->n', xyov_a, xyco_b, Sccba[:, self.nc:], Svvab[:, :self.no], optimize=True)  # fifth term ovacob
         )
         return dS2
 
@@ -1003,8 +1003,8 @@ class UsTDA:
         omega = self.e[:self.nstates]
         # length form oscillator strength
         dipole_ao = self.mol.intor_symmetric("int1e_r", comp=3)  # dipole moment, comp=3 is 3 axis
-        dipole_mo_a = np.einsum('xpq,pi,qj->xij', dipole_ao, orbo_a, orbv_a)
-        dipole_mo_b = np.einsum('xpq,pi,qj->xij', dipole_ao, orbo_b, orbv_b)
+        dipole_mo_a = np.einsum('xpq,pi,qj->xij', dipole_ao, orbo_a, orbv_a, optimize=True)
+        dipole_mo_b = np.einsum('xpq,pi,qj->xij', dipole_ao, orbo_b, orbv_b, optimize=True)
         if self.truncate:
             dipole_mocv_a = dipole_mo_a[:, self.pscsfcv_i, self.pscsfcv_a]
             dipole_moov_a = dipole_mo_a[:, self.nc+self.pscsfov_a_i, self.pscsfov_a_a]
@@ -1015,12 +1015,12 @@ class UsTDA:
             dipole_moov_a = dipole_mo_a[:, self.nc:, :].reshape(3, -1)
             dipole_moco_b = dipole_mo_b[:, :, :self.no].reshape(3, -1)
             dipole_mocv_b = dipole_mo_b[:, :, self.no:].reshape(3, -1)
-        trans_dipcv_a = np.einsum('xi,yi->yx', dipole_mocv_a, self.xycv_a)
-        trans_dipov_a = np.einsum('xi,yi->yx', dipole_moov_a, self.xyov_a)
-        trans_dipco_b = np.einsum('xi,yi->yx', dipole_moco_b, self.xyco_b)
-        trans_dipcv_b = np.einsum('xi,yi->yx', dipole_mocv_b, self.xycv_b)
+        trans_dipcv_a = np.einsum('xi,yi->yx', dipole_mocv_a, self.xycv_a, optimize=True)
+        trans_dipov_a = np.einsum('xi,yi->yx', dipole_moov_a, self.xyov_a, optimize=True)
+        trans_dipco_b = np.einsum('xi,yi->yx', dipole_moco_b, self.xyco_b, optimize=True)
+        trans_dipcv_b = np.einsum('xi,yi->yx', dipole_mocv_b, self.xycv_b, optimize=True)
         trans_dip = trans_dipcv_a + trans_dipov_a + trans_dipco_b + trans_dipcv_b
-        f = 2. / 3. * np.einsum('s,sx,sx->s', omega, trans_dip, trans_dip)
+        f = 2. / 3. * np.einsum('s,sx,sx->s', omega, trans_dip, trans_dip, optimize=True)
         # np.save("osc_str_ustda.npy", f)
         return f
 
@@ -1034,11 +1034,11 @@ class UsTDA:
         orbv_b = self.mo_coeff_b[:, self.viridx_b]
         omega = self.e[:self.nstates]
         dip_ele_ao = self.mol.intor('int1e_ipovlp', comp=3, hermi=2)  # transition electric dipole moment
-        dip_ele_mo_a = np.einsum('xpq,pi,qj->xij', dip_ele_ao, orbo_a, orbv_a)
-        dip_ele_mo_b = np.einsum('xpq,pi,qj->xij', dip_ele_ao, orbo_b, orbv_b)
+        dip_ele_mo_a = np.einsum('xpq,pi,qj->xij', dip_ele_ao, orbo_a, orbv_a, optimize=True)
+        dip_ele_mo_b = np.einsum('xpq,pi,qj->xij', dip_ele_ao, orbo_b, orbv_b, optimize=True)
         dip_meg_ao = self.mol.intor('int1e_cg_irxp', comp=3, hermi=2)  # transition magnetic dipole moment
-        dip_meg_mo_a = np.einsum('xpq,pi,qj->xij', dip_meg_ao, orbo_a, orbv_a)
-        dip_meg_mo_b = np.einsum('xpq,pi,qj->xij', dip_meg_ao, orbo_b, orbv_b)
+        dip_meg_mo_a = np.einsum('xpq,pi,qj->xij', dip_meg_ao, orbo_a, orbv_a, optimize=True)
+        dip_meg_mo_b = np.einsum('xpq,pi,qj->xij', dip_meg_ao, orbo_b, orbv_b, optimize=True)
         if self.truncate:
             dip_ele_mocv_a = dip_ele_mo_a[:, self.pscsfcv_i, self.pscsfcv_a]
             dip_ele_moov_a = dip_ele_mo_a[:, self.nc+self.pscsfov_a_i, self.pscsfov_a_a]
@@ -1057,19 +1057,19 @@ class UsTDA:
             dip_meg_moov_a = dip_meg_mo_a[:, self.nc:, :].reshape(3, -1)
             dip_meg_moco_b = dip_meg_mo_b[:, :, :self.no].reshape(3, -1)
             dip_meg_mocv_b = dip_meg_mo_b[:, :, self.no:].reshape(3, -1)
-        trans_ele_dipcv_a = np.einsum('xi,yi->yx', dip_ele_mocv_a, self.xycv_a)
-        trans_ele_dipov_a = np.einsum('xi,yi->yx', dip_ele_moov_a, self.xyov_a)
-        trans_ele_dipco_b = np.einsum('xi,yi->yx', dip_ele_moco_b, self.xyco_b)
-        trans_ele_dipcv_b = np.einsum('xi,yi->yx', dip_ele_mocv_b, self.xycv_b)
+        trans_ele_dipcv_a = np.einsum('xi,yi->yx', dip_ele_mocv_a, self.xycv_a, optimize=True)
+        trans_ele_dipov_a = np.einsum('xi,yi->yx', dip_ele_moov_a, self.xyov_a, optimize=True)
+        trans_ele_dipco_b = np.einsum('xi,yi->yx', dip_ele_moco_b, self.xyco_b, optimize=True)
+        trans_ele_dipcv_b = np.einsum('xi,yi->yx', dip_ele_mocv_b, self.xycv_b, optimize=True)
         trans_ele_dip = -(trans_ele_dipcv_a + trans_ele_dipov_a + trans_ele_dipco_b + trans_ele_dipcv_b)
-        trans_meg_dipcv_a = np.einsum('xi,yi->yx', dip_meg_mocv_a, self.xycv_a)
-        trans_meg_dipov_a = np.einsum('xi,yi->yx', dip_meg_moov_a, self.xyov_a)
-        trans_meg_dipco_b = np.einsum('xi,yi->yx', dip_meg_moco_b, self.xyco_b)
-        trans_meg_dipcv_b = np.einsum('xi,yi->yx', dip_meg_mocv_b, self.xycv_b)
+        trans_meg_dipcv_a = np.einsum('xi,yi->yx', dip_meg_mocv_a, self.xycv_a, optimize=True)
+        trans_meg_dipov_a = np.einsum('xi,yi->yx', dip_meg_moov_a, self.xyov_a, optimize=True)
+        trans_meg_dipco_b = np.einsum('xi,yi->yx', dip_meg_moco_b, self.xyco_b, optimize=True)
+        trans_meg_dipcv_b = np.einsum('xi,yi->yx', dip_meg_mocv_b, self.xycv_b, optimize=True)
         trans_meg_dip = 0.5 * (trans_meg_dipcv_a + trans_meg_dipov_a + trans_meg_dipco_b + trans_meg_dipcv_b)
         # in Gaussian and ORCA, do not multiply constant
         # f = 1./unit.c * np.einsum('s,sx,sx->s', 1./omega, trans_ele_dip, trans_meg_dip)
-        f = np.einsum('s,sx,sx->s', 1. / omega, trans_ele_dip, trans_meg_dip)
+        f = np.einsum('s,sx,sx->s', 1. / omega, trans_ele_dip, trans_meg_dip, optimize=True)
         f = f / unit.cgs2au  # transform atom unit to cgs unit
         # np.save("rot_str_stda.npy", f)
         return f
@@ -1219,6 +1219,8 @@ if __name__ == "__main__":
     mf.conv_check = False
     # mf.level_shift = 0.6
     mf.kernel()
+    # mf.stability()  # stable test
+    # mf.kernel(mo_coeff=mo1)  # if do not stable, use other wave function as initial guess
     t_dft1 = time.time()
     print("dft use {} s".format(t_dft1 - t_dft0))
     print('=' * 50)

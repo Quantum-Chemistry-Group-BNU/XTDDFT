@@ -28,8 +28,8 @@ def iaia_f(qAk_ss, qAj_ss, qBk_tt, qBj_tt, gamma_k, gamma_j, fock_vir, n1, fock_
     iaiaj = np.einsum('nmii, nmaa, nm->ia', qAj_ss[:, None, ...], qBj_tt[None, ...], gamma_j, optimize=True)
     iaiak = iaiak.reshape(-1)
     iaiaj = iaiaj.reshape(-1)
-    fock = np.einsum('i, a->ia', np.ones(n1), np.diag(fock_vir))
-    fock -= np.einsum('i, a->ia', np.diag(fock_occ), np.ones(n2))
+    fock = np.einsum('i, a->ia', np.ones(n1), np.diag(fock_vir), optimize=True)
+    fock -= np.einsum('i, a->ia', np.diag(fock_occ), np.ones(n2), optimize=True)
     fock = fock.reshape(-1)
     iaia = iaiak.reshape(-1) - iaiaj.reshape(-1) + fock.reshape(-1)
     return iaia, iaiak
@@ -81,13 +81,13 @@ def union(nc, csfcv_a, csfcv_b):
 def _cvaacvaa_ndc(i, j, ncsf, nc, no, nv, si, fij_a2, fij_b2, fab_a2, fab_b2):
     # CV(aa)-CV(aa) non-diagonal correct term
     line = (
-        0.5 * (-1 + np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
-            np.einsum('i, i->i', np.eye(nc)[i, ncsf[0]], fab_b2[no+j, no+ncsf[1]])
-            - np.einsum('i, i->i', np.eye(nc)[i, ncsf[0]], fab_a2[j, ncsf[1]])
+        0.5 * (1 - np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
+            np.einsum('i, i->i', np.eye(nc)[i, ncsf[0]], fab_b2[no+j, no+ncsf[1]], optimize=True)
+            - np.einsum('i, i->i', np.eye(nc)[i, ncsf[0]], fab_a2[j, ncsf[1]], optimize=True)
         )
-        + 0.5 * (1 - np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
-            np.einsum('i, i->i', np.eye(no+nv)[no+j, no+ncsf[1]], fij_b2[i, ncsf[0]])
-            - np.einsum('i, i->i', np.eye(nv)[j, ncsf[1]], fij_a2[i, ncsf[0]])
+        + 0.5 * (-1 + np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
+            np.einsum('i, i->i', np.eye(no+nv)[no+j, no+ncsf[1]], fij_b2[i, ncsf[0]], optimize=True)
+            - np.einsum('i, i->i', np.eye(nv)[j, ncsf[1]], fij_a2[i, ncsf[0]], optimize=True)
         )
     )
     return line
@@ -97,10 +97,10 @@ def _cvaacvbb_ndc(i, j, ncsf, nc, no, nv, si, fij_a2, fij_b2, fab_a2, fab_b2):
     # CV(aa)-CV(bb) non-diagonal correct term
     line = (
         0.5 * 1 / (2 * si) * (
-            np.einsum('i, i->i', np.eye(nc)[i, ncsf[0]], fab_b2[no+j, no+ncsf[1]])
-            - np.einsum('i, i->i', np.eye(nc)[i, ncsf[0]], fab_a2[j, ncsf[1]])
-            + np.einsum('i, i->i', np.eye(no+nv)[no+j, no+ncsf[1]], fij_b2[i, ncsf[0]])
-            - np.einsum('i, i->i', np.eye(nv)[j, ncsf[1]], fij_a2[i, ncsf[0]])
+            np.einsum('i, i->i', np.eye(nc)[i, ncsf[0]], fab_b2[no+j, no+ncsf[1]], optimize=True)
+            - np.einsum('i, i->i', np.eye(nc)[i, ncsf[0]], fab_a2[j, ncsf[1]], optimize=True)
+            + np.einsum('i, i->i', np.eye(no+nv)[no+j, no+ncsf[1]], fij_b2[i, ncsf[0]], optimize=True)
+            - np.einsum('i, i->i', np.eye(nv)[j, ncsf[1]], fij_a2[i, ncsf[0]], optimize=True)
         )
     )
     return line
@@ -110,12 +110,12 @@ def _cvbbcvbb_ndc(i, j, ncsf, nc, no, nv, si, fij_a2, fij_b2, fab_a2, fab_b2):
     # CV(bb)-CV(bb) non-diagonal correct term
     line = (
         0.5 * (-1 + np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
-            np.einsum('i, i->i', np.eye(nc)[i, ncsf[0]], fab_b2[no+j, no+ncsf[1]])
-            - np.einsum('i, i->i', np.eye(nc)[i, ncsf[0]], fab_a2[j, ncsf[1]])
+            np.einsum('i, i->i', np.eye(nc)[i, ncsf[0]], fab_b2[no+j, no+ncsf[1]], optimize=True)
+            - np.einsum('i, i->i', np.eye(nc)[i, ncsf[0]], fab_a2[j, ncsf[1]], optimize=True)
         )
         + 0.5 * (1 - np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
-            np.einsum('i, i->i', np.eye(no+nv)[no+j, no+ncsf[1]], fij_b2[i, ncsf[0]])
-            - np.einsum('i, i->i', np.eye(nv)[j, ncsf[1]], fij_a2[i, ncsf[0]])
+            np.einsum('i, i->i', np.eye(no+nv)[no+j, no+ncsf[1]], fij_b2[i, ncsf[0]], optimize=True)
+            - np.einsum('i, i->i', np.eye(nv)[j, ncsf[1]], fij_a2[i, ncsf[0]], optimize=True)
         )
     )
     return line
@@ -163,11 +163,14 @@ def iajb_f(i, a, qAk1, qAj1, qBk1, qBj1, qBk2,
     return iajb
 
 
-def cAcvacva(i, a, pscsfcv_i, pscsfcv_a, qAk_aa, qBk_aa, qAj_aa, qBj_aa, gamma_k, gamma_j,
-             fock_a_occ, fock_a_vir, nc, no, nv, si, fij_a2, fij_b2, fab_a2, fab_b2):
+def cAcvacva(i, a, c, pscsfcv_i, pscsfcv_a, qAk_aa, qBk_aa, qAj_aa, qBj_aa, gamma_k, gamma_j,
+             fock_a_occ, fock_a_vir, nc, no, nv, si, fij_a2, fij_b2, fab_a2, fab_b2,
+             correct, delta_max, sigma_k):
     # this function contract cv(aa)-cv(aa) block of A matrix
     A = np.einsum('nm, nmp, nm->p',
                   qAk_aa[:, None, i, a], qBk_aa[None, :, pscsfcv_i, pscsfcv_a], gamma_k, optimize=True)
+    if correct:
+        A[c] += delta_max / (1 + (A[c] / sigma_k) ** 4)
     A -= np.einsum('nmp, nmp, nm->p',
                    qAj_aa[:, None, i, pscsfcv_i], qBj_aa[None, :, a, pscsfcv_a], gamma_j, optimize=True)
     A -= np.einsum('p, p->p', fock_a_occ[i, pscsfcv_i], np.eye(nv)[a, pscsfcv_a], optimize=True)
@@ -198,10 +201,13 @@ def cAcvacvb(i, a, pscsfcv_i, pscsfcv_a, qAk_aa, qBk_bb, gamma_k,
     return A
 
 
-def cAcvbcvb(i, a, pscsfcv_i, pscsfcv_a, qAk_bb, qBk_bb, qAj_bb, qBj_bb, gamma_k, gamma_j,
-             fock_b_occ, fock_b_vir, nc, no, nv, si, fij_a2, fij_b2, fab_a2, fab_b2):
+def cAcvbcvb(i, a, c, pscsfcv_i, pscsfcv_a, qAk_bb, qBk_bb, qAj_bb, qBj_bb, gamma_k, gamma_j,
+             fock_b_occ, fock_b_vir, nc, no, nv, si, fij_a2, fij_b2, fab_a2, fab_b2,
+             correct, delta_max, sigma_k):
     A = np.einsum('nm, nmp, nm->p',
                   qAk_bb[:, None, i, no + a], qBk_bb[None, :, pscsfcv_i, no + pscsfcv_a], gamma_k, optimize=True)
+    if correct:
+        A[c] += delta_max / (1 + (A[c] / sigma_k) ** 4)
     A -= np.einsum('nmp, nmp, nm->p',
                    qAj_bb[:, None, i, pscsfcv_i], qBj_bb[None, :, no + a, no + pscsfcv_a], gamma_j, optimize=True)
     A -= np.einsum('p, p->p', fock_b_occ[i, pscsfcv_i], np.eye(no + nv)[no + a, no + pscsfcv_a], optimize=True)
@@ -221,12 +227,13 @@ def cAcvbcvb(i, a, pscsfcv_i, pscsfcv_a, qAk_bb, qBk_bb, qAj_bb, qBj_bb, gamma_k
 
 def constractA(pscsfcv_i, pscsfcv_a, nc, no, nv, gamma_k, gamma_j,
                qAk_aa, qBk_aa, qAj_aa, qBj_aa, qAk_bb,qBk_bb, qAj_bb, qBj_bb,
-               fock_a_occ, fock_a_vir, fock_b_occ, fock_b_vir, si, fij_a2, fij_b2, fab_a2, fab_b2, njob):
+               fock_a_occ, fock_a_vir, fock_b_occ, fock_b_vir, si, fij_a2, fij_b2, fab_a2, fab_b2, njob,
+               correct, delta_max, sigma_k):
     Acvacva = Parallel(n_jobs=njob, backend='threading')(
         delayed(cAcvacva)(
-            i, a, pscsfcv_i, pscsfcv_a, qAk_aa, qBk_aa, qAj_aa, qBj_aa, gamma_k, gamma_j,
-            fock_a_occ, fock_a_vir, nc, no, nv, si, fij_a2, fij_b2, fab_a2, fab_b2,
-        ) for i, a in zip(pscsfcv_i, pscsfcv_a)
+            i, a, ind, pscsfcv_i, pscsfcv_a, qAk_aa, qBk_aa, qAj_aa, qBj_aa, gamma_k, gamma_j,
+            fock_a_occ, fock_a_vir, nc, no, nv, si, fij_a2, fij_b2, fab_a2, fab_b2, correct, delta_max, sigma_k
+        ) for (ind, i), a in zip(enumerate(pscsfcv_i), pscsfcv_a)
     )
     Acvacvb = Parallel(n_jobs=njob, backend='threading')(
         delayed(cAcvacvb)(
@@ -236,9 +243,9 @@ def constractA(pscsfcv_i, pscsfcv_a, nc, no, nv, gamma_k, gamma_j,
     )
     Acvbcvb = Parallel(n_jobs=njob, backend='threading')(
         delayed(cAcvbcvb)(
-            i, a, pscsfcv_i, pscsfcv_a, qAk_bb, qBk_bb, qAj_bb, qBj_bb, gamma_k, gamma_j,
-            fock_b_occ, fock_b_vir, nc, no, nv, si, fij_a2, fij_b2, fab_a2, fab_b2,
-        ) for i, a in zip(pscsfcv_i, pscsfcv_a)
+            i, a, ind, pscsfcv_i, pscsfcv_a, qAk_bb, qBk_bb, qAj_bb, qBj_bb, gamma_k, gamma_j,
+            fock_b_occ, fock_b_vir, nc, no, nv, si, fij_a2, fij_b2, fab_a2, fab_b2, correct, delta_max, sigma_k
+        ) for (ind, i), a in zip(enumerate(pscsfcv_i), pscsfcv_a)
     )
     return Acvacva, Acvacvb, Acvbcvb
 
@@ -437,6 +444,8 @@ class XsTDA:
         del S_sqrt, S, eigvals, eigvecs, C_prime, mo_energy, mo_occ,\
             focka, fockb, fock_a, fock_b, p0, p1, shl0, shl1, ao_slices, nocc_a, nocc_b, nvir_a, nvir_b
         si = 0.5 * self.mol.spin  # coefficient in spin adapted correct term
+        delta_max = 0  # correct term
+        sigma_k = 0  # correct term
         if self.truncate:
             # # encapsulate to a function, same with upper code
             t0 = time.time()
@@ -459,23 +468,23 @@ class XsTDA:
             # CV(aa)-CV(aa) add spin adapted correct term
             iaiacv_a += (
                 0.5 * (1 - np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
-                    np.einsum('i, a->ia', np.ones(nc), np.diag(fab_b2[no:, no:]))
-                    - np.einsum('i, a->ia', np.ones(nc), np.diag(fab_a2))
+                    np.einsum('i, a->ia', np.ones(nc), np.diag(fab_b2[no:, no:]), optimize=True)
+                    - np.einsum('i, a->ia', np.ones(nc), np.diag(fab_a2), optimize=True)
                 )
                 + 0.5 * (-1 + np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
-                    np.einsum('a, i->ia', np.ones(nv), np.diag(fij_b2))
-                    - np.einsum('a, i->ia', np.ones(nv), np.diag(fij_a2[:nc, :nc]))
+                    np.einsum('a, i->ia', np.ones(nv), np.diag(fij_b2), optimize=True)
+                    - np.einsum('a, i->ia', np.ones(nv), np.diag(fij_a2[:nc, :nc]), optimize=True)
                 )
             ).reshape(-1)
             # CV(bb)-CV(bb) add spin adapted correct term
             iaiacv_b += (
                 0.5 * (-1 + np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
-                    np.einsum('i, a->ia', np.ones(nc), np.diag(fab_b2[no:, no:]))
-                    - np.einsum('i, a->ia', np.ones(nc), np.diag(fab_a2))
+                    np.einsum('i, a->ia', np.ones(nc), np.diag(fab_b2[no:, no:]), optimize=True)
+                    - np.einsum('i, a->ia', np.ones(nc), np.diag(fab_a2), optimize=True)
                 )
                 + 0.5 * (1 - np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
-                    np.einsum('a, i->ia', np.ones(nv), np.diag(fij_b2))
-                    - np.einsum('a, i->ia', np.ones(nv), np.diag(fij_a2[:nc, :nc]))
+                    np.einsum('a, i->ia', np.ones(nv), np.diag(fij_b2), optimize=True)
+                    - np.einsum('a, i->ia', np.ones(nv), np.diag(fij_a2[:nc, :nc]), optimize=True)
                 )
             ).reshape(-1)
             # concatenate each block diagonal element
@@ -724,7 +733,8 @@ class XsTDA:
         Acvacva, Acvacvb, Acvbcvb = constractA(
             pscsfcv_i, pscsfcv_a, nc, no, nv, gamma_k, gamma_j,
             qAk_aa, qBk_aa, qAj_aa, qBj_aa, qAk_bb, qBk_bb, qAj_bb, qBj_bb,
-            fock_a_occ, fock_a_vir, fock_b_occ, fock_b_vir, si, fij_a2, fij_b2, fab_a2, fab_b2, self.njob
+            fock_a_occ, fock_a_vir, fock_b_occ, fock_b_vir, si, fij_a2, fij_b2, fab_a2, fab_b2, self.njob,
+            self.correct, delta_max, sigma_k
         )
         A[:lcva, :lcva] = Acvacva
         A[:lcva, lcva+lova+lcob:] = Acvacvb
@@ -776,14 +786,18 @@ class XsTDA:
         A[lcva:lcva+lova, :lcva] = A[:lcva, lcva:lcva+lova].T
 
         # # OV(aa)-OV(aa)
-        # int2ekov_a = np.einsum('nmi, nma, nm->ia', qAkov_aa[:, None, ...], qBkov_aa[None, ...], gamma_k)
+        int2ekov_a = np.einsum(
+            'nmi, nma, nm->ia',
+            qAk_aa[:, None, nc+pscsfov_a_i, pscsfov_a_a], qBk_aa[None, :, nc+pscsfov_a_i, pscsfov_a_a], gamma_k, optimize=True
+        )
         # int2ejov_a = np.zeros_like(int2ekov_a)
         for i, a, p in zip(pscsfov_a_i, pscsfov_a_a, range(lova)):
-            # int2ejov_a[p, :] = np.einsum('nmp, nmp, nm->p', qAj_aa[:, None, nc+i, nc+pscsfov_a_i], qBj_aa[None, :, a, pscsfov_a_a], gamma_j)
-            A[lcva+p, lcva:lcva+lova] += np.einsum(
-                'nm, nmp, nm->p',
-                qAk_aa[:, None, nc+i, a], qBk_aa[None, :, nc+pscsfov_a_i, pscsfov_a_a], gamma_k, optimize=True
-            )
+            # # int2ejov_a[p, :] = np.einsum('nmp, nmp, nm->p', qAj_aa[:, None, nc+i, nc+pscsfov_a_i], qBj_aa[None, :, a, pscsfov_a_a], gamma_j)
+            # # for add correct term, do not line by line calculate
+            # A[lcva+p, lcva:lcva+lova] += np.einsum(
+            #     'nm, nmp, nm->p',
+            #     qAk_aa[:, None, nc+i, a], qBk_aa[None, :, nc+pscsfov_a_i, pscsfov_a_a], gamma_k, optimize=True
+            # )
             A[lcva+p, lcva:lcva+lova] -= np.einsum(
                 'nmp, nmp, nm->p',
                 qAj_aa[:, None, nc+i, nc+pscsfov_a_i], qBj_aa[None, :, a, pscsfov_a_a], gamma_j, optimize=True
@@ -794,11 +808,11 @@ class XsTDA:
             A[lcva+p, lcva:lcva+lova] += np.einsum(
                 'p, p->p', np.eye(nc+no)[nc+i, nc+pscsfov_a_i], fock_a_vir[a, pscsfov_a_a], optimize=True
             )
-        # A[lcva:lcva+lova, lcva:lcva+lova] += int2ekov_a - int2ejov_a
-        # if self.correct:
-        #     delta_k = delta_max / (1 + (np.diag(int2ekov_a) / sigma_k) ** 4)
-        #     A[lcva:lcva+lova, lcva:lcva+lova] += np.diag(delta_k)
-        # del int2ekov_a, int2ejov_a
+        A[lcva:lcva+lova, lcva:lcva+lova] += int2ekov_a
+        if self.correct:
+            delta_k = delta_max / (1 + (np.diag(int2ekov_a) / sigma_k) ** 4)
+            A[lcva:lcva+lova, lcva:lcva+lova] += np.diag(delta_k)
+        del int2ekov_a
 
         # # OV(aa)-CO(bb)
         # A[lcva:lcva+lova, lcva+lova:lcva+lova+lcob] = np.einsum('nmi, nma, nm->ia', qAkov_aa[:, None, ...], qBkco_bb[None, ...], gamma_k)
@@ -823,14 +837,18 @@ class XsTDA:
         A[lcva+lova:lcva+lova+lcob, lcva:lcva+lova] = A[lcva:lcva+lova, lcva+lova:lcva+lova+lcob].T
 
         # # CO(bb)-CO(bb)
-        # int2ekco_b = np.einsum('nmi, nma, nm->ia', qAkco_bb[:, None, ...], qBkco_bb[None, ...], gamma_k)
+        int2ekco_b = np.einsum(
+            'nmi, nma, nm->ia',
+            qAk_bb[:, None, pscsfco_b_i, pscsfco_b_a], qBk_bb[None, :, pscsfco_b_i, pscsfco_b_a], gamma_k, optimize=True
+        )
         # int2ejco_b = np.zeros_like(int2ekco_b)
         for i, a, p in zip(pscsfco_b_i, pscsfco_b_a, range(lcob)):
-            # int2ejco_b[p, :] = np.einsum('nmp, nmp, nm->p', qAj_bb[:, None, i, pscsfco_b_i], qBj_bb[None, :, a, pscsfco_b_a], gamma_j)
-            A[lcva+lova+p, lcva+lova:lcva+lova+lcob] += np.einsum(
-                'nm, nmp, nm->p',
-                qAk_bb[:, None, i, a],qBk_bb[None, :, pscsfco_b_i, pscsfco_b_a], gamma_k, optimize=True
-            )
+            # # int2ejco_b[p, :] = np.einsum('nmp, nmp, nm->p', qAj_bb[:, None, i, pscsfco_b_i], qBj_bb[None, :, a, pscsfco_b_a], gamma_j)
+            # # for add correct term, do not line by line calculate
+            # A[lcva+lova+p, lcva+lova:lcva+lova+lcob] += np.einsum(
+            #     'nm, nmp, nm->p',
+            #     qAk_bb[:, None, i, a],qBk_bb[None, :, pscsfco_b_i, pscsfco_b_a], gamma_k, optimize=True
+            # )
             A[lcva+lova+p, lcva+lova:lcva+lova+lcob] -= np.einsum(
                 'nmp, nmp, nm->p',
                 qAj_bb[:, None, i, pscsfco_b_i], qBj_bb[None, :, a, pscsfco_b_a], gamma_j, optimize=True
@@ -841,11 +859,11 @@ class XsTDA:
             A[lcva+lova+p, lcva+lova:lcva+lova+lcob] += np.einsum(
                 'p, p->p', np.eye(nc)[i, pscsfco_b_i], fock_b_vir[a, pscsfco_b_a], optimize=True
             )
-        # A[lcva+lova:lcva+lova+lcob, lcva+lova:lcva+lova+lcob] += int2ekco_b - int2ejco_b
-        # if self.correct:
-        #     delta_k = delta_max / (1 + (np.diag(int2ekco_b) / sigma_k) ** 4)
-        #     A[lcva+lova:lcva+lova+lcob, lcva+lova:lcva+lova+lcob] += np.diag(delta_k)
-        # del int2ekco_b, int2ejco_b
+        A[lcva+lova:lcva+lova+lcob, lcva+lova:lcva+lova+lcob] += int2ekco_b
+        if self.correct:
+            delta_k = delta_max / (1 + (np.diag(int2ekco_b) / sigma_k) ** 4)
+            A[lcva+lova:lcva+lova+lcob, lcva+lova:lcva+lova+lcob] += np.diag(delta_k)
+        del int2ekco_b
 
         # # CO(bb)-CV(bb)
         # int2ekcobcvb = np.einsum('nmi, nma, nm->ia', qAkco_bb[:, None, ...], qBkcv_bb[None, ...], gamma_k)
@@ -861,10 +879,10 @@ class XsTDA:
                 qAj_bb[:, None, i, pscsfcv_i], qBj_bb[None, :, a, no+pscsfcv_a], gamma_j, optimize=True
             )
             A[lcva+lova+p, lcva+lova+lcob:] -= np.einsum(
-                'p, p->p', fock_b_occ[i, pscsfcv_i], np.eye(no+nv)[a, no+pscsfcv_a]
+                'p, p->p', fock_b_occ[i, pscsfcv_i], np.eye(no+nv)[a, no+pscsfcv_a], optimize=True
             )
             A[lcva+lova+p, lcva+lova+lcob:] += np.einsum(
-                'p, p->p', np.eye(nc)[i, pscsfcv_i], fock_b_vir[a, no+pscsfcv_a]
+                'p, p->p', np.eye(nc)[i, pscsfcv_i], fock_b_vir[a, no+pscsfcv_a], optimize=True
             )
         # A[lcva+lova:lcva+lova+lcob, lcva+lova+lcob:] += int2ekcobcvb - int2ejcobcvb
         # del int2ekcobcvb, int2ejcobcvb
@@ -992,9 +1010,9 @@ class XsTDA:
 
     def deltaS2(self):
         # refer to J. Chem. Phys. 134, 134101 (2011), ignore some term and some term cancel each other out
-        dS2 = (np.einsum('ij,ij->i', self.xycv_a, self.xycv_a)
-               + np.einsum('ij,ij->i', self.xycv_b, self.xycv_b)
-               - 2*np.einsum('ij,ij->i', self.xycv_a, self.xycv_b))
+        dS2 = (np.einsum('ij,ij->i', self.xycv_a, self.xycv_a, optimize=True)
+               + np.einsum('ij,ij->i', self.xycv_b, self.xycv_b, optimize=True)
+               - 2*np.einsum('ij,ij->i', self.xycv_a, self.xycv_b, optimize=True))
         return dS2
 
     def osc_str(self):
@@ -1008,8 +1026,8 @@ class XsTDA:
         omega = self.e[:self.nstates]
         # length form oscillator strength
         dipole_ao = self.mol.intor_symmetric("int1e_r", comp=3)  # dipole moment, comp=3 is 3 axis
-        dipole_mo_a = np.einsum('xpq,pi,qj->xij', dipole_ao, orbo_a, orbv_a)
-        dipole_mo_b = np.einsum('xpq,pi,qj->xij', dipole_ao, orbo_b, orbv_b)
+        dipole_mo_a = np.einsum('xpq,pi,qj->xij', dipole_ao, orbo_a, orbv_a, optimize=True)
+        dipole_mo_b = np.einsum('xpq,pi,qj->xij', dipole_ao, orbo_b, orbv_b, optimize=True)
         if self.truncate:
             dipole_mocv_a = dipole_mo_a[:, self.pscsfcv_i, self.pscsfcv_a]
             dipole_moov_a = dipole_mo_a[:, self.nc+self.pscsfov_a_i, self.pscsfov_a_a]
@@ -1020,12 +1038,12 @@ class XsTDA:
             dipole_moov_a = dipole_mo_a[:, self.nc:, :].reshape(3, -1)
             dipole_moco_b = dipole_mo_b[:, :, :self.no].reshape(3, -1)
             dipole_mocv_b = dipole_mo_b[:, :, self.no:].reshape(3, -1)
-        trans_dipcv_a = np.einsum('xi,yi->yx', dipole_mocv_a, self.xycv_a)
-        trans_dipov_a = np.einsum('xi,yi->yx', dipole_moov_a, self.xyov_a)
-        trans_dipco_b = np.einsum('xi,yi->yx', dipole_moco_b, self.xyco_b)
-        trans_dipcv_b = np.einsum('xi,yi->yx', dipole_mocv_b, self.xycv_b)
+        trans_dipcv_a = np.einsum('xi,yi->yx', dipole_mocv_a, self.xycv_a, optimize=True)
+        trans_dipov_a = np.einsum('xi,yi->yx', dipole_moov_a, self.xyov_a, optimize=True)
+        trans_dipco_b = np.einsum('xi,yi->yx', dipole_moco_b, self.xyco_b, optimize=True)
+        trans_dipcv_b = np.einsum('xi,yi->yx', dipole_mocv_b, self.xycv_b, optimize=True)
         trans_dip = trans_dipcv_a + trans_dipov_a + trans_dipco_b + trans_dipcv_b
-        f = 2. / 3. * np.einsum('s,sx,sx->s', omega, trans_dip, trans_dip)
+        f = 2. / 3. * np.einsum('s,sx,sx->s', omega, trans_dip, trans_dip, optimize=True)
         # np.save("osc_str_xstda.npy", f)
         return f
 
@@ -1039,11 +1057,11 @@ class XsTDA:
         orbv_b = self.mo_coeff[:, self.viridx_b]
         omega = self.e[:self.nstates]
         dip_ele_ao = self.mol.intor('int1e_ipovlp', comp=3, hermi=2)  # transition electric dipole moment
-        dip_ele_mo_a = np.einsum('xpq,pi,qj->xij', dip_ele_ao, orbo_a, orbv_a)
-        dip_ele_mo_b = np.einsum('xpq,pi,qj->xij', dip_ele_ao, orbo_b, orbv_b)
+        dip_ele_mo_a = np.einsum('xpq,pi,qj->xij', dip_ele_ao, orbo_a, orbv_a, optimize=True)
+        dip_ele_mo_b = np.einsum('xpq,pi,qj->xij', dip_ele_ao, orbo_b, orbv_b, optimize=True)
         dip_meg_ao = self.mol.intor('int1e_cg_irxp', comp=3, hermi=2)  # transition magnetic dipole moment
-        dip_meg_mo_a = np.einsum('xpq,pi,qj->xij', dip_meg_ao, orbo_a, orbv_a)
-        dip_meg_mo_b = np.einsum('xpq,pi,qj->xij', dip_meg_ao, orbo_b, orbv_b)
+        dip_meg_mo_a = np.einsum('xpq,pi,qj->xij', dip_meg_ao, orbo_a, orbv_a, optimize=True)
+        dip_meg_mo_b = np.einsum('xpq,pi,qj->xij', dip_meg_ao, orbo_b, orbv_b, optimize=True)
         if self.truncate:
             dip_ele_mocv_a = dip_ele_mo_a[:, self.pscsfcv_i, self.pscsfcv_a]
             dip_ele_moov_a = dip_ele_mo_a[:, self.nc+self.pscsfov_a_i, self.pscsfov_a_a]
@@ -1062,19 +1080,19 @@ class XsTDA:
             dip_meg_moov_a = dip_meg_mo_a[:, self.nc:, :].reshape(3, -1)
             dip_meg_moco_b = dip_meg_mo_b[:, :, :self.no].reshape(3, -1)
             dip_meg_mocv_b = dip_meg_mo_b[:, :, self.no:].reshape(3, -1)
-        trans_ele_dipcv_a = np.einsum('xi,yi->yx', dip_ele_mocv_a, self.xycv_a)
-        trans_ele_dipov_a = np.einsum('xi,yi->yx', dip_ele_moov_a, self.xyov_a)
-        trans_ele_dipco_b = np.einsum('xi,yi->yx', dip_ele_moco_b, self.xyco_b)
-        trans_ele_dipcv_b = np.einsum('xi,yi->yx', dip_ele_mocv_b, self.xycv_b)
+        trans_ele_dipcv_a = np.einsum('xi,yi->yx', dip_ele_mocv_a, self.xycv_a, optimize=True)
+        trans_ele_dipov_a = np.einsum('xi,yi->yx', dip_ele_moov_a, self.xyov_a, optimize=True)
+        trans_ele_dipco_b = np.einsum('xi,yi->yx', dip_ele_moco_b, self.xyco_b, optimize=True)
+        trans_ele_dipcv_b = np.einsum('xi,yi->yx', dip_ele_mocv_b, self.xycv_b, optimize=True)
         trans_ele_dip = -(trans_ele_dipcv_a + trans_ele_dipov_a + trans_ele_dipco_b + trans_ele_dipcv_b)
-        trans_meg_dipcv_a = np.einsum('xi,yi->yx', dip_meg_mocv_a, self.xycv_a)
-        trans_meg_dipov_a = np.einsum('xi,yi->yx', dip_meg_moov_a, self.xyov_a)
-        trans_meg_dipco_b = np.einsum('xi,yi->yx', dip_meg_moco_b, self.xyco_b)
-        trans_meg_dipcv_b = np.einsum('xi,yi->yx', dip_meg_mocv_b, self.xycv_b)
+        trans_meg_dipcv_a = np.einsum('xi,yi->yx', dip_meg_mocv_a, self.xycv_a, optimize=True)
+        trans_meg_dipov_a = np.einsum('xi,yi->yx', dip_meg_moov_a, self.xyov_a, optimize=True)
+        trans_meg_dipco_b = np.einsum('xi,yi->yx', dip_meg_moco_b, self.xyco_b, optimize=True)
+        trans_meg_dipcv_b = np.einsum('xi,yi->yx', dip_meg_mocv_b, self.xycv_b, optimize=True)
         trans_meg_dip = 0.5 * (trans_meg_dipcv_a + trans_meg_dipov_a + trans_meg_dipco_b + trans_meg_dipcv_b)
         # in Gaussian and ORCA, do not multiply constant
         # f = 1./unit.c * np.einsum('s,sx,sx->s', 1./omega, trans_ele_dip, trans_meg_dip)
-        f = np.einsum('s,sx,sx->s', 1. / omega, trans_ele_dip, trans_meg_dip)
+        f = np.einsum('s,sx,sx->s', 1. / omega, trans_ele_dip, trans_meg_dip, optimize=True)
         f = f / unit.cgs2au  # transform atom unit to cgs unit
         # np.save("rot_str_stda.npy", f)
         return f
@@ -1225,6 +1243,8 @@ if __name__ == "__main__":
     mf.conv_check = False
     # mf.level_shift = 0.6
     mf.kernel()
+    # mo1, mo2 = mf.stability()  # stable test
+    # mf.kernel(mo_coeff=mo1)  # if do not stable, use other wave function as initial guess
     t_dft1 = time.time()
     print("dft use {} s".format(t_dft1 - t_dft0))
     print('='*50)
