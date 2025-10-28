@@ -13,7 +13,7 @@ from pyscf.symm import direct_prod
 
 #from line_profiler import profile
 
-from SF_TDA import *
+from SF_TDA import SF_TDA, mf_info,gen_response_sf
 au2ev = 27.21138505
 
 def get_irrep_occupancy_directly(mol, mf):
@@ -64,141 +64,6 @@ def _charge_center(mol):
     charges = mol.atom_charges()
     coords  = mol.atom_coords()
     return np.einsum('z,zr->r', charges, coords)/charges.sum()
-
-def mf_info(mf):
-    if np.array(mf.mo_coeff).ndim==3:# UKS
-        mo_energy = mf.mo_energy
-        mo_coeff = mf.mo_coeff
-        mo_occ = mf.mo_occ
-    else: # ROKS
-        mo_energy = np.array([mf.mo_energy, mf.mo_energy])
-        mo_coeff = np.array([mf.mo_coeff, mf.mo_coeff])
-        mo_occ = np.zeros((2,len(mf.mo_coeff)))
-        mo_occ[0][np.where(mf.mo_occ>=1)[0]]=1
-        mo_occ[1][np.where(mf.mo_occ>=2)[0]]=1
-    return mo_energy,mo_occ,mo_coeff
-
-def cache_xc_kernel_sf(mf, mo_coeff, mo_occ, spin=1,max_memory=2000):
-    '''Compute the fxc_sf, which can be used in SF-TDDFT/TDA
-    '''
-    MGGA_DENSITY_LAPL = False
-    with_lapl = MGGA_DENSITY_LAPL
-    ni = mf._numint
-    xctype = ni._xc_type(mf.xc)
-    mo_energy,mo_occ,mo_coeff = mf_info(mf)
-
-    if xctype == 'GGA':
-        ao_deriv = 1
-    elif xctype == 'MGGA':
-        ao_deriv = 2 if MGGA_DENSITY_LAPL else 1
-    else: 
-        ao_deriv = 0 # LDA
-
-    assert mo_coeff[0].ndim == 2
-    assert spin == 1
-
-    nao = mo_coeff[0].shape[0]
-    dm0 = mf.make_rdm1()
-    if np.array(mf.mo_coeff).ndim==2:
-        dm0.mo_coeff = (mf.mo_coeff, mf.mo_coeff)
-        dm0.mo_occ = mo_occ
-    make_rho = ni._gen_rho_evaluator(mf.mol, dm0, hermi=0, with_lapl=False)[0]
-
-    fxc_abs = []
-    for ao, mask, weight, coords \
-            in ni.block_loop(mf.mol, mf.grids, nao, ao_deriv, max_memory):
-        rhoa = make_rho(0, ao, mask, xctype)
-        rhob = make_rho(1, ao, mask, xctype)
-        if xctype == 'LDA':
-            rho = (rhoa,rhob)
-        else: # GGA
-            rha = np.zeros_like(rhoa)
-            rhb = np.zeros_like(rhob)
-            rha[0] = rhoa[0]
-            rhb[0] = rhob[0]
-            rho = (rha,rhb)
-            rhoa = rhoa[0]
-            rhob = rhob[0]
-        vxc= ni.eval_xc_eff(mf.xc, rho, deriv=1, xctype=xctype)[1] # 
-        vxc_a = vxc[0,0]*weight
-        vxc_b = vxc[1,0]*weight
-        fxc_ab = (vxc_a-vxc_b)/(np.array(rhoa)-np.array(rhob)+1e-9)
-        fxc_abs += list(fxc_ab)
-
-    fxc_abs = np.asarray(fxc_abs)
-    return fxc_abs
-
-def nr_uks_fxc_sf_tda(ni, mol, grids, xc_code, dm0, dms, relativity=0, hermi=0,vxc=None, extype=0, max_memory=2000, verbose=None):
-    if isinstance(dms, np.ndarray):
-        dtype = dms.dtype
-    else:
-        dtype = np.result_type(*dms)
-    if hermi != 1 and dtype != np.double:
-        raise NotImplementedError('complex density matrix')
-
-    xctype = ni._xc_type(xc_code)
-
-    nao = dms.shape[-1]
-    make_rhosf, nset = ni._gen_rho_evaluator(mol, dms, hermi, False, grids)[:2]
-
-    def block_loop(ao_deriv):
-        p1 = 0
-        for ao, mask, weight, coords \
-                in ni.block_loop(mol, grids, nao, ao_deriv, max_memory=max_memory):
-            p0, p1 = p1, p1 + weight.size
-            _vxc = vxc[p0:p1]
-            for i in range(nset):
-                rho1sf = make_rhosf(i, ao, mask, xctype)
-                if xctype == 'LDA':
-                    wv = rho1sf * _vxc 
-                else:
-                    rhosf = np.zeros_like(rho1sf)
-                    rhosf[0] += rho1sf[0]
-                    wv = rhosf * _vxc
-                yield i, ao, mask, wv
-
-    ao_loc = mol.ao_loc_nr()
-    cutoff = grids.cutoff * 1e2
-    nbins = NBINS * 2 - int(NBINS * np.log(cutoff) / np.log(grids.cutoff))
-    pair_mask = mol.get_overlap_cond() < -np.log(ni.cutoff)
-    vmat = np.zeros((nset,nao,nao))
-    aow = None
-    if xctype == 'LDA':
-        ao_deriv = 0
-        for i, ao, mask, wv in block_loop(ao_deriv):
-            _dot_ao_ao_sparse(ao, ao, wv, nbins, mask, pair_mask, ao_loc,
-                              hermi, vmat[i])
-    elif xctype == 'GGA':
-        ao_deriv = 1
-        for i, ao, mask, wv in block_loop(ao_deriv):
-            wv[0] *= .5
-            aow = _scale_ao_sparse(ao, wv, mask, ao_loc, out=aow)
-            _dot_ao_ao_sparse(ao[0], aow, None, nbins, mask, pair_mask, ao_loc,
-                              hermi=0, out=vmat[i])
-
-        # [(\nabla mu) nu + mu (\nabla nu)] * fxc_jb = ((\nabla mu) nu f_jb) + h.c.
-        vmat = lib.hermi_sum(vmat.reshape(-1,nao,nao), axes=(0,2,1)).reshape(nset,nao,nao)
-
-    elif xctype == 'MGGA':
-        assert not MGGA_DENSITY_LAPL
-        ao_deriv = 1
-        v1 = numpy.zeros_like(vmat)
-        for i, ao, mask, wv in block_loop(ao_deriv):
-            wv[0] *= .5
-            wv[4] *= .5
-            aow = _scale_ao_sparse(ao[:4], wv[:4], mask, ao_loc, out=aow)
-            _dot_ao_ao_sparse(ao[0], aow, None, nbins, mask, pair_mask, ao_loc,
-                              hermi=0, out=vmat[i])
-            _tau_dot_sparse(ao, ao, wv[4], nbins, mask, pair_mask, ao_loc, out=v1[i])
-
-        vmat = lib.hermi_sum(vmat.reshape(-1,nao,nao), axes=(0,2,1)).reshape(nset,nao,nao)
-        vmat += v1
-
-    if isinstance(dms, np.ndarray) and dms.ndim == 2:
-        vmat = vmat[:,0]
-    if vmat.dtype != dtype:
-        vmat = np.asarray(vmat, dtype=dtype)
-    return vmat
     
 
 class SA_SF_TDA():
@@ -291,7 +156,8 @@ class SA_SF_TDA():
         dim = (nc+no)*(nv+no)
         Amat = np.zeros((dim,dim))
         sf_tda = SF_TDA(mf,self.collinear)
-        Amat = np.zeros_like(sf_tda.A)
+        sf_tda_A = sf_tda.get_Amat() 
+        Amat = np.zeros_like(sf_tda_A)
         
         dim1 = nc*nv
         dim2 = dim1+nc*no
@@ -378,7 +244,7 @@ class SA_SF_TDA():
             Amat[dim3:,dim2:dim3] += foo*tmp_OV_OO.T
 
         # Add global scale
-        Amat = sf_tda.A + fglobal*Amat
+        Amat = sf_tda_A + fglobal*Amat
         
         return Amat
     
@@ -497,9 +363,7 @@ class SA_SF_TDA():
                        np.einsum('ut,xuw,wv,tv->x',s0_oo1,ints_aa[:,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_oo1,iden_O)
                 osc = (2/3)*(self.e[i]-self.e[j])*(tdm[0]**2 + tdm[1]**2 + tdm[2]**2)
                 print(f'{i+1:2d} {j+1:2d} {tdm[0]:>8.4f} {tdm[1]:>8.4f} {tdm[2]:>8.4f}  {osc:>8.4f} ')
-                
-        
-        
+                     
     
     def calculate_TDM_R(self):
         def _charge_center(mol):
@@ -806,7 +670,7 @@ class SA_SF_TDA():
         print(oos,cos)      
         return np.array([oos,cos])
 
-    def init_guess(self,mf, nstates):
+    def init_guess(self,mf, nstates): # only spin down
        
         mo_energy,mo_occ,mo_coeff = mf_info(mf)
         
@@ -880,43 +744,14 @@ class SA_SF_TDA():
         
         return D.reshape((nstates,-1))
     
-    def gen_response_sf(self,hermi=0,max_memory=None,hf_correction=False):
+    def gen_response_sf(self,hermi=0,max_memory=None): # only \Delta A
         mf = self.mf
         mo_energy,mo_occ,mo_coeff = mf_info(mf)
         mol = mf.mol
-        if isinstance(mf, scf.hf.KohnShamDFT) and not hf_correction:
-            ni = mf._numint
-            ni.libxc.test_deriv_order(mf.xc, 2, raise_error=True)
-            omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, mol.spin)
-            hybrid = ni.libxc.is_hybrid_xc(mf.xc)
-            if max_memory is None:
-                mem_now = lib.current_memory()[0]
-                max_memory = max(2000, mf.max_memory*.8-mem_now)
-
-            vxc = cache_xc_kernel_sf(mf, mo_coeff, mo_occ,1,max_memory) # XC kerkel 
-            dm0 = None
-
-            def vind(dm1):
-                v1 = nr_uks_fxc_sf_tda(ni,mol, mf.grids, mf.xc, dm0, dm1, 0, hermi, # XC * dm1
-                                        vxc, max_memory=max_memory)
-
-                if not hybrid:
-                    # No with_j because = 0 in spin flip part.
-                    pass
-                else:
-                    vk = mf.get_k(mol, dm1, hermi=hermi)
-                    vk *= hyb
-                    if omega > 1e-10:  # For range separated Coulomb
-                        vk += mf.get_k(mol, dm1, hermi, omega) * (alpha-hyb)
-                    v1 -= vk
-                return v1
-        if not isinstance(mf, scf.hf.KohnShamDFT) and not hf_correction : # in HF case
-            def vind(dm1):
-                return -mf.get_k(mol,dm1,hermi=hermi)
-        if hf_correction: # for \Delta A
-            def vind(dm1):
-                vj,vk = mf.get_jk(mol,dm1,hermi=hermi)
-                return vj,vk
+        #if hf_correction: # for \Delta A
+        def vind(dm1):
+            vj,vk = mf.get_jk(mol,dm1,hermi=hermi)
+            return vj,vk
         return vind
     
     
@@ -987,10 +822,10 @@ class SA_SF_TDA():
         else:
             hdiag = e_ia.ravel()
 
-        vresp = self.gen_response_sf(hermi=0)
+        vresp = gen_response_sf(self.mf,hermi=0)
 
         if self.SA > 0:
-            vresp_hf = self.gen_response_sf(hermi=0,hf_correction=True)
+            vresp_hf = self.gen_response_sf(hermi=0)# to calculate \Delta A
             hf = scf.ROHF(mf.mol)
             dm = mf.make_rdm1()
             vhf = hf.get_veff(hf.mol, dm)
