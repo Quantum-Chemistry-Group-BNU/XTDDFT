@@ -13,7 +13,7 @@ from pyscf.symm import direct_prod
 
 #from line_profiler import profile
 
-from SF_TDA import SF_TDA, mf_info,gen_response_sf
+from SF_TDA import SF_TDA, mf_info,gen_response_sf,gen_response_sf_mc
 au2ev = 27.21138505
 
 def get_irrep_occupancy_directly(mol, mf):
@@ -67,13 +67,13 @@ def _charge_center(mol):
     
 
 class SA_SF_TDA():
-    def __init__(self,mf,SA=3,davidson=False,collinear=False):
+    def __init__(self,mf,SA=3,davidson=True,method=0):
         """SA=0: SF-TDA
            SA=1: only add diagonal block for dA
            SA=2: add all dA except for OO block
            SA=3: full dA
         """
-
+        print('method=0 (default) ALDA0, method=1 multicollinear, method=2 collinear')
         if np.array(mf.mo_coeff).ndim==3:# UKS
             self.mo_energy = mf.mo_energy
             self.mo_coeff = mf.mo_coeff
@@ -93,7 +93,7 @@ class SA_SF_TDA():
         self.nao = self.mol.nao_nr()
         self.mf = mf
         self.davidson=davidson
-        self.collinear = collinear
+        self.method = method
         _,dsp1 = mf.spin_square()
         self.ground_s = (dsp1-1)/2
         
@@ -155,7 +155,7 @@ class SA_SF_TDA():
         fockB_V = fockB[nc+no:,nc+no:]
         dim = (nc+no)*(nv+no)
         Amat = np.zeros((dim,dim))
-        sf_tda = SF_TDA(mf,self.collinear)
+        sf_tda = SF_TDA(mf,method=self.method)
         sf_tda_A = sf_tda.get_Amat() 
         Amat = np.zeros_like(sf_tda_A)
         
@@ -744,7 +744,7 @@ class SA_SF_TDA():
         
         return D.reshape((nstates,-1))
     
-    def gen_response_sf(self,hermi=0,max_memory=None): # only \Delta A
+    def gen_response_sf_delta_A(self,hermi=0,max_memory=None): # only \Delta A
         mf = self.mf
         mo_energy,mo_occ,mo_coeff = mf_info(mf)
         mol = mf.mol
@@ -821,11 +821,13 @@ class SA_SF_TDA():
             hdiag = new_hdiag
         else:
             hdiag = e_ia.ravel()
-
-        vresp = gen_response_sf(self.mf,hermi=0)
+        if self.method == 0:
+            vresp = gen_response_sf(self.mf,hermi=0)
+        elif self.method == 1:
+            vresp = gen_response_sf_mc(self.mf,hermi=0)
 
         if self.SA > 0:
-            vresp_hf = self.gen_response_sf(hermi=0)# to calculate \Delta A
+            vresp_hf = self.gen_response_sf_delta_A(hermi=0)# to calculate \Delta A
             hf = scf.ROHF(mf.mol)
             dm = mf.make_rdm1()
             vhf = hf.get_veff(hf.mol, dm)
@@ -1268,7 +1270,7 @@ if __name__ == '__main__':
     mf = dft.ROKS(mol)
     mf.xc = 'bhandhlyp'
     mf.kernel()
-    sf_tda = SA_SF_TDA(mf,SA=4)
+    sf_tda = SA_SF_TDA(mf)
     e0, values = sf_tda.kernel(nstates=10,remove=True)
     print('excited energy ',e0)
     print('Reference energy: -2.58159612  1.94501967  2.0441558   2.04415705  3.55556409  4.0395836 4.07260624  4.07260634  4.09542032  4.09542242')

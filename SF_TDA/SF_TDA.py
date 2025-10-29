@@ -1,19 +1,22 @@
 import numpy as np
 import scipy, sys
 from pyscf import gto, dft, scf, ao2mo, lib, tddft
-from pyscf.dft import numint
+from pyscf.dft import numint,numint2c,xc_deriv
 from functools import reduce
+import functools
 from pyscf.dft.gen_grid import NBINS
 from pyscf.dft.numint import _dot_ao_ao_sparse,_scale_ao_sparse,_tau_dot_sparse
 
 #from utils import unit
 ha2eV = 27.2113834
 
-def SF_TDA(mf,collinear=False,isf=-1,davidson=False):
+def SF_TDA(mf,isf=-1,davidson=True,method=0):
+
+    print('method=0 (default) ALDA0, method=1 multicollinear, method=2 collinear')
     if isf == -1: # down
-        return SF_TDA_down(mf,collinear,davidson)
+        return SF_TDA_down(mf,method,davidson)
     elif isf == 1: # up
-        return SF_TDA_up(mf,collinear,davidson)
+        return SF_TDA_up(mf,method,davidson)
 
 
 def mf_info(mf):
@@ -29,7 +32,7 @@ def mf_info(mf):
         mo_occ[1][np.where(mf.mo_occ>=2)[0]]=1
     return mo_energy,mo_occ,mo_coeff    
     
-def cache_xc_kernel_sf(mf, mo_coeff, mo_occ, spin=1,max_memory=2000,isf=-1):
+def cache_xc_kernel_sf(mf, mo_coeff, mo_occ, spin=1,max_memory=2000,isf=-1): # for ALDA0
     '''Compute the fxc_sf, which can be used in SF-TDDFT/TDA
     '''
     MGGA_DENSITY_LAPL = False
@@ -134,7 +137,7 @@ def nr_uks_fxc_sf_tda(ni, mol, grids, xc_code, dm0, dms, relativity=0, hermi=0,v
     elif xctype == 'MGGA':
         assert not MGGA_DENSITY_LAPL
         ao_deriv = 1
-        v1 = numpy.zeros_like(vmat)
+        v1 = np.zeros_like(vmat)
         for i, ao, mask, wv in block_loop(ao_deriv):
             wv[0] *= .5
             wv[4] *= .5
@@ -152,7 +155,7 @@ def nr_uks_fxc_sf_tda(ni, mol, grids, xc_code, dm0, dms, relativity=0, hermi=0,v
         vmat = np.asarray(vmat, dtype=dtype)
     return vmat
 
-def gen_tda_operation_sf(mf,isf):
+def gen_tda_operation_sf(mf,isf,method):
     if np.array(mf.mo_coeff).ndim==3:# UKS
         mo_energy = mf.mo_energy
         mo_coeff = mf.mo_coeff
@@ -208,8 +211,10 @@ def gen_tda_operation_sf(mf,isf):
         hdiag = e_ai.ravel()
         ndim = (noccb,nvira)
         orbov = (orbob,orbva)
-
-    vresp = gen_response_sf(mf,hermi=0)
+    if method == 0:
+        vresp = gen_response_sf(mf,hermi=0)
+    elif method == 1:
+        vresp = gen_response_sf_mc(mf,hermi=0)
 
     #@profile
     def vind(zs0): # vector-matrix product for indexed operations
@@ -218,7 +223,7 @@ def gen_tda_operation_sf(mf,isf):
         zs = np.asarray(zs0).reshape(-1,ndim0,ndim1)
         #print('zs.shape ',zs.shape)
         vs = np.zeros_like(zs)
-        print('zs.shape',zs.shape)
+        #print('zs.shape',zs.shape)
         dmov = lib.einsum('xov,qv,po->xpq', zs,orbv.conj(), orbo,optimize=True) # (x,nmo,nmo)
         v1ao = vresp(np.asarray(dmov))   # with density and get response function
         vs += lib.einsum('xpq,po,qv->xov', v1ao, orbo.conj(), orbv,optimize=True) # (-1,nocca,nvirb)
@@ -265,10 +270,10 @@ def gen_response_sf(mf,hermi=0,max_memory=None,hf_correction=False):
     if not isinstance(mf, scf.hf.KohnShamDFT) and not hf_correction : # in HF case
         def vind(dm1):
             return -mf.get_k(mol,dm1,hermi=hermi)
-    if hf_correction: # for \Delta A
-        def vind(dm1):
-            vj,vk = mf.get_jk(mol,dm1,hermi=hermi)
-            return vj,vk
+    #if hf_correction: # for \Delta A
+    #    def vind(dm1):
+    #        vj,vk = mf.get_jk(mol,dm1,hermi=hermi)
+    #        return vj,vk
     return vind
 
 def deal_v_davidson2(mf,nstates,v):
@@ -365,8 +370,8 @@ def init_guess(mf, nstates,isf=-1):
             x0[i, j] = 1
     return x0
     
-def davidson_process(mf,nstates,isf=-1):
-    vind, hdiag = gen_tda_operation_sf(mf,isf)
+def davidson_process(mf,nstates,isf=-1,method=0):
+    vind, hdiag = gen_tda_operation_sf(mf,isf,method)
     precond = hdiag
     #start_t = time.time()
     x0 = init_guess(mf, nstates,isf)
@@ -390,7 +395,7 @@ def davidson_process(mf,nstates,isf=-1):
     return e,v
 
 class SF_TDA_up():
-    def __init__(self,mf,collinear=False,davidson=False):
+    def __init__(self,mf,kernel,davidson=False):
         if np.array(mf.mo_coeff).ndim==3:# UKS
             self.mo_energy = mf.mo_energy
             self.mo_coeff = mf.mo_coeff
@@ -407,7 +412,7 @@ class SF_TDA_up():
         mol = mf.mol
         self.mf = mf
         self.nao = mol.nao_nr()
-        self.collinear = collinear
+        self.kernel = kernel
         self.davidson = davidson
         occidx_a = np.where(self.mo_occ[0]==1)[0]
         viridx_a = np.where(self.mo_occ[0]==0)[0]
@@ -558,14 +563,14 @@ class SF_TDA_up():
         for nstate in range(self.nstates):
             value = self.v[:,nstate]
             x_cv_ab = value[:nc*nv].reshape(nc,nv)
-            print(f'Excited state {nstate+1} {self.e[nstate]*unit.ha2eV:10.5f} eV')
+            print(f'Excited state {nstate+1} {self.e[nstate]*ha2eV:10.5f} eV')
             for o,v in zip(* np.where(abs(x_cv_ab)>0.1)):
                 print(f'{100*x_cv_ab[o,v]**2:3.0f}% CV(ab) {o+1}a -> {v+1+self.nc+self.no}b {x_cv_ab[o,v]:10.5f}')
             print(' ')
 
 # spin_down
 class SF_TDA_down():
-    def __init__(self,mf, collinear=False,davidson=False):
+    def __init__(self,mf, method,davidson=True):
 
         if np.array(mf.mo_coeff).ndim==3:# UKS
             self.mo_energy = mf.mo_energy
@@ -582,7 +587,7 @@ class SF_TDA_down():
         self.mf = mf
         self.nao = mol.nao_nr()
         self.davidson = davidson
-        self.collinear = collinear
+        self.method = method
         occidx_a = np.where(self.mo_occ[0]==1)[0]
         viridx_a = np.where(self.mo_occ[0]==0)[0]
         occidx_b = np.where(self.mo_occ[1]==1)[0]
@@ -669,7 +674,7 @@ class SF_TDA_down():
             mem_now = lib.current_memory()[0]
             max_memory = max(2000, self.mf.max_memory*.8-mem_now)
         
-        if xctype == 'LDA' and not self.collinear:
+        if xctype == 'LDA' and self.method!=3:
             ao_deriv = 0
             for ao, mask, weight, coords \
                     in ni.block_loop(mol, self.mf.grids, self.nao, ao_deriv, max_memory):
@@ -690,7 +695,7 @@ class SF_TDA_down():
                 a_a2b += iajb
                 
                 
-        elif xctype == 'GGA' and not self.collinear:
+        elif xctype == 'GGA' and self.method!=3:
             ao_deriv = 1
             for ao, mask, weight, coords \
                  in ni.block_loop(mol, self.mf.grids, self.nao, ao_deriv, max_memory):#ao(4,N,nao):AO values and derivatives in x,y,z compoents in grids
@@ -815,8 +820,203 @@ class SF_TDA_down():
     def kernel(self, nstates=1):
         self.nstates = nstates
         if self.davidson:
-            self.e,self.v = davidson_process(self.mf,nstates)
+            self.e,self.v = davidson_process(self.mf,nstates,isf=-1,method=self.method)
         else:
             self.A = self.get_Amat()
             self.e,self.v = scipy.linalg.eigh(self.A)
         return self.e[:nstates]*ha2eV, self.v[:,:nstates]
+    
+    
+    
+    
+# code from pyscf-forge to construct multicollinear functional
+def nr_uks_fxc_sf_tda_mc(ni, mol, grids, xc_code, dm0, dms, relativity=0, hermi=0,rho0=None,
+                      vxc=None, fxc=None, extype=0, max_memory=2000, verbose=None):
+    if isinstance(dms, np.ndarray):
+        dtype = dms.dtype
+    else:
+        dtype = np.result_type(*dms)
+    if hermi != 1 and dtype != np.double:
+        raise NotImplementedError('complex density matrix')
+
+    xctype = ni._xc_type(xc_code)
+
+    nao = dms.shape[-1]
+    make_rhosf, nset = ni._gen_rho_evaluator(mol, dms, hermi, False, grids)[:2]
+
+    def block_loop(ao_deriv):
+        p1 = 0
+        for ao, mask, weight, coords \
+                in ni.block_loop(mol, grids, nao, ao_deriv, max_memory=max_memory):
+            p0, p1 = p1, p1 + weight.size
+            _fxc = fxc[...,p0:p1]
+            for i in range(nset):
+                rho1sf = make_rhosf(i, ao, mask, xctype)
+                if xctype == 'LDA':
+                    # *2.0 becausue kernel xx,yy parts.
+                    wv = rho1sf * _fxc[0,0]*2.0 *weight
+                else:
+                    # *2.0 becausue kernel xx,yy parts.
+                    wv = lib.einsum('bg,abg->ag',rho1sf,_fxc*2.0)*weight
+                yield i, ao, mask, wv
+
+    ao_loc = mol.ao_loc_nr()
+    cutoff = grids.cutoff * 1e2
+    nbins = NBINS * 2 - int(NBINS * np.log(cutoff) / np.log(grids.cutoff))
+    pair_mask = mol.get_overlap_cond() < -np.log(ni.cutoff)
+    vmat = np.zeros((nset,nao,nao))
+    aow = None
+    if xctype == 'LDA':
+        ao_deriv = 0
+        for i, ao, mask, wv in block_loop(ao_deriv):
+            _dot_ao_ao_sparse(ao, ao, wv, nbins, mask, pair_mask, ao_loc,
+                              hermi, vmat[i])
+    elif xctype == 'GGA':
+        ao_deriv = 1
+        for i, ao, mask, wv in block_loop(ao_deriv):
+            wv[0] *= .5
+            aow = _scale_ao_sparse(ao, wv, mask, ao_loc, out=aow)
+            _dot_ao_ao_sparse(ao[0], aow, None, nbins, mask, pair_mask, ao_loc,
+                              hermi=0, out=vmat[i])
+
+        # [(\nabla mu) nu + mu (\nabla nu)] * fxc_jb = ((\nabla mu) nu f_jb) + h.c.
+        vmat = lib.hermi_sum(vmat.reshape(-1,nao,nao), axes=(0,2,1)).reshape(nset,nao,nao)
+
+    elif xctype == 'MGGA':
+        assert not MGGA_DENSITY_LAPL
+        ao_deriv = 1
+        v1 = np.zeros_like(vmat)
+        for i, ao, mask, wv in block_loop(ao_deriv):
+            wv[0] *= .5
+            wv[4] *= .5
+            aow = _scale_ao_sparse(ao[:4], wv[:4], mask, ao_loc, out=aow)
+            _dot_ao_ao_sparse(ao[0], aow, None, nbins, mask, pair_mask, ao_loc,
+                              hermi=0, out=vmat[i])
+            _tau_dot_sparse(ao, ao, wv[4], nbins, mask, pair_mask, ao_loc, out=v1[i])
+
+        vmat = lib.hermi_sum(vmat.reshape(-1,nao,nao), axes=(0,2,1)).reshape(nset,nao,nao)
+        vmat += v1
+
+    if isinstance(dms, np.ndarray) and dms.ndim == 2:
+        vmat = vmat[:,0]
+    if vmat.dtype != dtype:
+        vmat = np.asarray(vmat, dtype=dtype)
+    return vmat
+
+def __mcfun_fn_eval_xc(ni, xc_code, xctype, rho, deriv):
+    evfk = ni.eval_xc_eff(xc_code, rho, deriv=deriv, xctype=xctype)
+    for order in range(1, deriv+1):
+        if evfk[order] is not None:
+            evfk[order] = xc_deriv.ud2ts(evfk[order])
+    return evfk
+
+# This function can be merged with pyscf.dft.numint2c.mcfun_eval_xc_adapter()
+# This function should be a class function in the Numint2c class.
+def mcfun_eval_xc_adapter_sf(ni, xc_code):
+    '''Wrapper to generate the eval_xc function required by mcfun
+
+    Kwargs:
+        dim: int
+            eval_xc_eff_sf is for mc collinear sf tddft/ tda case.add().
+    '''
+
+    try:
+        import mcfun
+    except ImportError:
+        raise ImportError('This feature requires mcfun library.\n'
+                          'Try install mcfun with `pip install mcfun`')
+
+    xctype = ni._xc_type(xc_code)
+    fn_eval_xc = functools.partial(__mcfun_fn_eval_xc, ni, xc_code, xctype)
+    nproc = lib.num_threads()
+
+    def eval_xc_eff(xc_code, rho, deriv, omega=None, xctype=None,
+                verbose=None):
+        return mcfun.eval_xc_eff_sf(
+            fn_eval_xc, rho, deriv,
+            collinear_samples=ni.collinear_samples, workers=nproc)
+    return eval_xc_eff
+
+# This function should be a class function in the Numint2c class.
+def cache_xc_kernel_sf_mc(self, mol, grids, xc_code, mo_coeff, mo_occ, deriv=2,
+                       spin=1, max_memory=2000):
+    '''Compute the fxc_sf, which can be used in SF-TDDFT/TDA
+    '''
+    MGGA_DENSITY_LAPL = False
+    xctype = self._xc_type(xc_code)
+    if xctype == 'GGA':
+        ao_deriv = 1
+    elif xctype == 'MGGA':
+        ao_deriv = 2 if MGGA_DENSITY_LAPL else 1
+    else:
+        ao_deriv = 0
+    with_lapl = False
+
+    assert mo_coeff[0].ndim == 2
+    assert spin == 1
+
+    nao = mo_coeff[0].shape[0]
+    rhoa = []
+    rhob = []
+
+    ni = numint.NumInt()
+    for ao, mask, weight, coords \
+            in self.block_loop(mol, grids, nao, ao_deriv, max_memory=max_memory):
+        rhoa.append(ni.eval_rho2(mol, ao, mo_coeff[0], mo_occ[0], mask, xctype, with_lapl))
+        rhob.append(ni.eval_rho2(mol, ao, mo_coeff[1], mo_occ[1], mask, xctype, with_lapl))
+    rho_ab = (np.hstack(rhoa), np.hstack(rhob))
+    rho_ab = np.asarray(rho_ab)
+    rho_tmz = np.zeros_like(rho_ab)
+    rho_tmz[0] += rho_ab[0]+rho_ab[1]
+    rho_tmz[1] += rho_ab[0]-rho_ab[1]
+    eval_xc = mcfun_eval_xc_adapter_sf(self,xc_code)
+    fxc_sf = eval_xc(xc_code, rho_tmz, deriv=deriv, xctype=xctype)
+    return fxc_sf
+
+def gen_response_sf_mc(mf, mo_coeff=None, mo_occ=None, hermi=0, collinear_samples=200, max_memory=None):
+    '''Generate a function to compute the product of Spin Flip UKS response function
+    and UKS density matrices.
+    '''
+    mo_energy,mo_occ,mo_coeff = mf_info(mf)
+    mol = mf.mol
+
+    ni = numint2c.NumInt2C()
+    ni.collinear = 'mcol'
+    ni.collinear_samples = collinear_samples
+    ni.libxc.test_deriv_order(mf.xc, 2, raise_error=True)
+    if mf.nlc or ni.libxc.is_nlc(mf.xc):
+        logger.warn(mf, 'NLC functional found in DFT object.  Its second '
+                    'deriviative is not available. Its contribution is '
+                    'not included in the response function.')
+    omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, mol.spin)
+    hybrid = ni.libxc.is_hybrid_xc(mf.xc)
+
+    # mf can be pbc.dft.UKS object with multigrid
+    if (not hybrid and
+        'MultiGridFFTDF' == getattr(mf, 'with_df', None).__class__.__name__):
+        raise NotImplementedError("Spin Flip TDDFT doesn't support pbc calculations.")
+
+    fxc = cache_xc_kernel_sf_mc(ni,mol, mf.grids, mf.xc, mo_coeff, mo_occ, deriv=2, spin=1)[2]
+    dm0 = None
+
+    if max_memory is None:
+        mem_now = lib.current_memory()[0]
+        max_memory = max(2000, mf.max_memory*.8-mem_now)
+
+    def vind(dm1):
+        in2 = numint.NumInt()
+        v1 = nr_uks_fxc_sf_tda_mc(in2,mol, mf.grids, mf.xc, dm0, dm1, 0, hermi,
+                               None, None, fxc, max_memory=max_memory)
+        if not hybrid:
+            # No with_j because = 0 in spin flip part.
+            pass
+        else:
+            vk = mf.get_k(mol, dm1, hermi=hermi)
+            vk *= hyb
+            if omega > 1e-10:  # For range separated Coulomb
+                vk += mf.get_k(mol, dm1, hermi, omega) * (alpha-hyb)
+            v1 -= vk
+        return v1
+    return vind
+
+
