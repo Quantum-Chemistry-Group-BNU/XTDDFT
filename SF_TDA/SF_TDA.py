@@ -560,7 +560,7 @@ class SF_TDA_up():
     def analyse(self):
         nc = self.nc
         nv = self.nv
-        for nstate in range(self.nstates):
+        for nstate in range(self.e.shape[0]):
             value = self.v[:,nstate]
             x_cv_ab = value[:nc*nv].reshape(nc,nv)
             print(f'Excited state {nstate+1} {self.e[nstate]*ha2eV:10.5f} eV')
