@@ -395,7 +395,7 @@ def davidson_process(mf,nstates,isf=-1,method=0):
     return e,v
 
 class SF_TDA_up():
-    def __init__(self,mf,kernel,davidson=False):
+    def __init__(self,mf,method,davidson=False):
         if np.array(mf.mo_coeff).ndim==3:# UKS
             self.mo_energy = mf.mo_energy
             self.mo_coeff = mf.mo_coeff
@@ -412,7 +412,7 @@ class SF_TDA_up():
         mol = mf.mol
         self.mf = mf
         self.nao = mol.nao_nr()
-        self.kernel = kernel
+        self.method = method
         self.davidson = davidson
         occidx_a = np.where(self.mo_occ[0]==1)[0]
         viridx_a = np.where(self.mo_occ[0]==0)[0]
@@ -445,8 +445,8 @@ class SF_TDA_up():
             h1e = mf.get_hcore()
             focka = h1e + vhf
             fockb = h1e + vhf
-            fockA = mo_coeff[0].T @ focka @ mo_coeff[0]
-            fockB = mo_coeff[1].T @ fockb @ mo_coeff[1]
+            fockA = self.mo_coeff[0].T @ focka @ self.mo_coeff[0]
+            fockB = self.mo_coeff[1].T @ fockb @ self.mo_coeff[1]
         else:
             dm = mf.make_rdm1()
             vhf = mf.get_veff(mf.mol, dm)
@@ -494,7 +494,7 @@ class SF_TDA_up():
             mem_now = lib.current_memory()[0]
             max_memory = max(2000, mf.max_memory*.8-mem_now)
 
-        if xctype == 'LDA' and not self.collinear:
+        if xctype == 'LDA' and self.method!=3:
             ao_deriv = 0
             for ao, mask, weight, coords \
                     in ni.block_loop(mf.mol, mf.grids, self.nao, ao_deriv, max_memory):
@@ -519,7 +519,7 @@ class SF_TDA_up():
                 #a_a2b += iajb
 
 
-        elif xctype == 'GGA' and not self.collinear:
+        elif xctype == 'GGA' and self.method!=3:
             ao_deriv = 1
             for ao, mask, weight, coords \
                  in ni.block_loop(mf.mol, mf.grids, self.nao, ao_deriv, max_memory):#ao(4,N,nao):AO values and derivatives in x,y,z compoents in grids

@@ -251,7 +251,7 @@ def si2driver(mf,S,Vso,gs=1,nstates=[None,None],analyze=0):
         print(f"The ground state is included in SI calculation")
 
     print(f"{'='*15} State interaction setting {'='*15}")
-    print(f"GS {gs}, state-({S:.2f}) {nstates[0]}, state-({S+1:.2f}) {nstates[1]} are selected")
+    # print(f"GS {gs}, state-({S:.2f}) {nstates[0]}, state-({S+1:.2f}) {nstates[1]} are selected")
     print(f"GS {gs}, state-|Si> {nstates[0]}, state-|Si+1> {nstates[1]} are selected")
 
     from XTDA import XTDA
@@ -261,21 +261,22 @@ def si2driver(mf,S,Vso,gs=1,nstates=[None,None],analyze=0):
     xtda.kernel()
     ed = xtda.e
     xd = xtda.v # CV(0), CO(0), OV(0), CV(1) by X_TDA
-
+    # breakpoint()
     # use whb's XTDA
     # xtda1= XTDA(mol,mf,so2st=1)
     # xtda1.nstates = nstates[0]
     # xtda1.kernel()
     # xtda1.analyze() # this should be performed trans. so2st basis
+    # ed = xtda1.e
     # xd1 = xd1_ = xtda1.v # CV(0), OV(0), CO(0), CV(1) by XTDA
-    # transform to CV(0), CO(0), OV(0), CV(1)
+    # # transform to CV(0), CO(0), OV(0), CV(1)
     # xd1[nc*nv:nc*(nv+no)] = xd1_[nc*nv+no*nv:nc*nv+no*nv+nc*no]
     # xd1[nc*(nv+no):nc*(nv+no)+no*nv] = xd1_[nc*nv:nc*nv+no*nv]
     # xd = xd1
 
     from SF_TDA.SF_TDA import SF_TDA
     print(f"{'='*15} Perform SF-up-TDA calculation {'='*15}")
-    sf_tda = SF_TDA(mf,isf=1)
+    sf_tda = SF_TDA(mf,isf=1,davidson=0)
     sf_tda.nstates = nstates[1]
     eq, xq = sf_tda.kernel()
     sf_tda.analyse()
