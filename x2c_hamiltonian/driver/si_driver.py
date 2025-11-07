@@ -171,6 +171,7 @@ class SI_driver():
         self.eso, self.vso = scipy.linalg.eigh(self.heff, driver='evd')
         self.esf = numpy.diag(self.vso.T.conjugate()@self.Omega@self.vso).real
         time2 = time.time()
+        self.codetime = time2-time0
         logging.info(f"End diagonalization, cost time {time2-time1:.2f}s")
         logging.info(f"Ref. E (in Hatree) = {self.mf.e_tot}")
         logging.info(f"The  E (in eV), shape={self.eso.shape} --")
@@ -178,11 +179,16 @@ class SI_driver():
         # logging.info(f"{self.esf[:20] * unit.ha2eV}")
         logging.info(f"The  E_soc (in eV) --")
         logging.info(f"{self.eso[:20] * unit.ha2eV}")
-        logging.info(f"End SI calculation, cost time {time2-time0:.2f}s")
+        logging.info(f"End SI calculation, cost time {self.codetime:.2f}s")
         self.summary()
         return self.eso, self.vso
     
     def summary(self):
+        logging.info(f"{'='*16} Basic setting {'='*16}")
+        logging.info(f"Time cost {self.codetime:.2f}s")
+        logging.info(f"|Ref⟩ with S = Sz = {self.S}")
+        logging.info(f"|Ref⟩ with E (in Hatree) = {self.mf.e_tot}")
+        logging.info(f"Interaction among {self.nSm} |S-⟩, {self.ngs} |GS⟩, {self.nSo} |So⟩, {self.nSp} |S+⟩.")
         logging.info(f"{'='*10} Summary of SI calculation {'='*10}")
         for i, e in enumerate(self.eso[:20]):
             logging.info(f"Excited state [{i:4d}]: Eso {self.eso[i]*unit.ha2eV:>12.6f} eV  --  Esf {self.esf[i]*unit.ha2eV:>12.6f} eV")
@@ -238,18 +244,18 @@ class SI_driver():
                                     if not exitcode == 1:
                                         logging.warning(f"exitcode={exitcode}, check hso!")
                                     # check out |M'-M|<=1 condition
-                                    if abs(MR-ML)<=1:
+                                    if abs(MR-ML)<=1 and abs(SR-SL)<=1:
                                         # Calculate h*w
                                         hso[Lpos, Rpos] = h[int(MR-ML)+1]*w(SL,ML,SR,MR)
                                     else:
                                         hso[Lpos, Rpos] = 0.0
                                     count += 1
-                                    if count%10000 == 0:
-                                        if logging.getLogger().isEnabledFor(logging.DEBUG):
-                                            progress_bar(count, n_sum, time0)
-                                        else:
+                                    if logging.getLogger().isEnabledFor(logging.DEBUG):
+                                        if count%n_sum == 0: progress_bar(count, n_sum, time0)
+                                    else:
+                                        if count%int(n_sum/10) == 0:
                                             logging.info(f"finish {count}/{n_sum}")
-                                if Lpos == Rpos: # E(0)
+                                if Lpos == Rpos: # E^{(0)}_I
                                     assert abs(L_value[0]-R_value[0])<1e-6 # share the same energy
                                     assert abs(hso[Lpos, Rpos].imag) < 1e-6 # real if diagonal
                                     Omega[Lpos, Rpos] = L[1][0]
@@ -269,7 +275,7 @@ class SI_driver():
         if L[0] == '|GS>': igsL = 1
         if R[0] == '|GS>': igsR = 1
         exitcode = 0
-        hso_local = 0.0
+        hso_local = 0
 
         # S-1 S-1
         if abs(SL-(self.S-1))<1e-6 and abs(SR-(self.S-1))<1e-6 and int(igsL+igsR) == 0:
@@ -280,6 +286,9 @@ class SI_driver():
         # S-1 S
         if abs(SL-(self.S-1))<1e-6 and abs(SR-(self.S))<1e-6 and int(igsL+igsR) == 0:
             hso_local = self.interact_S_1S(L,R); exitcode += 1
+        # S-1 S-1
+        if abs(SL-(self.S-1))<1e-6 and abs(SR-(self.S+1))<1e-6 and int(igsL+igsR) == 0:
+            hso_local = self.interact_S_1S1(L,R); exitcode += 1
 
         # GS GS
         if abs(SL-(self.S))<1e-6 and abs(SR-(self.S))<1e-6 and int(igsL+igsR) == 2:
@@ -314,11 +323,11 @@ class SI_driver():
         XhX += einsum('ia,abm,ij,jb->m',XL, self.hm[self.slv,self.slv,:], self.delta_c, XR)*factor
         XhX += einsum('ia,jim,ab,jb->m',XL, self.hm[self.slc,self.slc,:], self.delta_v, XR)*factor
         # Case (2) (S-1)(CV1) (S-1)(CO1)
-        XR = R[1][1][self.sl_S_1_dim1].reshape(self.nc,self.nv)
+        XR = R[1][1][self.sl_S_1_dim1].reshape(self.nc,self.no)
         factor = sqrt((2*self.S+1)/self.S)*(1-self.S)/(self.S*2)
         XhX += einsum('ia,atm,ij,jt->m',XL, self.hm[self.slv,self.slo,:], self.delta_c, XR)*factor
         # Case (3) (S-1)(CV1) (S-1)(OV1)
-        XR = R[1][1][self.sl_S_1_dim2].reshape(self.nc,self.nv)
+        XR = R[1][1][self.sl_S_1_dim2].reshape(self.no,self.nv)
         factor = sqrt((2*self.S+1)/self.S)*(1-self.S)/(self.S*2)
         XhX += einsum('ia,tim,ab,tb->m',XL, self.hm[self.slo,self.slc,:], self.delta_v, XR)*factor
         # Case (4) (S-1)(CV1) (S-1)(O1O2) = 0
@@ -327,6 +336,8 @@ class SI_driver():
         XL = L[1][1][self.sl_S_1_dim1].reshape(self.nc,self.no)
         # Case (2) (S-1)(CO1) (S-1)(CV1)
         XR = R[1][1][self.sl_S_1_dim0].reshape(self.nc,self.nv)
+        factor = sqrt((2*self.S+1)/self.S)*(1-self.S)/(self.S*2)
+        XhX += einsum('ia,atm,ij,jt->m',XR, -self.hm[self.slv,self.slo,::-1].conjugate(), self.delta_c, XL)*factor
         # Case (11) (S-1)(CO1) (S-1)(CO1)
         XR = R[1][1][self.sl_S_1_dim1].reshape(self.nc,self.no)
         factor = -(self.S-1)/(self.S*sqrt2)
@@ -349,13 +360,13 @@ class SI_driver():
         # Case (3) (S-1)(OV1) (S-1)(CV1)
         XR = R[1][1][self.sl_S_1_dim0].reshape(self.nc,self.nv)
         factor = sqrt((2*self.S+1)/self.S)*(1-self.S)/(self.S*2)
-        XhX += einsum('ia,tim,ab,tb->m',XR, -self.hm[self.slo,self.slc,:], self.delta_v, XL)*factor
+        XhX += einsum('ia,tim,ab,tb->m',XR, -self.hm[self.slo,self.slc,::-1].conjugate(), self.delta_v, XL)*factor
         # Case (12) (S-1)(OV1) (S-1)(CO1) = 0
         # Case (20) (S-1)(OV1) (S-1)(OV1)
         XR = R[1][1][self.sl_S_1_dim2].reshape(self.no,self.nv)
         factor = (self.S-1)/(self.S*sqrt2)
         XhX += einsum('ua,abm,ut,tb->m',XL, self.hm[self.slv,self.slv,:], self.delta_o, XR)*factor
-        XhX += einsum('ua,tum,ab,tb->m',XL, self.hm[self.slo,self.slo,:], self.delta_v, XR)*factor
+        XhX += einsum('ua,tum,ab,tb->m',XL, ((2*self.S+1)/(2*self.S-1))*self.hm[self.slo,self.slo,:], self.delta_v, XR)*factor
         # Case (21) (S-1)(OV1) (S-1)(O1O2)
         XR = R[1][1][self.sl_S_1_dim3].reshape(self.no,self.no)
         XR = XR - numpy.diag(numpy.diag(XR))
@@ -371,14 +382,14 @@ class SI_driver():
         XL = L[1][1][self.sl_S_1_dim3].reshape(self.no,self.no)
         XL = XL - numpy.diag(numpy.diag(XL))
         # Case (4) (S-1)(O1O2) (S-1)(CV1) = 0
-        # Case (13) (S-1)(O1O2) (S-1)(CO1)
+        # Case (13) (S-1)(O1O2) (S-1)(CO1)XR = R[1][1][self.sl_S_1_dim3].reshape(self.no,self.no)
         XR = R[1][1][self.sl_S_1_dim1].reshape(self.nc,self.no)
         factor = -(self.S-1)/(self.S*(2*self.S-1))
-        XhX += einsum('iu,wim,ut,wt->m',XR, -self.hm[self.slo,self.slc,:], self.delta_o, XL)*factor
+        XhX += einsum('iu,wim,ut,wt->m',XR, -self.hm[self.slo,self.slc,::-1].conjugate(), self.delta_o, XL)*factor
         # Case (21) (S-1)(O1O2) (S-1)(OV1)
         XR = R[1][1][self.sl_S_1_dim2].reshape(self.no,self.nv)
         factor = (1-self.S)/sqrt(self.S*(2*self.S-1))
-        XhX += einsum('ua,atm,uw,wt->m',XR, -self.hm[self.slv,self.slo,:], self.delta_o, XL)*factor
+        XhX += einsum('ua,atm,uw,wt->m',XR, -self.hm[self.slv,self.slo,::-1].conjugate(), self.delta_o, XL)*factor
         # Case (28) (S-1)(O1O2) (S-1)(O1O2)
         XR = R[1][1][self.sl_S_1_dim3].reshape(self.no,self.no)
         XR = XR - numpy.diag(numpy.diag(XR))
@@ -387,10 +398,10 @@ class SI_driver():
         XhX += einsum('vu,utm,vw,wt->m',XL, self.hm[self.slo,self.slo,:], self.delta_o, XR)*factor
         # Case (29) (S-1)(O1O2) (S-1)(O1O1)
         XR = R[1][1][self.sl_S_1_dim3].reshape(self.no,self.no)
+        XR = numpy.diag(XR)
         factor = -1/sqrt2
         XhX += einsum('vu,uvm,ut,t->m',XL, self.hm[self.slo,self.slo,:], self.delta_o, XR)*factor
         XhX += einsum('vu,uvm,vt,t->m',XL, self.hm[self.slo,self.slo,:], self.delta_o-1/self.S, XR)*factor
-        XR = numpy.diag(XR)
         # =============== line4 ===============
         XL = L[1][1][self.sl_S_1_dim3].reshape(self.no,self.no)
         XL = numpy.diag(XL)
@@ -398,18 +409,19 @@ class SI_driver():
         # Case (14) (S-1)(O1O1) (S-1)(CO1)
         XR = R[1][1][self.sl_S_1_dim1].reshape(self.nc,self.no)
         factor = -1.0/(2*sqrt(self.S*(2*self.S-1)))
-        XhX += einsum('iu,uim,ut,t->m',XR, -self.hm[self.slo,self.slc,:],\
+        XhX += einsum('iu,uim,ut,t->m',XR, -self.hm[self.slo,self.slc,::-1].conjugate(),\
                        ((1-self.S)/self.S) + 2*(self.S-1)*self.delta_o, XL)*factor
         # Case (22) (S-1)(O1O1) (S-1)(OV1)
         XR = R[1][1][self.sl_S_1_dim2].reshape(self.no,self.nv)
         factor = -1.0/(2*sqrt(self.S*(2*self.S-1)))
-        XhX += einsum('ua,aum,ut,t->m',XR, -self.hm[self.slv,self.slo,:],\
+        XhX += einsum('ua,aum,ut,t->m',XR, -self.hm[self.slv,self.slo,::-1].conjugate(),\
                       ((1-self.S)/self.S + 2*(self.S-1)*self.delta_o), XL)*factor
         # Case (29) (S-1)(O1O1) (S-1)(O1O2)
         XR = R[1][1][self.sl_S_1_dim3].reshape(self.no,self.no)
         XR = XR - numpy.diag(numpy.diag(XR))
-        XhX += einsum('vu,uvm,ut,t->m',XR, -self.hm[self.slo,self.slo,:], self.delta_o, XL)*factor
-        XhX += einsum('vu,uvm,vt,t->m',XR, -self.hm[self.slo,self.slo,:], self.delta_o-1/self.S, XL)*factor
+        factor = -1/sqrt2
+        XhX += einsum('vu,uvm,ut,t->m',XR, -self.hm[self.slo,self.slo,::-1].conjugate(), self.delta_o, XL)*factor
+        XhX += einsum('vu,uvm,vt,t->m',XR, -self.hm[self.slo,self.slo,::-1].conjugate(), self.delta_o-1/self.S, XL)*factor
         # Case (35) (S-1)(O1O1) (S-1)(O1O1) = 0
         return XhX
     
@@ -424,12 +436,12 @@ class SI_driver():
         # Case (15) (S-1)(CO1) GS
         XL = L[1][1][self.sl_S_1_dim1].reshape(self.nc,self.no)
         factor = sqrt((2*self.S-1)/(2*self.S))
-        XhX += einsum('iu,uim->m',XL, self.hm[self.slv,self.slo,:])*factor
+        XhX += einsum('iu,uim->m',XL, self.hm[self.slo,self.slc,:])*factor
         # =============== line2 ===============
         # Case (23) (S-1)(OV1) GS
         XL = L[1][1][self.sl_S_1_dim2].reshape(self.no,self.nv)
         factor = sqrt((2*self.S-1)/(2*self.S))
-        XhX += einsum('ua,aum->m',XL, self.hm[self.slo,self.slv,:])*factor
+        XhX += einsum('ua,aum->m',XL, self.hm[self.slv,self.slo,:])*factor
         # =============== line3 ===============
         # Case (30) (S-1)(O1O2) GS
         XL = L[1][1][self.sl_S_1_dim3].reshape(self.no,self.no)
@@ -452,7 +464,7 @@ class SI_driver():
         # Case (8) (S-1)(CV1) S(CO0)
         XR = R[1][1][self.sl_S_dim1].reshape(self.nc,self.no)
         factor = -sqrt((2*self.S-1)/(2*self.S+1))/(2*self.S)
-        XhX += einsum('ia,atm,ij,jt->m',XL, self.hm[self.slv,self.slvo,:],self.delta_c, XR)*factor
+        XhX += einsum('ia,atm,ij,jt->m',XL, self.hm[self.slv,self.slo,:],self.delta_c, XR)*factor
         # Case (9) (S-1)(CV1) S(OV0)
         XR = R[1][1][self.sl_S_dim2].reshape(self.no,self.nv)
         factor = sqrt((2*self.S-1)/(2*self.S+1))/(2*self.S)
@@ -469,7 +481,7 @@ class SI_driver():
         factor = sqrt((2*self.S-1)/(self.S))/2.
         XhX += einsum('iu,ubm,ij,jb->m',XL, self.hm[self.slo,self.slv,:],self.delta_c, XR)*factor
         # Case (17) (S-1)(CO1) S(CO0)
-        XR = R[1][1][self.sl_S_dim1].reshape(self.nc,self.nO)
+        XR = R[1][1][self.sl_S_dim1].reshape(self.nc,self.no)
         factor = -sqrt((2*self.S-1)/(2*self.S))
         XhX += einsum('iu,jim,ut,jt->m',XL, self.hm[self.slc,self.slc,:],self.delta_o, XR)*factor
         XhX += einsum('iu,utm,ij,jt->m',XL, self.hm[self.slo,self.slo,:]/(2*self.S-1),self.delta_c, XR)*factor
@@ -501,7 +513,7 @@ class SI_driver():
         # Case (32) (S-1)(O1O2) S(CO0)
         XR = R[1][1][self.sl_S_dim1].reshape(self.nc,self.no)
         factor = -1.0
-        XhX += einsum('vu,jum,tu,jt->m',XL, self.hm[self.slc,self.slo,:],self.delta_o, XR)*factor
+        XhX += einsum('vu,jvm,tu,jt->m',XL, self.hm[self.slc,self.slo,:],self.delta_o, XR)*factor
         # Case (33) (S-1)(O1O2) S(OV0)
         XR = R[1][1][self.sl_S_dim2].reshape(self.no,self.nv)
         factor = 1.0
@@ -520,6 +532,10 @@ class SI_driver():
         factor = -1.0
         XhX += einsum('u,tbm,ut,tb->m',XL, self.hm[self.slo,self.slv,:],(self.delta_o-1/(2*self.S)), XR)*factor
         # Case (40) (S-1)(O1O1) S(CV1) = 0
+        return XhX
+    
+    def interact_S_1S1(self, L, R):
+        XhX = numpy.zeros((3,), dtype=numpy.complex128)
         return XhX
     
     def interact_GSGS(self, L, R):

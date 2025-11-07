@@ -13,7 +13,7 @@ from pyscf.symm import direct_prod
 
 #from line_profiler import profile
 
-from SF_TDA import SF_TDA, mf_info,gen_response_sf,gen_response_sf_mc
+from .SF_TDA import SF_TDA, mf_info,gen_response_sf,gen_response_sf_mc
 au2ev = 27.21138505
 
 def get_irrep_occupancy_directly(mol, mf):
