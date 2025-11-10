@@ -36,6 +36,7 @@ mf.conv_tol = 1e-12
 mf = mf.run()
 
 c = lib.param.LIGHT_SPEED
+ha2eV = 27.2113834
 # ================ X2C(BP) sf+somf Hamilonian ====================
 import sfX2C_soDKH1
 VsoDKH1_a = sfX2C_soDKH1.get_soDKH1_somf(mf,mol,c,iop='x2c',include_mf2e=1,debug=1)
@@ -81,8 +82,10 @@ for i in range(0,len(eo),1):
 from SF_TDA.SF_TDA import SF_TDA
 print(f"{'='*15} Perform SF-up-TDA calculation {'='*15}")
 sf_tda = SF_TDA(mf,isf=1,davidson=0)
-sf_tda.nstates = 10000
-ep, xp = sf_tda.kernel()
+sf_tda.nstates = 20
+sf_tda.kernel()
+ep = sf_tda.e[:sf_tda.nstates]
+xp = sf_tda.v[:,:sf_tda.nstates]
 sf_tda.analyse()
 
 for i in range(0,len(ep),1):
@@ -97,3 +100,27 @@ mysi = SI_driver(mf=mf,
                  states=state_dict,
                  )
 mysi.kernel()
+
+# which gives
+# ================== Summary of S I calculation ==================
+#   No   i-th   Excited state    v**2        Eso(eV)       Esf(eV)
+#    0   0-th   |GS, +1.5⟩       99.1%     -0.000010      0.000000
+#    1   0-th   |GS, -1.5⟩       99.1%     -0.000010      0.000000
+#    2   0-th   |GS, +0.5⟩       99.2%     -0.000010      0.000000
+#    3   0-th   |GS, -0.5⟩       99.2%     -0.000010      0.000000
+#    4   4-th   |S-, -0.5⟩       36.4%      2.326570      2.326849
+#    5   4-th   |S-, -1.5⟩       36.4%      2.326570      2.326849
+#    6   3-th   |S-, -1.5⟩       21.0%      2.326583      2.326849
+#    7   3-th   |S-, -0.5⟩       21.0%      2.326583      2.326849
+#    8   0-th   |S-, -1.5⟩       48.4%      2.326839      2.326849
+#    9   0-th   |S-, -0.5⟩       48.4%      2.326839      2.326849
+#   10   1-th   |S-, -0.5⟩       21.5%      2.327049      2.326849
+#   11   1-th   |S-, -1.5⟩       21.5%      2.327049      2.326849
+#   12   4-th   |S-, -0.5⟩       32.5%      2.327067      2.326849
+#   13   4-th   |S-, -1.5⟩       32.5%      2.327067      2.326849
+#   14   5-th   |S-, -1.5⟩       47.9%      3.965525      3.965721
+#   15   5-th   |S-, -0.5⟩       47.9%      3.965525      3.965721
+#   16   7-th   |S-, -0.5⟩       48.7%      3.965776      3.965721
+#   17   7-th   |S-, -1.5⟩       48.7%      3.965776      3.965721
+#   18   5-th   |S-, -0.5⟩       48.7%      3.966019      3.965721
+#   19   5-th   |S-, -1.5⟩       48.7%      3.966019      3.965721
