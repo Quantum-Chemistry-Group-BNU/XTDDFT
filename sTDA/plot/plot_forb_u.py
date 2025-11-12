@@ -21,18 +21,18 @@ plt.rcParams['lines.linewidth'] = 1
 plt.rcParams['axes.linewidth'] = 1
 
 functional = 'pbe0-st/'
-# mol = 'ttm/'
+mol = 'ttm/'
 # mol = 'bispytm/'
 # mol = 'ttm3ncz/'
 # mol = 'ptm3ncz/'
 # mol = 'mttm2/'
-mol = 'hhcrqpp2/'
+# mol = 'hhcrqpp2/'
 file = '../result/'
 
 # ==== 参数 ====
 # solvent = 'cyclohexane-'
-# solvent = 'toluene-'
-solvent = 'acetonitrile-'
+solvent = 'toluene-'
+# solvent = 'acetonitrile-'
 csv_file = solvent+"UsTDAgsol-orb.csv"
 img_dir = file+mol+functional+'cubeneed/'+'VCUBE/'
 prefix = solvent+"UsTDA-" + mol[:-1]
@@ -79,28 +79,28 @@ for j, o, spin, s in zip([aloc, bloc], [0,1], ["alpha", "beta"], ["α", "β"]):
         # 能级能量
         if j == 0:
             if i == 0:
-                ax.text(j-1.0, energy, f"{energy:4.2f}", va="center", fontsize=15)
-            elif i == 1:
                 ax.text(j-1.0, energy-0.1, f"{energy:4.2f}", va="center", fontsize=15)
-            elif i == 2:
+            elif i == 1:
                 ax.text(j-1.0, energy+0.1, f"{energy:4.2f}", va="center", fontsize=15)
+            elif i == 2:
+                ax.text(j-1.0, energy, f"{energy:4.2f}", va="center", fontsize=15)
             elif i == 3:
-                ax.text(j-1.0, energy-0.05, f"{energy:4.2f}", va="center", fontsize=15)
+                ax.text(j-1.0, energy-0.1, f"{energy:4.2f}", va="center", fontsize=15)
             elif i == 4:
-                ax.text(j-1.0, energy+0.05, f"{energy:4.2f}", va="center", fontsize=15)
+                ax.text(j-1.0, energy+0.1, f"{energy:4.2f}", va="center", fontsize=15)
             else:
                 ax.text(j-1.0, energy, f"{energy:4.2f}", va="center", fontsize=15)
         else:
             if i == 0:
-                ax.text(j+0.4, energy-0.07, f"{energy:4.2f}", va="center", fontsize=15)
+                ax.text(j+0.4, energy-0.1, f"{energy:4.2f}", va="center", fontsize=15)
             elif i == 1:
-                ax.text(j+0.4, energy+0.07, f"{energy:4.2f}", va="center", fontsize=15)
+                ax.text(j+0.4, energy+0.1, f"{energy:4.2f}", va="center", fontsize=15)
             elif i == 2:
                 ax.text(j+0.4, energy, f"{energy:4.2f}", va="center", fontsize=15)
             elif i == 3:
-                ax.text(j+0.4, energy-0.05, f"{energy:4.2f}", va="center", fontsize=15)
+                ax.text(j+0.4, energy-0.1, f"{energy:4.2f}", va="center", fontsize=15)
             elif i == 4:
-                ax.text(j+0.4, energy+0.05, f"{energy:4.2f}", va="center", fontsize=15)
+                ax.text(j+0.4, energy+0.1, f"{energy:4.2f}", va="center", fontsize=15)
             elif i == 5:
                 ax.text(j+0.4, energy+0.02, f"{energy:4.2f}", va="center", fontsize=15)
             else:
@@ -114,30 +114,30 @@ for j, o, spin, s in zip([aloc, bloc], [0,1], ["alpha", "beta"], ["α", "β"]):
         img_path = os.path.join(img_dir, f"{prefix}{index}{spin}.bmp")
         if os.path.exists(img_path):
             img = plt.imread(img_path)
-            imagebox = OffsetImage(img, zoom=0.2)
+            imagebox = OffsetImage(img, zoom=0.19)
             if j == 0:
-                ab = AnnotationBbox(imagebox, (j-1.9, orbfig_loc[i]), frameon=False)
+                ab = AnnotationBbox(imagebox, (j-1.91, orbfig_loc[i]), frameon=False)
             else:
                 ab = AnnotationBbox(imagebox, (j+2.0, orbfig_loc[i]), frameon=False)
             ax.add_artist(ab)
 
 # 添加连接线（按序号对应）
-for i in [0, 1, 5, 6]:
+for i in [0, 1, 3, 4]:
     ax.plot([aloc+line_hlength, bloc - line_hlength],
             [orbenergy[i,1], orbenergy[i,2]], color='gray', linestyle='--', linewidth=1)
-ax.text(1.7, np.sum(orbenergy[0, 1:])/2-0.25, "172(HOMO-1)", ha="center", fontsize=15)
-# ax.text(1, np.sum(orbenergy[1, 1:])/2+0.15, "173(HOMO)", ha="center", fontsize=15)
-# ax.text(0.4, np.sum(orbenergy[2, 1])-0.1, "174(SOMO)", va="center", fontsize=15)
-# ax.text(0.3, np.sum(orbenergy[2, 2])-0.1, "174(SUMO)", va="center", fontsize=15)
+ax.text(1, np.sum(orbenergy[0, 1:])/2-0.22, "135(HOMO-1)", ha="center", fontsize=15)
+ax.text(1, np.sum(orbenergy[1, 1:])/2+0.15, "136(HOMO)", ha="center", fontsize=15)
+ax.text(0.4, np.sum(orbenergy[2, 1]), "137(SOMO)", va="center", fontsize=15)
+ax.text(0.3, np.sum(orbenergy[2, 2]), "137(SUMO)", va="center", fontsize=15)
 # ax.text(0.4, np.sum(orbenergy[3, 1])+0.1, "175(SOMO)", va="center", fontsize=15)
 # ax.text(0.3, np.sum(orbenergy[3, 2])+0.1, "175(SUMO)", va="center", fontsize=15)
 # ax.text(0.4, np.sum(orbenergy[4, 1])+0.05, "176(SOMO)", va="center", fontsize=15)
 # ax.text(0.4, np.sum(orbenergy[4, 2])+0.1, "176(SUMO)", va="center", fontsize=15)
-# # ax.text(1, np.sum(orbenergy[3, 1:])/2-0.25, "254(LOMO)", ha="center", fontsize=15)
-# # ax.text(1, np.sum(orbenergy[4, 1:])/2-0.25, "278(LOMO)", ha="center", fontsize=15)
+ax.text(1, np.sum(orbenergy[3, 1:])/2-0.2, "138(LOMO)", ha="center", fontsize=15)
+ax.text(1, np.sum(orbenergy[4, 1:])/2+0.12, "139(LOMO+1)", ha="center", fontsize=15)
 # # ax.text(1, np.sum(orbenergy[5, 1:])/2+0.15, "279(LOMO)", ha="center", fontsize=15)
 # ax.text(0.5, np.sum(orbenergy[5, 1:])/2+0.2, "178(LOMO+1)", ha="center", fontsize=15)
-ax.text(0.5, np.sum(orbenergy[6, 1:])/2+0.2, "178(LOMO+1)", ha="center", fontsize=15)
+# ax.text(0.5, np.sum(orbenergy[6, 1:])/2+0.2, "178(LOMO+1)", ha="center", fontsize=15)
 
 # ==== 设置图形 ====
 ax.axis("off")
@@ -149,5 +149,5 @@ ax.set_xticks([0,1])
 ax.set_title("E/eV", fontsize=15)
 plt.tight_layout()
 plt.show()
-# fig.savefig("solvent-sUTDA-orb" + '.eps', dpi=600, bbox_inches='tight')
-# fig.savefig("solvent-sUTDA-orb" + '.pdf', dpi=600, bbox_inches='tight')
+fig.savefig("solvent-sUTDA-orb" + '.eps', dpi=600, bbox_inches='tight')
+fig.savefig("solvent-sUTDA-orb" + '.pdf', dpi=600, bbox_inches='tight')

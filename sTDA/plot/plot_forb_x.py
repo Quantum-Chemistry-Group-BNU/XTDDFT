@@ -20,19 +20,20 @@ plt.rcParams['mathtext.sf'] = 'STIXGeneral'
 plt.rcParams['lines.linewidth'] = 1
 plt.rcParams['axes.linewidth'] = 1
 
-functional = 'pbe0-st/'
+# functional = 'pbe0-st/'
+functional = 'tpssh-st-10eV/'
 # mol = 'ttm/'
 # mol = 'bispytm/'
 # mol = 'ttm3ncz/'
 # mol = 'ptm3ncz/'
-mol = 'mttm2/'
-# mol = 'hhcrqpp2/'
+# mol = 'mttm2/'
+mol = 'hhcrqpp2/'
 file = '../result/'
 
 # ==== 参数 ====
 # solvent = 'cyclohexane-'
-solvent = 'toluene-'
-# solvent = 'acetonitrile-'
+# solvent = 'toluene-'
+solvent = 'acetonitrile-'
 csv_file = solvent+"XsTDAgsol-orb.csv"
 # img_dir = os.path.expanduser("~/master/xtddft/sTDA/result/bispytm/pbe0-st/cubeneed/VCUBE")
 img_dir = file+mol+functional+'cubeneed/'+'VCUBE/'
@@ -64,30 +65,45 @@ for i in range(orbenergy.shape[0]):
     if i < nc+no:
         ax.annotate(
             "",  # 不要文字
-            xy=(0-0.02, energy+0.2),  # 箭头的尖端
-            xytext=(0-0.02, energy-0.2),  # 箭头的起点
+            xy=(0-0.02, energy+0.5),  # 箭头的尖端
+            xytext=(0-0.02, energy-0.5),  # 箭头的起点
             arrowprops=dict(arrowstyle="->", color="black", lw=1)
         )
     if i < nc:
         ax.annotate(
             "",  # 不要文字
-            xy=(0+0.02, energy-0.2),  # 箭头的尖端
-            xytext=(0+0.02, energy+0.2),  # 箭头的起点
+            xy=(0+0.02, energy-0.5),  # 箭头的尖端
+            xytext=(0+0.02, energy+0.5),  # 箭头的起点
             arrowprops=dict(arrowstyle="->", color="black", lw=1)
         )
+    # if i == 1:
+    #     ax.annotate(
+    #         "",  # 不要文字
+    #         xy=(0 + 0.02, energy - 0.4),  # 箭头的尖端
+    #         xytext=(0 + 0.02, energy + 0.6),  # 箭头的起点
+    #         arrowprops=dict(arrowstyle="->", color="black", lw=1)
+    #     )
+    #     ax.annotate(
+    #         "",  # 不要文字
+    #         xy=(0 - 0.02, energy + 0.6),  # 箭头的尖端
+    #         xytext=(0 - 0.02, energy - 0.4),  # 箭头的起点
+    #         arrowprops=dict(arrowstyle="->", color="black", lw=1)
+    #     )
     # 能级能量
     if i == 0:
-        ax.text(-0.7, energy-0.05, f"{energy:4.2f}", va="center", fontsize=15)
+        ax.text(-0.7, energy-0.25, f"{energy:4.2f}", va="center", fontsize=15)
     elif i == 1:
-        ax.text(-0.7, energy+0.05, f"{energy:4.2f}", va="center", fontsize=15)
+        ax.text(-0.7, energy+0.25, f"{energy:4.2f}", va="center", fontsize=15)
     elif i == 2:
-        ax.text(-0.7, energy-0.1, f"{energy:4.2f}", va="center", fontsize=15)
+        ax.text(-0.7, energy-0.5, f"{energy:4.2f}", va="center", fontsize=15)
     elif i == 3:
-        ax.text(-0.7, energy+0.1, f"{energy:4.2f}", va="center", fontsize=15)
+        ax.text(-0.7, energy, f"{energy:4.2f}", va="center", fontsize=15)
     elif i == 4:
-        ax.text(-0.7, energy, f"{energy:4.2f}", va="center", fontsize=15)
+        ax.text(-0.7, energy+0.5, f"{energy:4.2f}", va="center", fontsize=15)
+    elif i == 5:
+        ax.text(-0.7, energy-0.25, f"{energy:4.2f}", va="center", fontsize=15)
     else:
-        ax.text(-0.7, energy, f"{energy:4.2f}", va="center", fontsize=15)
+        ax.text(-0.7, energy+0.25, f"{energy:4.2f}", va="center", fontsize=15)
     # 标签
     ax.text(-1.9, orbfig_loc[i], f"{index}", va="center", fontsize=15)
     # 插入轨道图像
@@ -98,13 +114,13 @@ for i in range(orbenergy.shape[0]):
         ab = AnnotationBbox(imagebox, (-1.2, orbfig_loc[i]), frameon=False)
         ax.add_artist(ab)
 
-ax.text(0.4, np.sum(orbenergy[0, 1])-0.05, "274(HOMO-1)", va="center", fontsize=15)
-ax.text(0.4, np.sum(orbenergy[1, 1])+0.05, "275(HOMO)", va="center", fontsize=15)
-ax.text(0.4, np.sum(orbenergy[2, 1])-0.1, "276(SOMO)", va="center", fontsize=15)
-ax.text(0.4, np.sum(orbenergy[3, 1])+0.1, "277(SOMO)", va="center", fontsize=15)
-ax.text(0.4, np.sum(orbenergy[4, 1]), "278(LOMO)", va="center", fontsize=15)
-ax.text(0.4, np.sum(orbenergy[5, 1]), "279(LOMO+1)", va="center", fontsize=15)
-# ax.text(0.4, np.sum(orbenergy[6, 1]), "178(LOMO+1)", va="center", fontsize=15)
+ax.text(0.4, np.sum(orbenergy[0, 1])-0.25, "172(HOMO-1)", va="center", fontsize=15)
+ax.text(0.4, np.sum(orbenergy[1, 1])+0.25, "173(HOMO)", va="center", fontsize=15)
+ax.text(0.4, np.sum(orbenergy[2, 1])-0.5, "174(SOMO)", va="center", fontsize=15)
+ax.text(0.4, np.sum(orbenergy[3, 1]), "175(SOMO)", va="center", fontsize=15)
+ax.text(0.4, np.sum(orbenergy[4, 1])+0.5, "176(SOMO)", va="center", fontsize=15)
+ax.text(0.4, np.sum(orbenergy[5, 1])-0.25, "177(LOMO)", va="center", fontsize=15)
+ax.text(0.4, np.sum(orbenergy[6, 1])+0.25, "178(LOMO+1)", va="center", fontsize=15)
 
 # ==== 设置图形 ====
 ax.axis("off")

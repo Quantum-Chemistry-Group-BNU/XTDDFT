@@ -36,7 +36,7 @@ def iaia_f(qAk_ss, qAj_ss, qBk_tt, qBj_tt, gamma_k, gamma_j, fock_vir, n1, fock_
 
 
 def devide_csf_p_n(iaia, t):
-    # t: t_P, self.truncate
+    # t: t_P, self.Emax
     pcsf = np.where(iaia * unit.ha2eV <= t)
     ncsf = np.where(iaia * unit.ha2eV > t)
     return pcsf, ncsf
@@ -251,12 +251,13 @@ def constractA(pscsfcv_i, pscsfcv_a, nc, no, nv, gamma_k, gamma_j,
 
 
 class XsTDA:
-    def __init__(self, mol, mf, truncate=20.0, cas=True, nstates=10, correct=False, paramtype='os', savedata=False):
+    def __init__(self, mol, mf, Emax=10.0, tp=1e-4, cas=True, nstates=10, correct=False, paramtype='os', savedata=False):
         self.mol = mol
         self.mf = mf
         self.nstates = nstates
         self.cas = cas
-        self.truncate = truncate
+        self.Emax = Emax
+        self.tp = tp
         self.correct = correct
         self.paramtype = paramtype
         self.savedata = savedata
@@ -283,7 +284,7 @@ class XsTDA:
         logger.info(self.mf, 'natm is {}'.format(self.mol.natm))
         print('='*50)
         print('num.orb    mo_energy     mo_occ')
-        for me, o in zip(enumerate(mf.mo_energy), mf.mo_occ):
+        for me, o in zip(enumerate(self.mf.mo_energy), self.mf.mo_occ):
             ind, moei = me
             print(f'{ind + 1:5d}    {moei:10.4f}    {o:8.3f}')
 
@@ -335,7 +336,7 @@ class XsTDA:
         ni = self.mf._numint
         omega, alpha, hyb = ni.rsh_and_hybrid_coeff(self.mf.xc, self.mol.spin)
         print("=" * 50)
-        print('hyb', hyb)
+        print('omega is {}, alpha is {}, hyb is {}'.format(omega, alpha, hyb))
         # record full A matrix diagonal element, to calculate overlap
         pscsf_fdiag_a = np.zeros((nocc_a, nvir_a), dtype=bool)
         pscsf_fdiag_b = np.zeros((nocc_b, nvir_b), dtype=bool)
@@ -345,7 +346,7 @@ class XsTDA:
             upeomo = np.where(mo_occ == 1)[0]  # un-paired electron occpied molecular orbital
             somo_high = mo_energy[upeomo[-1]]
             somo_low = mo_energy[upeomo[0]]
-            deps = (1. + 0.8 * hyb) * self.truncate / unit.ha2eV
+            deps = (1. + 0.8 * hyb) * self.Emax / unit.ha2eV
             vthr = (deps * 2 + somo_high)
             othr = (somo_low - deps * 2)
             assert vthr > othr
@@ -446,7 +447,7 @@ class XsTDA:
         si = 0.5 * self.mol.spin  # coefficient in spin adapted correct term
         delta_max = 0  # correct term
         sigma_k = 0  # correct term
-        if self.truncate:
+        if self.Emax:
             # # encapsulate to a function, same with upper code
             t0 = time.time()
             # CV(aa)-CV(aa)
@@ -505,10 +506,10 @@ class XsTDA:
             iaiaov_a = iaia[nc*nv:(nc+no)*nv].reshape(no, nv)
             iaiaco_b = iaia[(nc+no)*nv:(nc+no)*nv+nc*no].reshape(nc, no)
             iaiacv_b = iaia[(nc+no)*nv+nc*no:].reshape(nc, nv)
-            pcsfcv_a, ncsfcv_a = devide_csf_p_n(iaiacv_a, self.truncate)
-            pcsfov_a, ncsfov_a = devide_csf_p_n(iaiaov_a, self.truncate)
-            pcsfco_b, ncsfco_b = devide_csf_p_n(iaiaco_b, self.truncate)
-            pcsfcv_b, ncsfcv_b = devide_csf_p_n(iaiacv_b, self.truncate)
+            pcsfcv_a, ncsfcv_a = devide_csf_p_n(iaiacv_a, self.Emax)
+            pcsfov_a, ncsfov_a = devide_csf_p_n(iaiaov_a, self.Emax)
+            pcsfco_b, ncsfco_b = devide_csf_p_n(iaiaco_b, self.Emax)
+            pcsfcv_b, ncsfcv_b = devide_csf_p_n(iaiacv_b, self.Emax)
             pcsfcv = union(nc, pcsfcv_a, pcsfcv_b)
             ncsfcv = intersec(nc, ncsfcv_a, ncsfcv_b)
             iajb = np.zeros(len(ncsfcv[0])+len(ncsfov_a[0])+len(ncsfco_b[0])+len(ncsfcv[0]))
@@ -659,10 +660,17 @@ class XsTDA:
             pcsfdim = len(pcsfcv[0]) + len(pcsfov_a[0]) + len(pcsfco_b[0]) + len(pcsfcv[0])
             scsfdim = len(pscsfcv_i) + len(pscsfov_a_i) + len(pscsfco_b_i) + len(pscsfcv_i) - pcsfdim
             ncsfdim = len(iajb) - scsfdim
-            logger.info(self.mf, 'A matrix dimension is {}'.format(Adim))
-            logger.info(self.mf, '{} CSFs in pcsf'.format(pcsfdim))
-            logger.info(self.mf, '{} CSFs in scsf'.format(scsfdim))
-            logger.info(self.mf, '{} CSFs in ncsf'.format(ncsfdim))
+            logger.info(self.mf, 'After select, A matrix dimension is {}'.format(Adim))
+            logger.info(self.mf, '{} CSFs in pcsf ({} in CV(aa), {} in OV(aa), {} in CO(bb), {} in CV(bb))'.format(
+                pcsfdim, len(pcsfcv[0]), len(pcsfov_a[0]), len(pcsfco_b[0]), len(pcsfcv[0])
+            ))
+            logger.info(self.mf, '{} CSFs in scsf ({} in CV(aa), {} in OV(aa), {} in CO(bb), {} in CV(bb))'.format(
+                scsfdim, len(pscsfcv_i)-len(pcsfcv[0]), len(pscsfov_a_i)-len(pcsfov_a[0]),
+                len(pscsfco_b_i)-len(pcsfco_b[0]), len(pscsfcv_i)-len(pcsfcv[0])
+            ))
+            logger.info(self.mf, '{} CSFs in ncsf ({} in CV(aa), {} in OV(aa), {} in CO(bb), {} in CV(bb))'.format(
+                ncsfdim, nc*nv-len(pscsfcv_i), no*nv-len(pscsfov_a_i), nc*no-len(pscsfco_b_i), nc*nv-len(pscsfcv_i)
+            ))
         else:
             Adim = (nc+no)*nv+nc*(no+nv)
             logger.info(self.mf, 'no * nv is {}'.format(Adim))
@@ -954,7 +962,7 @@ class XsTDA:
         # self.v = utils.so2st(self.v[:, :self.nstates], lcva=lcva, lova=lova, lcob=lcob, lcvb=lcvb)
         # self.v = utils.so2st(self.v[:, :self.nstates], nc, no, nv)
         self.v = self.v[:, :self.nstates]
-        if self.truncate:
+        if self.Emax:
             self.xycv_a = self.v.T[:, :lcva]  # V_cv_a
             self.xyov_a = self.v.T[:, lcva:lcva+lova]  # V_ov_a
             self.xyco_b = self.v.T[:, lcva+lova:lcva+lova+lcob]  # V_co_b
@@ -997,7 +1005,7 @@ class XsTDA:
         t_all = t_all_1 - t_all_0
         print('=' * 50)
         print("contract Fock matrix use          {:8.4f} s".format(t_getfock))
-        if self.truncate:
+        if self.Emax:
             print("select PCSF use                   {:8.4f} s".format(t_pcsf))
             print("select SCSF use                   {:8.4f} s".format(t_scsf))
         print("contract A matrix use             {:8.4f} s".format(t_cA))
@@ -1028,7 +1036,7 @@ class XsTDA:
         dipole_ao = self.mol.intor_symmetric("int1e_r", comp=3)  # dipole moment, comp=3 is 3 axis
         dipole_mo_a = np.einsum('xpq,pi,qj->xij', dipole_ao, orbo_a, orbv_a, optimize=True)
         dipole_mo_b = np.einsum('xpq,pi,qj->xij', dipole_ao, orbo_b, orbv_b, optimize=True)
-        if self.truncate:
+        if self.Emax:
             dipole_mocv_a = dipole_mo_a[:, self.pscsfcv_i, self.pscsfcv_a]
             dipole_moov_a = dipole_mo_a[:, self.nc+self.pscsfov_a_i, self.pscsfov_a_a]
             dipole_moco_b = dipole_mo_b[:, self.pscsfco_b_i, self.pscsfco_b_a]
@@ -1062,7 +1070,7 @@ class XsTDA:
         dip_meg_ao = self.mol.intor('int1e_cg_irxp', comp=3, hermi=2)  # transition magnetic dipole moment
         dip_meg_mo_a = np.einsum('xpq,pi,qj->xij', dip_meg_ao, orbo_a, orbv_a, optimize=True)
         dip_meg_mo_b = np.einsum('xpq,pi,qj->xij', dip_meg_ao, orbo_b, orbv_b, optimize=True)
-        if self.truncate:
+        if self.Emax:
             dip_ele_mocv_a = dip_ele_mo_a[:, self.pscsfcv_i, self.pscsfcv_a]
             dip_ele_moov_a = dip_ele_mo_a[:, self.nc+self.pscsfov_a_i, self.pscsfov_a_a]
             dip_ele_moco_b = dip_ele_mo_b[:, self.pscsfco_b_i, self.pscsfco_b_a]
@@ -1102,7 +1110,7 @@ class XsTDA:
         nv = self.nv
         no = self.no
         fnc = self.frozen_nc
-        if self.truncate:
+        if self.Emax:
             self.v = utils.so2st(self.v[:, :self.nstates], lcva=self.lcva, lova=self.lova, lcob=self.lcob, lcvb=self.lcvb)
         else:
             self.v = utils.so2st(self.v[:, :self.nstates], nc, no, nv)
@@ -1116,13 +1124,21 @@ class XsTDA:
             x_co_bb = value[self.lcva + self.lova:self.lcva + self.lova + self.lcob]
             x_cv_bb = value[self.lcva + self.lova + self.lcob:]
             # print(f'Excited state {nstate + 1} {self.e[nstate] * unit.ha2eV:10.5f} eV')
+
             print(
                 f'D{nstate + 1}' + r"    w:" + f'{self.e[nstate] * unit.ha2eV:10.4f} eV'
                 + r"    d<S^2>:" + f'{self.dS2[nstate]:8.4f}'
                 + r"    f:" + f'{self.os[nstate]:8.4f}'
             )
+            print(
+                r"CV(0): " + f"{np.sum(x_cv_aa ** 2 * 100):5.2f}%"
+                + r"    OV(0): " + f"{np.sum(x_ov_aa ** 2 * 100):5.2f}%"
+                + r"    CO(0): " + f"{np.sum(x_co_bb ** 2 * 100):5.2f}%"
+                + r"    CV(1): " + f"{np.sum(x_cv_bb ** 2 * 100):5.2f}%"
+            )
+
             # out_excittype = np.argmax((np.max(abs(x_cv_aa)), np.max(abs(x_ov_aa)), np.max(abs(x_co_bb)), np.max(abs(x_cv_bb))))
-            if self.truncate:
+            if self.Emax:
                 for i in np.where(abs(x_cv_aa) > 0.1)[0]:
                     print(f'    CV(0) {fnc + self.pscsfcv_i[i] + 1:3d} -> {fnc + self.pscsfcv_a[i] + 1 + nc + no:3d}'
                           + f'    c_i: {x_cv_aa[i]:8.5f}    Per: {100 * x_cv_aa[i] ** 2:5.2f}%')
@@ -1177,7 +1193,7 @@ class XsTDA:
         # orbital = np.unique(np.array(orbital))  # only include excited orbital
         orbital = np.arange(np.min(orbital), np.max(orbital) + 1, dtype=np.int64)
         for i in orbital:
-            cubegen.orbital(mol, out_filename+str(i+1)+'.cube', mf.mo_coeff[:, i])
+            cubegen.orbital(mol, out_filename+str(i+1)+'.cube', self.mf.mo_coeff[:, i])
         # export molden file
         c_loc_orth = lo.orth.orth_ao(mol)
         molden.from_mo(mol, out_filename + '.molden', c_loc_orth)
@@ -1197,12 +1213,11 @@ if __name__ == "__main__":
         unit="A",
         # unit="B",  # https://doi.org/10.1016/j.comptc.2014.02.023 use bohr
         # basis='aug-cc-pvtz',
-        # basis='sto-3g',
         basis='6-31g**',
-        # basis='cc-pvdz',
         # cart = True,
         spin=1,
         charge=1,
+        symmetry=True,
         verbose=4
     )
     # path = '/home/whb/Documents/TDDFT/orcabasis/'
@@ -1214,26 +1229,28 @@ if __name__ == "__main__":
     # mol.basis = basis
     # mol.build()
 
-    # add solvents
-    t_dft0 = time.time()
-    mf = dft.ROKS(mol).SMD()
-    # mf = dft.ROKS(mol).PCM()
-    # mf.with_solvent.method = 'COSMO'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
-    # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
-    # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
-    mf.with_solvent.eps = 2.3741  # for toluene 甲苯
-    # mf.with_solvent.eps = 35.688  # for Acetonitrile 乙腈
-
+    # # add solvents
     # t_dft0 = time.time()
-    # mf = dft.ROKS(mol)
-    mf.conv_tol = 1e-8
-    mf.conv_tol_grad = 1e-5
+    # mf = dft.ROKS(mol).SMD()
+    # # mf = dft.ROKS(mol).PCM()
+    # # mf.with_solvent.method = 'COSMO'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
+    # # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
+    # # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
+    # mf.with_solvent.eps = 2.3741  # for toluene 甲苯
+    # # mf.with_solvent.eps = 35.688  # for Acetonitrile 乙腈
+
+    t_dft0 = time.time()
+    mf = dft.ROKS(mol)
+    mf.conv_tol = 1e-8  # same with orca tightscf criterion
+    mf.conv_tol_grad = 1e-5  # same with orca tightscf criterion
     mf.max_cycle = 200
     # xc = 'svwn'
     # xc = 'blyp'
-    # xc = 'b3lyp'
+    # xc = 'tpssh'
     # xc = 'wb97xd'
+    # xc = 'b3lyp'
     xc = 'pbe0'
+    # xc = 'tpss0'  # ax=0.25, same with pbe0
     # xc = 'pbe38'
     # xc = '0.50*HF + 0.50*B88 + GGA_C_LYP'  # BHHLYP
     # xc = 'hf'
@@ -1245,6 +1262,7 @@ if __name__ == "__main__":
     mf.kernel()
     # mo1, mo2 = mf.stability()  # stable test
     # mf.kernel(mo_coeff=mo1)  # if do not stable, use other wave function as initial guess
+    mf.analyze()
     t_dft1 = time.time()
     print("dft use {} s".format(t_dft1 - t_dft0))
     print('='*50)
@@ -1254,7 +1272,7 @@ if __name__ == "__main__":
     xstda.info()
     xstda.nstates = 12
     xstda.cas = True
-    xstda.truncate = 20
+    xstda.Emax = 10.0
     xstda.correct = False
     e_eV, os, rs, v, pscsf = xstda.kernel()
-    # xstda.analyze(out_filename='vacuum-XsTDA')
+    # xstda.analyze(out_filename='vacuum-XsTDA-f2bo')

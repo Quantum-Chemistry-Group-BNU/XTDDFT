@@ -36,7 +36,7 @@ def iaia_f(qAk_ss, qAj_ss, qBk_tt, qBj_tt, gamma_k, gamma_j, fock_vir, n1, fock_
 
 
 def devide_csf_p_n(iaia, t):
-    # t: t_P, self.truncate
+    # t: t_P, self.Emax
     pcsf = np.where(iaia * unit.ha2eV <= t)
     ncsf = np.where(iaia * unit.ha2eV > t)
     return pcsf, ncsf
@@ -170,12 +170,13 @@ def constractA(pscsfcv_i, pscsfcv_a, nc, no, nv, gamma_k, gamma_j,
 
 
 class UsTDA:
-    def __init__(self, mol, mf, truncate=20.0, cas=True, nstates=10, correct=False, paramtype='os', savedata=False):
+    def __init__(self, mol, mf, Emax=10.0, tp=1e-4, cas=True, nstates=10, correct=False, paramtype='os', savedata=False):
         self.mol = mol
         self.mf = mf
         self.nstates = nstates
         self.cas = cas
-        self.truncate = truncate
+        self.Emax = Emax
+        self.tp = tp
         self.correct = correct
         self.paramtype = paramtype
         self.savedata = savedata
@@ -256,7 +257,7 @@ class UsTDA:
         ni = self.mf._numint
         omega, alpha, hyb = ni.rsh_and_hybrid_coeff(self.mf.xc, mol.spin)
         print("=" * 50)
-        print('hyb', hyb)
+        print('omega is {}, alpha is {}, hyb is {}'.format(omega, alpha, hyb))
         # record full A matrix diagonal element, to calculate overlap
         pscsf_fdiag_a = np.zeros((nocc_a, nvir_a), dtype=bool)
         pscsf_fdiag_b = np.zeros((nocc_b, nvir_b), dtype=bool)
@@ -273,7 +274,7 @@ class UsTDA:
             somo_low = mo_energy[0, upeomo[0]]
             sumo_high = mo_energy[1, upeomo[-1]]
             sumo_low = mo_energy[1, upeomo[0]]
-            deps = (1. + 0.8 * hyb) * self.truncate / unit.ha2eV
+            deps = (1. + 0.8 * hyb) * self.Emax / unit.ha2eV
             vthr_a = (deps * 2 + somo_high)
             othr_a = (somo_low - deps * 2)
             vthr_b = (deps * 2 + sumo_high)
@@ -358,7 +359,7 @@ class UsTDA:
         fock_b_vir = fock_b[nocc_b:, nocc_b:]
         del S_sqrt, S, eigvals, eigvecs, C_prime_a, C_prime_b, mo_energy, mo_coeff, mo_occ,\
             fock, fock_a, fock_b, p0, p1, shl0, shl1, ao_slices, nocc_a, nocc_b, nvir_a, nvir_b
-        if self.truncate:
+        if self.Emax:
             # Section: construct diagonal A matrix
             # # CV(aa)-CV(aa)
             # iaiakcv_a = np.einsum('nmia, nmia, nm->ia', qAk_aa[:, None, :nc, :], qBk_aa[None, :, :nc, :], gamma_k)
@@ -443,18 +444,18 @@ class UsTDA:
             iaiaov_a = iaia[nc*nv:(nc+no)*nv].reshape(no, nv)
             iaiaco_b = iaia[(nc+no)*nv:(nc+no)*nv+nc*no].reshape(nc, no)
             iaiacv_b = iaia[(nc+no)*nv+nc*no:].reshape(nc, nv)
-            # pcsfcv_a = np.where(iaiacv_a * unit.ha2eV <= self.truncate)
-            # ncsfcv_a = np.where(iaiacv_a * unit.ha2eV > self.truncate)
-            # pcsfov_a = np.where(iaiaov_a * unit.ha2eV <= self.truncate)
-            # ncsfov_a = np.where(iaiaov_a * unit.ha2eV > self.truncate)
-            # pcsfco_b = np.where(iaiaco_b * unit.ha2eV <= self.truncate)
-            # ncsfco_b = np.where(iaiaco_b * unit.ha2eV > self.truncate)
-            # pcsfcv_b = np.where(iaiacv_b * unit.ha2eV <= self.truncate)
-            # ncsfcv_b = np.where(iaiacv_b * unit.ha2eV > self.truncate)
-            pcsfcv_a, ncsfcv_a = devide_csf_p_n(iaiacv_a, self.truncate)
-            pcsfov_a, ncsfov_a = devide_csf_p_n(iaiaov_a, self.truncate)
-            pcsfco_b, ncsfco_b = devide_csf_p_n(iaiaco_b, self.truncate)
-            pcsfcv_b, ncsfcv_b = devide_csf_p_n(iaiacv_b, self.truncate)
+            # pcsfcv_a = np.where(iaiacv_a * unit.ha2eV <= self.Emax)
+            # ncsfcv_a = np.where(iaiacv_a * unit.ha2eV > self.Emax)
+            # pcsfov_a = np.where(iaiaov_a * unit.ha2eV <= self.Emax)
+            # ncsfov_a = np.where(iaiaov_a * unit.ha2eV > self.Emax)
+            # pcsfco_b = np.where(iaiaco_b * unit.ha2eV <= self.Emax)
+            # ncsfco_b = np.where(iaiaco_b * unit.ha2eV > self.Emax)
+            # pcsfcv_b = np.where(iaiacv_b * unit.ha2eV <= self.Emax)
+            # ncsfcv_b = np.where(iaiacv_b * unit.ha2eV > self.Emax)
+            pcsfcv_a, ncsfcv_a = devide_csf_p_n(iaiacv_a, self.Emax)
+            pcsfov_a, ncsfov_a = devide_csf_p_n(iaiaov_a, self.Emax)
+            pcsfco_b, ncsfco_b = devide_csf_p_n(iaiaco_b, self.Emax)
+            pcsfcv_b, ncsfcv_b = devide_csf_p_n(iaiacv_b, self.Emax)
             pcsfcv = union(nc, pcsfcv_a, pcsfcv_b)
             ncsfcv = intersec(nc, ncsfcv_a, ncsfcv_b)
             iajb = np.zeros(len(ncsfcv[0])+len(ncsfov_a[0])+len(ncsfco_b[0])+len(ncsfcv[0]))
@@ -589,7 +590,7 @@ class UsTDA:
             # del iajbkcv_a, iajbkov_a, iajbkco_b, iajbkcv_b, iajbcv_a, iajbov_a, iajbco_b, iajbcv_b,\
             #     iaia, iajbline, iaia_ncsf, iaiacv_a, iaiaov_a, iaiaco_b, iaiacv_b
 
-            scsf = np.where(iajb >= 1e-4)[0]
+            scsf = np.where(iajb >= self.tp)[0]
             # # encapsulate to a function, same with upper code
             # CV(aa)
             pscsfcv_a_i, pscsfcv_a_a, scsf = devide_csf_ps(pcsfcv, ncsfcv, scsf)
@@ -605,9 +606,17 @@ class UsTDA:
             scsfdim = len(pscsfcv_i) + len(pscsfov_a_i) + len(pscsfco_b_i) + len(pscsfcv_i) - pcsfdim
             ncsfdim = len(iajb) - scsfdim
             logger.info(self.mf, 'A matrix dimension is {}'.format(Adim))
-            logger.info(self.mf, '{} CSFs in pcsf'.format(pcsfdim))
-            logger.info(self.mf, '{} CSFs in scsf'.format(scsfdim))
-            logger.info(self.mf, '{} CSFs in ncsf'.format(ncsfdim))
+            logger.info(self.mf, '{} CSFs in pcsf ({} in CV(aa), {} in OV(aa), {} in CO(bb), {} in CV(bb))'.format(
+                pcsfdim, len(pcsfcv[0]), len(pcsfov_a[0]), len(pcsfco_b[0]), len(pcsfcv[0])
+            ))
+            logger.info(self.mf, '{} CSFs in scsf ({} in CV(aa), {} in OV(aa), {} in CO(bb), {} in CV(bb))'.format(
+                scsfdim, len(pscsfcv_i) - len(pcsfcv[0]), len(pscsfov_a_i) - len(pcsfov_a[0]),
+                         len(pscsfco_b_i) - len(pcsfco_b[0]), len(pscsfcv_i) - len(pcsfcv[0])
+            ))
+            logger.info(self.mf, '{} CSFs in ncsf ({} in CV(aa), {} in OV(aa), {} in CO(bb), {} in CV(bb))'.format(
+                ncsfdim, nc * nv - len(pscsfcv_i), no * nv - len(pscsfov_a_i), nc * no - len(pscsfco_b_i),
+                         nc * nv - len(pscsfcv_i)
+            ))
         else:
             Adim = (nc+no)*nv+nc*(no+nv)
             logger.info(self.mf, 'no * nv is {}'.format(Adim))
@@ -888,7 +897,7 @@ class UsTDA:
         self.e_eV = self.e[:self.nstates] * unit.ha2eV
         # logger.info(self.mf, "my stda result is \n{}".format(self.e_eV))
         self.v = self.v[:, :self.nstates]
-        if self.truncate:
+        if self.Emax:
             self.xycv_a = self.v.T[:, :lcva]  # V_cv_a
             self.xyov_a = self.v.T[:, lcva:lcva + lova]  # V_ov_a
             self.xyco_b = self.v.T[:, lcva + lova:lcva + lova + lcob]  # V_co_b
@@ -934,7 +943,7 @@ class UsTDA:
         t_all = t_all_1 - t_all_0
         print('='*50)
         print("contract Fock matrix use          {:8.4f} s".format(t_getfock))
-        if self.truncate:
+        if self.Emax:
             print("select PCSF use                   {:8.4f} s".format(t_pcsf))
             print("select SCSF use                   {:8.4f} s".format(t_scsf))
         print("contract A matrix use             {:8.4f} s".format(t_cA))
@@ -956,7 +965,7 @@ class UsTDA:
         Svcab = np.einsum('pq,pi,qj->ij', S, orbv_a, orbo_b, optimize=True)
         Svcba = np.einsum('pq,pi,qj->ij', S, orbv_b, orbo_a, optimize=True)
         Svvab = np.einsum('pq,pi,qj->ij', S, orbv_a, orbv_b, optimize=True)
-        if self.truncate:
+        if self.Emax:
             # here can not use truncate csfs to calculate dS2,
             # so transform to norm (not truncate) format to calculate
             xycv_a = np.zeros((self.nstates, self.nc, self.nv))
@@ -1005,7 +1014,7 @@ class UsTDA:
         dipole_ao = self.mol.intor_symmetric("int1e_r", comp=3)  # dipole moment, comp=3 is 3 axis
         dipole_mo_a = np.einsum('xpq,pi,qj->xij', dipole_ao, orbo_a, orbv_a, optimize=True)
         dipole_mo_b = np.einsum('xpq,pi,qj->xij', dipole_ao, orbo_b, orbv_b, optimize=True)
-        if self.truncate:
+        if self.Emax:
             dipole_mocv_a = dipole_mo_a[:, self.pscsfcv_i, self.pscsfcv_a]
             dipole_moov_a = dipole_mo_a[:, self.nc+self.pscsfov_a_i, self.pscsfov_a_a]
             dipole_moco_b = dipole_mo_b[:, self.pscsfco_b_i, self.pscsfco_b_a]
@@ -1039,7 +1048,7 @@ class UsTDA:
         dip_meg_ao = self.mol.intor('int1e_cg_irxp', comp=3, hermi=2)  # transition magnetic dipole moment
         dip_meg_mo_a = np.einsum('xpq,pi,qj->xij', dip_meg_ao, orbo_a, orbv_a, optimize=True)
         dip_meg_mo_b = np.einsum('xpq,pi,qj->xij', dip_meg_ao, orbo_b, orbv_b, optimize=True)
-        if self.truncate:
+        if self.Emax:
             dip_ele_mocv_a = dip_ele_mo_a[:, self.pscsfcv_i, self.pscsfcv_a]
             dip_ele_moov_a = dip_ele_mo_a[:, self.nc+self.pscsfov_a_i, self.pscsfov_a_a]
             dip_ele_moco_b = dip_ele_mo_b[:, self.pscsfco_b_i, self.pscsfco_b_a]
@@ -1081,7 +1090,7 @@ class UsTDA:
         fnc = self.frozen_nc
         out_cube = [0, np.argmax(self.os)]  # only output 1st excited state and max os excited state orbital
         orbital = []  # record output orbital number
-        if self.truncate:
+        if self.Emax:
             self.v = utils.so2st(self.v[:, :self.nstates], lcva=self.lcva, lova=self.lova, lcob=self.lcob, lcvb=self.lcvb)
         else:
             self.v = utils.so2st(self.v[:, :self.nstates], nc, no, nv)
@@ -1098,8 +1107,14 @@ class UsTDA:
                 + r"    d<S^2>:" + f'{self.dS2[nstate]:8.4f}'
                 + r"    f:" + f'{self.os[nstate]:8.4f}'
             )
+            print(
+                r"CV(0): " + f"{np.sum(x_cv_aa ** 2 * 100):5.2f}%"
+                + r"    OV(0): " + f"{np.sum(x_ov_aa ** 2 * 100):5.2f}%"
+                + r"    CO(0): " + f"{np.sum(x_co_bb ** 2 * 100):5.2f}%"
+                + r"    CV(1): " + f"{np.sum(x_cv_bb ** 2 * 100):5.2f}%"
+            )
             # out_excittype = np.argmax((np.max(abs(x_cv_aa)), np.max(abs(x_ov_aa)), np.max(abs(x_co_bb)), np.max(abs(x_cv_bb))))
-            if self.truncate:
+            if self.Emax:
                 for i in np.where(abs(x_cv_aa) > 0.1)[0]:
                     print(f'    CV(0) {fnc+self.pscsfcv_i[i]+1:3d}a -> {fnc+self.pscsfcv_a[i]+1+nc+no:3d}a'
                           + f'    c_i: {x_cv_aa[i]:8.5f}    Per: {100*x_cv_aa[i]**2:5.2f}%')
@@ -1153,8 +1168,8 @@ class UsTDA:
         # orbital = np.unique(np.array(orbital))  # only include excited orbital
         orbital = np.arange(np.min(orbital), np.max(orbital)+1, dtype=np.int64)
         for i in orbital:
-            cubegen.orbital(mol, out_filename+str(i + 1)+'alpha.cube', mf.mo_coeff[0, :, i])
-            cubegen.orbital(mol, out_filename+str(i + 1)+'beta.cube', mf.mo_coeff[1, :, i])
+            cubegen.orbital(mol, out_filename+str(i + 1)+'alpha.cube', self.mf.mo_coeff[0, :, i])
+            cubegen.orbital(mol, out_filename+str(i + 1)+'beta.cube', self.mf.mo_coeff[1, :, i])
         # export molden file
         c_loc_orth = lo.orth.orth_ao(mol)
         molden.from_mo(mol, out_filename+'.molden', c_loc_orth)
@@ -1174,11 +1189,10 @@ if __name__ == "__main__":
         unit="A",
         # unit="B",  # https://doi.org/10.1016/j.comptc.2014.02.023 use bohr
         # basis='aug-cc-pvtz',
-        # basis='sto-3g',
-        # basis='cc-pvdz',
         basis='6-31g**',
         spin=1,
         charge=1,
+        # symmetry=True,
         verbose=4
     )
     # path = '/home/whb/Documents/TDDFT/orcabasis/'
@@ -1190,37 +1204,38 @@ if __name__ == "__main__":
     # mol.basis = basis
     # mol.build()
 
-    # add solvents
-    t_dft0 = time.time()
-    mf = dft.UKS(mol).SMD()
-    # mf = dft.UKS(mol).PCM()
-    # mf.with_solvent.method = 'COSMO'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
-    # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
-    # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
-    mf.with_solvent.eps = 2.3741  # for toluene 甲苯
-    # mf.with_solvent.eps = 35.688  # for Acetonitrile 乙腈
-
+    # # add solvents
     # t_dft0 = time.time()
-    # mf = dft.UKS(mol)
-    mf.conv_tol = 1e-8
-    mf.conv_tol_grad = 1e-5
+    # mf = dft.UKS(mol).SMD()
+    # # mf = dft.UKS(mol).PCM()
+    # # mf.with_solvent.method = 'COSMO'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
+    # # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
+    # # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
+    # mf.with_solvent.eps = 2.3741  # for toluene 甲苯
+    # # mf.with_solvent.eps = 35.688  # for Acetonitrile 乙腈
+
+    t_dft0 = time.time()
+    mf = dft.UKS(mol)
+    mf.conv_tol = 1e-8  # same with orca tightscf criterion
+    mf.conv_tol_grad = 1e-5  # same with orca tightscf criterion
     mf.max_cycle = 200
     # xc = 'svwn'
     # xc = 'blyp'
     # xc = 'b3lyp'
     # xc = 'wb97xd3'
-    xc = 'pbe0'
+    # xc = 'pbe0'
     # xc = 'pbe38'
-    # xc = '0.50*HF + 0.50*B88 + GGA_C_LYP'  # BHHLYP
+    xc = '0.50*HF + 0.50*B88 + GGA_C_LYP'  # BHHLYP
     # xc = 'hf'
     mf.xc = xc
-    # xc = 'bhhlyp'
+    xc = 'bhhlyp'
     # mf.grids.level = 9
     mf.conv_check = False
-    # mf.level_shift = 0.6
+    mf.level_shift = 0.6
     mf.kernel()
-    # mf.stability()  # stable test
+    # mo1, mo2 = mf.stability()  # stable test
     # mf.kernel(mo_coeff=mo1)  # if do not stable, use other wave function as initial guess
+    # mf.analyze()
     t_dft1 = time.time()
     print("dft use {} s".format(t_dft1 - t_dft0))
     print('=' * 50)
@@ -1228,8 +1243,8 @@ if __name__ == "__main__":
     # os.environ["OMP_NUM_THREADS"] = "1"  # test one core time-consuming
     ustda = UsTDA(mol, mf, nstates=10)
     ustda.info()
-    ustda.nstates = 12
-    ustda.truncate = 20.0
+    ustda.nstates = 20
+    ustda.Emax = 10.0
     ustda.cas = True
     ustda.paramtype = 'os'
     e_eV, os, rs, v, pscsf = ustda.kernel()
