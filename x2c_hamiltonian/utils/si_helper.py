@@ -338,19 +338,19 @@ def si2driver(mf,S,Vso,gs=1,nstates=[None,None],analyze=0):
         hmDD[m][slS_CV0,slS_OV0] = numpy.einsum('aibj->iajb',hm[map_hm['S_CV(0)']['S_OV(0)']][m]).reshape(dimCV,dimOV)
         hmDD[m][slS_CV0,slS_CV1] = numpy.einsum('aibj->iajb',hm[map_hm['S_CV(0)']['S_CV(1)']][m]).reshape(dimCV,dimCV)
 
-        hmDD[m][slS_CO0,slS_CV0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_CV(0)']['S_CO(0)']][-m]).reshape(dimCO,dimCV).conjugate()
+        hmDD[m][slS_CO0,slS_CV0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_CV(0)']['S_CO(0)']][m]).reshape(dimCO,dimCV)
         hmDD[m][slS_CO0,slS_CO0] = numpy.einsum('aibj->iajb',hm[map_hm['S_CO(0)']['S_CO(0)']][m]).reshape(dimCO,dimCO)
         hmDD[m][slS_CO0,slS_OV0] = numpy.einsum('aibj->iajb',hm[map_hm['S_CO(0)']['S_OV(0)']][m]).reshape(dimCO,dimOV)
         hmDD[m][slS_CO0,slS_CV1] = numpy.einsum('aibj->iajb',hm[map_hm['S_CO(0)']['S_CV(1)']][m]).reshape(dimCO,dimCV)
 
-        hmDD[m][slS_OV0,slS_CV0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_CV(0)']['S_OV(0)']][-m]).reshape(dimOV,dimCV).conjugate()
-        hmDD[m][slS_OV0,slS_CO0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_CO(0)']['S_OV(0)']][-m]).reshape(dimOV,dimCO).conjugate()
+        hmDD[m][slS_OV0,slS_CV0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_CV(0)']['S_OV(0)']][m]).reshape(dimOV,dimCV)
+        hmDD[m][slS_OV0,slS_CO0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_CO(0)']['S_OV(0)']][m]).reshape(dimOV,dimCO)
         hmDD[m][slS_OV0,slS_OV0] = numpy.einsum('aibj->iajb',hm[map_hm['S_OV(0)']['S_OV(0)']][m]).reshape(dimOV,dimOV)
         hmDD[m][slS_OV0,slS_CV1] = numpy.einsum('aibj->iajb',hm[map_hm['S_OV(0)']['S_CV(1)']][m]).reshape(dimOV,dimCV)
 
-        hmDD[m][slS_CV1,slS_CV0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_CV(0)']['S_CV(1)']][-m]).reshape(dimCV,dimCV).conjugate()
-        hmDD[m][slS_CV1,slS_CO0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_CO(0)']['S_CV(1)']][-m]).reshape(dimCV,dimCO).conjugate()
-        hmDD[m][slS_CV1,slS_OV0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_OV(0)']['S_CV(1)']][-m]).reshape(dimCV,dimOV).conjugate()
+        hmDD[m][slS_CV1,slS_CV0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_CV(0)']['S_CV(1)']][m]).reshape(dimCV,dimCV)
+        hmDD[m][slS_CV1,slS_CO0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_CO(0)']['S_CV(1)']][m]).reshape(dimCV,dimCO)
+        hmDD[m][slS_CV1,slS_OV0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_OV(0)']['S_CV(1)']][m]).reshape(dimCV,dimOV)
         hmDD[m][slS_CV1,slS_CV1] = numpy.einsum('aibj->iajb',hm[map_hm['S_CV(1)']['S_CV(1)']][m]).reshape(dimCV,dimCV)
         # D-Q
         hmDQ[m] = numpy.zeros(((nc+no)*nv + nc*(nv+no),nc*nv),dtype=numpy.complex128)
@@ -426,6 +426,8 @@ def si2driver(mf,S,Vso,gs=1,nstates=[None,None],analyze=0):
     print(numpy.sort(numpy.diag(Omega))[:20] * unit.ha2eV)
     print(f"The E_soc (in eV) --")
     print(eso[:20] * unit.ha2eV)
+    print(f"The E_soc (in cm-1) --")
+    print(eso[:20] * unit.ha2eV * unit.eV2cm_1)
     hso_cm_1 = hso*unit.ha2eV*unit.eV2cm_1
     return hso, eso
 
