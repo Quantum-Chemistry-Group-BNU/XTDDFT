@@ -550,6 +550,8 @@ class SF_TDA_up():
     def kernel(self,nstates=None):
         if nstates==None:
             nstates=self.nstates
+        else:
+            self.nstates=nstates
         if self.davidson:
             self.e,self.v = davidson_process(self.mf,nstates,isf=1)
         else:
@@ -560,10 +562,10 @@ class SF_TDA_up():
     def analyse(self):
         nc = self.nc
         nv = self.nv
-        for nstate in range(self.e.shape[0]):
-            value = self.v[:,nstate]
+        for istate in range(self.e[:self.nstates].shape[0]):
+            value = self.v[:,istate]
             x_cv_ab = value[:nc*nv].reshape(nc,nv)
-            print(f'Excited state {nstate+1} {self.e[nstate]*ha2eV:10.5f} eV')
+            print(f'Excited state {istate+1} {self.e[istate]*ha2eV:10.5f} eV')
             for o,v in zip(* np.where(abs(x_cv_ab)>0.1)):
                 print(f'{100*x_cv_ab[o,v]**2:3.0f}% CV(ab) {o+1}a -> {v+1+self.nc+self.no}b {x_cv_ab[o,v]:10.5f}')
             print(' ')

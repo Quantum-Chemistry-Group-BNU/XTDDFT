@@ -618,10 +618,11 @@ class X_TDA():
             print('omega alpha hyb', omega, alpha, hyb)
 
             xctype = ni._xc_type(mf.xc)
-            dm0 = mf.make_rdm1(mf.mo_coeff, mo_occ)
+            dm0 = mf.make_rdm1()
             # dm0 = mf.make_rdm1(mo_coeff0, mo_occ)
             if np.array(mf.mo_coeff).ndim == 2:
                 dm0.mo_coeff = (mf.mo_coeff, mf.mo_coeff)
+                dm0.mo_occ = mo_occ
                 # dm0.mo_coeff = (mo_coeff0, mo_coeff0)
             make_rho = ni._gen_rho_evaluator(mf.mol, dm0, hermi=1, with_lapl=False)[0]
             mem_now = lib.current_memory()[0]
