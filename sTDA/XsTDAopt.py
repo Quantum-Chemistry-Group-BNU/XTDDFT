@@ -15,7 +15,6 @@ from pyscf import dft, gto, scf, tddft, lo
 from pyscf.lib import logger
 from pyscf.tools import molden, cubegen
 
-import tools
 from eta import eta
 from utils import unit, atom, utils
 '''U and X opt file select same CSF in CVaa and CVbb'''
@@ -382,6 +381,7 @@ class XsTDA:
         fockb = h1e + vhf[1]
         fock_a = mo_coeff.T @ focka @ mo_coeff
         fock_b = mo_coeff.T @ fockb @ mo_coeff
+        # fock = self.mf.get_fock()   # teacher mentioned the method of constructing the Fock matrix.
 
         # spin adapted correct term use ROHF fock
         hf = scf.ROHF(self.mol)
@@ -510,6 +510,8 @@ class XsTDA:
             pcsfov_a, ncsfov_a = devide_csf_p_n(iaiaov_a, self.Emax)
             pcsfco_b, ncsfco_b = devide_csf_p_n(iaiaco_b, self.Emax)
             pcsfcv_b, ncsfcv_b = devide_csf_p_n(iaiacv_b, self.Emax)
+            print("before union, {} PCSFs in CV(aa)".format(len(pcsfcv_a[0])))
+            print("before union, {} PCSFs in CV(bb)".format(len(pcsfcv_b[0])))
             pcsfcv = union(nc, pcsfcv_a, pcsfcv_b)
             ncsfcv = intersec(nc, ncsfcv_a, ncsfcv_b)
             iajb = np.zeros(len(ncsfcv[0])+len(ncsfov_a[0])+len(ncsfco_b[0])+len(ncsfcv[0]))
@@ -655,6 +657,8 @@ class XsTDA:
             pscsfco_b_i, pscsfco_b_a, scsf = devide_csf_ps(pcsfco_b, ncsfco_b, scsf)
             # CV(bb)
             pscsfcv_b_i, pscsfcv_b_a, scsf = devide_csf_ps(pcsfcv, ncsfcv, scsf)
+            print("before union, {} SCSFs in CV(aa)".format(len(pscsfcv_a_i)-len(pcsfcv[0])))
+            print("before union, {} SCSFs in CV(bb)".format(len(pscsfcv_b_i)-len(pcsfcv[0])))
             pscsfcv_i, pscsfcv_a = union(nc, (pscsfcv_a_i, pscsfcv_a_a), (pscsfcv_b_i, pscsfcv_b_a))
             Adim = len(pscsfcv_i) + len(pscsfov_a_i) + len(pscsfco_b_i) + len(pscsfcv_i)
             pcsfdim = len(pcsfcv[0]) + len(pcsfov_a[0]) + len(pcsfco_b[0]) + len(pcsfcv[0])
@@ -691,8 +695,8 @@ class XsTDA:
         pscsf_fdiag_b[pscsfcv_i+pscsf_fdiag_b.shape[0]-nc, no+pscsfcv_a] = True
         # Note: pscsf_fdiag order is pyscf order, so if calculate overlap, adjust pyscf csf order to my order
         pscsf_fdiag = np.concatenate((pscsf_fdiag_a.reshape(-1), pscsf_fdiag_b.reshape(-1)))
-        nc_old, no_old, nv_old = tools.get_cov(self.mf)
-        order = tools.order_pyscf2my(nc_old, no_old, nv_old)
+        nc_old, no_old, nv_old = utils.get_cov(self.mf)
+        order = utils.order_pyscf2my(nc_old, no_old, nv_old)
         pscsf_fdiag = pscsf_fdiag[order]
 
         # Section: construct A
@@ -1210,6 +1214,7 @@ if __name__ == "__main__":
         # atom=atom.mttm2_toluene,
         # atom=atom.hhcrqpp2,
         # atom=atom.ptm3ncz_cyclohexane,
+        # atom=atom.g3ttm_toluene,
         unit="A",
         # unit="B",  # https://doi.org/10.1016/j.comptc.2014.02.023 use bohr
         # basis='aug-cc-pvtz',
@@ -1248,8 +1253,8 @@ if __name__ == "__main__":
     # xc = 'blyp'
     # xc = 'tpssh'
     # xc = 'wb97xd'
-    # xc = 'b3lyp'
-    xc = 'pbe0'
+    xc = 'b3lyp'
+    # xc = 'pbe0'
     # xc = 'tpss0'  # ax=0.25, same with pbe0
     # xc = 'pbe38'
     # xc = '0.50*HF + 0.50*B88 + GGA_C_LYP'  # BHHLYP

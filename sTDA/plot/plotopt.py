@@ -5,15 +5,18 @@ from matplotlib import pyplot as plt
 from PIL import Image
 from utils import unit
 file = '../result/'
-mol = 'ttm/'
+# mol = 'ttm/'
 # mol = 'bispytm/'
 # mol = 'ttm3ncz/'
 # mol = 'ptm3ncz/'
 # mol = 'mttm2/'
 # mol = 'hhcrqpp2/'
+mol = 'g3ttm/'
 # mol = 'c6h5nit/'
 if mol == 'hhcrqpp2/':
     rows = 300
+elif mol == 'g3ttm/':
+    rows = 500
 else:
     rows = 100
 # colors = ["#0B7055", "#796CAD", "#D65813", "#23BAC5", "#EECA40", "#FFA070",
@@ -28,10 +31,10 @@ solvent = '-TOLUENE'
 # solvent = '-CYCLOHEXANE'
 # solvent = '-ACETONITRILE'
 # solvent = '-METHANOL'
-# functional = 'pbe0-st-8eV/'
+functional = 'pbe0-st-10eV/'
 # functional = 'b3lyp/'
 # functional = 'pbe0-st/'
-functional = 'tpssh-st-10eV/'
+# functional = 'tpssh-st-10eV/'
 
 # plt Settings
 plt.rc('font', family='Times New Roman', size=14)
@@ -333,6 +336,20 @@ def UVvis3(*args, num_method, labels, colors, fwhm=0.3, title='UVspec', norm=Fal
     # ax2.tick_params(axis="both", which="major", labelsize=15)
     # ax2.set_ylim([0, maxy2])
 
+    if mol == 'ttm/':
+        ax1.set_xlim(210, 700)  # ttm, bispytm
+    elif mol == 'bispytm/':
+        ax1.set_xlim(210, 700)  # ttm, bispytm
+    elif mol == 'ttm3ncz/':
+        ax1.set_xlim(270, 820)  # ttm3ncz
+    elif mol == 'ptm3ncz/':
+        ax1.set_xlim(260, 830)  # ptm3ncz
+    elif mol == 'mttm2/':
+        ax1.set_xlim(260, 630)  # mttm2
+    else:
+        ax1.set_xlim(205, 700)  # hhcrqpp2 pbe0-st-10eV
+        # ax1.set_xlim(240, 700)  # hhcrqpp2 tpssh-st-10eV
+
     if norm:
         ax1.set_ylabel(r"Normalized abs. intensity", fontsize=15)
     else:
@@ -386,10 +403,16 @@ def UVvis4(*args, ds2, cv1, num_method, labels, colors, fwhm=0.3, title='UVspec'
     # nlabel += 1
     # calculation
     for i, l, c in zip(range(in_num), labels[:in_num], colors[:in_num]):
-        if i in [1,3,4]:
-            ax1.plot(x, y[:, i], '--', color=c, lw=2, label=l)
-        if i in [0,2]:
-            ax1.plot(x, y[:, i], color=c, lw=2, label=l)
+        if mol == 'g3ttm/': # g3ttm
+            if i in [0,2,4]:
+                ax1.plot(x, y[:, i], '--', color=c, lw=2, label=l)
+            if i in [1,3]:
+                ax1.plot(x, y[:, i], color=c, lw=2, label=l)
+        else:
+            if i in [1,3,4]:
+                ax1.plot(x, y[:, i], '--', color=c, lw=2, label=l)
+            if i in [0,2]:
+                ax1.plot(x, y[:, i], color=c, lw=2, label=l)
         # nlabel += 1
     # # peak position
     # for i in range(in_num):
@@ -401,8 +424,9 @@ def UVvis4(*args, ds2, cv1, num_method, labels, colors, fwhm=0.3, title='UVspec'
         ax2.vlines(pos, 0, height, color=colors[1], linestyle="dashed", lw=2, alpha=0.6, label=labels[1])
     ax2.set_ylabel("sX-TDA oscillator strength", fontsize=15)
     ax2.tick_params(axis="both", which="major", labelsize=15)
-    # ax2.set_ylim([0, maxy2])
-    ax2.set_ylim([0, 2.1*maxy2])  # hhcrqpp2
+    ax2.set_ylim([0, maxy2])
+    if mol == 'hhcrqpp2/':
+        ax2.set_ylim([0, 2.1*maxy2])  # hhcrqpp2
     ax3.bar(ds2[0], ds2[1], width=1.5, label=ds2[3], color=ds2[2])
     ax4.bar(cv1[0], cv1[1], width=1.5, label=cv1[3], color=cv1[2])
 
@@ -471,10 +495,13 @@ def UVvis4(*args, ds2, cv1, num_method, labels, colors, fwhm=0.3, title='UVspec'
     elif mol == 'mttm2/':
         ax1.set_xlim(260, 630)  # mttm2
         plt.axes([0.645, 0.465, 0.25, 0.25])  # mttm2
-    else:
+    elif mol == 'hhcrqpp2/':
         # ax1.set_xlim(205, 700)  # hhcrqpp2 pbe0-st-10eV
         ax1.set_xlim(240, 700)  # hhcrqpp2 tpssh-st-10eV
         plt.axes([0.6, 0.48, 0.2, 0.2])  # hhcrqpp2
+    else:
+        ax1.set_xlim(267, 700)  # g3ttm pbe0-st-10eV
+        plt.axes([0.6, 0.48, 0.24, 0.24])  # g3ttm
     bgimg = plt.imread(file + mol + functional + mol[:-1] + '.bmp')
     plt.imshow(bgimg)
     plt.axis("off")
@@ -494,10 +521,10 @@ ds2_8 = XsTDA_gsol[:rows, 2]
 # XTDDFT_sol = pd.read_csv(file+mol+solvent+'XTDDFT.csv', sep='[,\s]+', header=None, engine='python').to_numpy()
 # e10 = XTDDFT_sol[:, 0]
 # os10 = XTDDFT_sol[:, 1]
-XTDA_sol = pd.read_csv(file+mol+functional+'XTDA'+solvent+'.csv', sep='[,\s]+', header=None, engine='python').to_numpy()
-e11 = XTDA_sol[:rows, 0]
-os11 = XTDA_sol[:rows, 1]
-# rs11 = XTDA_gsol[:, 2]
+# XTDA_sol = pd.read_csv(file+mol+functional+'XTDA'+solvent+'.csv', sep='[,\s]+', header=None, engine='python').to_numpy()
+# e11 = XTDA_sol[:rows, 0]
+# os11 = XTDA_sol[:rows, 1]
+# # rs11 = XTDA_gsol[:, 2]
 UsTDA_gsol = pd.read_csv(file+mol+functional+'UsTDA'+solvent+'.csv', sep='[,\s]+', header=None, engine='python').to_numpy()
 e9 = UsTDA_gsol[:rows, 0]
 os9 = UsTDA_gsol[:rows, 1]
@@ -520,6 +547,8 @@ if mol == 'ttm3ncz/':
     os7 = experiment_sol[:,3]
 elif mol == 'ptm3ncz/':
     os7 = experiment_sol[:, 2]
+elif mol == 'g3ttm/':
+    os7 = experiment_sol[:,1]/np.max(experiment_sol[:,1])
 else:
     os7 = experiment_sol[:,1]
 
@@ -535,7 +564,8 @@ os7 = int7(e7)
 # maxy2 = np.max(np.concatenate((os8, os9, os11, os12, os13))) * 1.1
 
 # only solvent result
-maxy2 = np.max(np.concatenate((os8, os9, os11, os12))) * 1.1
+# maxy2 = np.max(np.concatenate((os8, os9, os11, os12))) * 1.1
+maxy2 = np.max(np.concatenate((os8, os9, os12))) * 1.1  # g3ttm
 
 # # no use, this function divide X and U in two figure
 # UVvis(
@@ -563,7 +593,7 @@ else:
 
 
 # paper
-functional = 'tpssh-st-10eV/'
+functional = 'pbe0-st-10eV/'
 XsTDA_gsol = pd.read_csv(file+mol+functional+'XsTDA'+solvent+'.csv', sep='[,\s]+', header=None, engine='python').to_numpy()
 e8 = XsTDA_gsol[:rows, 0]
 os8 = XsTDA_gsol[:rows, 1]
@@ -574,11 +604,19 @@ e9 = UsTDA_gsol[:rows, 0]
 os9 = UsTDA_gsol[:rows, 1]
 ds2_9 = UsTDA_gsol[:rows, 2]
 cv1_9 = UsTDA_gsol[:rows, -1]
+# UVvis4(
+#     e11, os11, e8, os8, e12, os12, e9, os9, e7, os7,
+#     ds2=[e9, ds2_9, colors[2], 'sU-TDA'], cv1=[e8, cv1_8, colors[0], 'sX-TDA'], num_method=[4],
+#     labels=['X-TDA', 'sX-TDA', 'U-TDA', 'sU-TDA', 'Expt.'],
+#     colors=colors,
+#     title='UVspec', fwhm=0.2, maxy2=maxy2, norm=norm
+# )
+# # g3ttm
 UVvis4(
-    e11, os11, e8, os8, e12, os12, e9, os9, e7, os7,
-    ds2=[e9, ds2_9, colors[2], 'sU-TDA'], cv1=[e8, cv1_8, colors[0], 'sX-TDA'], num_method=[4],
-    labels=['X-TDA', 'sX-TDA', 'U-TDA', 'sU-TDA', 'Expt.'],
-    colors=colors,
+    e8, os8, e12, os12, e9, os9, e7, os7,
+    ds2=[e9, ds2_9, colors[2], 'sU-TDA'], cv1=[e8, cv1_8, colors[0], 'sX-TDA'], num_method=[3],
+    labels=['sX-TDA', 'U-TDA', 'sU-TDA', 'Expt.'],
+    colors=["#EF2C2B", "#23B2E0", "#23B2E0", "#000000"],
     title='UVspec', fwhm=0.2, maxy2=maxy2, norm=norm
 )
 
@@ -629,7 +667,13 @@ UVvis4(
 # e21 = XsTDA_gsol[:rows, 0]
 # os21 = XsTDA_gsol[:rows, 1]
 # ds2_21 = XsTDA_gsol[:rows, 2]
-# # ttm test result
+# # ******ttm3ncz test result*****
+# functional = 'test/noDA-CSF/'
+# XsTDA_gsol = pd.read_csv(file+mol+functional+'XsTDA'+solvent+'-noDA-CSF.csv', sep='[,\s]+', header=None, engine='python').to_numpy()
+# e46 = XsTDA_gsol[:rows, 0]
+# os46 = XsTDA_gsol[:rows, 1]
+# ds2_46 = XsTDA_gsol[:rows, 2]
+# # *****ttm test result*****
 # functional = 'test/param/'
 # XTDA_gsol = pd.read_csv(file+mol+functional+'XsTDA'+solvent+'.csv', sep='[,\s]+', header=None, engine='python').to_numpy()
 # e36 = XTDA_gsol[:rows, 0]
@@ -676,9 +720,14 @@ UVvis4(
 # e45 = XsTDA_gsol[:rows, 0]
 # os45 = XsTDA_gsol[:rows, 1]
 # ds2_45 = XsTDA_gsol[:rows, 2]
+# # # *****g3ttm test result*****
+# XsTDA_gsol = pd.read_csv(file+mol+functional+'XsTDA'+solvent+'.csv', sep='[,\s]+', header=None, engine='python').to_numpy()
+# e47 = XsTDA_gsol[:rows, 0]
+# os47 = XsTDA_gsol[:rows, 1]
+# ds2_47 = XsTDA_gsol[:rows, 2]
 # UVvis3(
-#     e45, os45, e7, os7, num_method=[1],
-#     labels=['blyp-correct', 'Expt.'],
+#     e8, os8, e46, os46, e7, os7, num_method=[2],
+#     labels=['sX-TDA', 'sX-TDA-noDA-CSF', 'Expt.'],
 #     # colors=[colors[8],colors[11],colors[9],colors[12], colors[13],colors[7]],
 #     colors=colors_functionals,
 #     title='UVspec', fwhm=0.2, norm=norm
