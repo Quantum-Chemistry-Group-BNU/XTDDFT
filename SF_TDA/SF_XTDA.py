@@ -13,7 +13,10 @@ from pyscf.symm import direct_prod
 
 #from line_profiler import profile
 
-from SF_TDA import SF_TDA, mf_info,gen_response_sf,gen_response_sf_mc
+from SF_TDA import SF_TDA,SF_TDA_down, mf_info,gen_response_sf,gen_response_sf_mc
+#import sys
+#sys.path.append('/home/lenovo2/usrs/zhw/software/test_git_file')
+#from scf_genrep_sftd import _gen_uhf_tda_response_sf
 au2ev = 27.21138505
 
 def get_irrep_occupancy_directly(mol, mf):
@@ -155,7 +158,7 @@ class SA_SF_TDA():
         fockB_V = fockB[nc+no:,nc+no:]
         dim = (nc+no)*(nv+no)
         Amat = np.zeros((dim,dim))
-        sf_tda = SF_TDA(mf,method=self.method)
+        sf_tda = SF_TDA_down(mf,method=self.method)
         sf_tda_A = sf_tda.get_Amat() 
         Amat = np.zeros_like(sf_tda_A)
         
@@ -444,7 +447,6 @@ class SA_SF_TDA():
     def calculate_irrep(self,orb1,orb2):
         orb_sym = self.mf.get_orbsym(self.mf.mo_coeff)
         ground_sym = self.mf.get_wfnsym()
-        print('ground_irrep ',ground_sym)
         #print('orb_sym',orb_sym)
         #print(orb1,orb2)
         if self.type_u:
@@ -563,6 +565,11 @@ class SA_SF_TDA():
         no = self.no
         Ds = []
         syms = []
+        try:
+            ground_sym = self.mf.get_wfnsym()
+            print('ground_sym ',ground_sym)
+        except:
+            pass
 
         for nstate in range(self.nstates):
             m_excited = 0.
@@ -578,6 +585,12 @@ class SA_SF_TDA():
                 x_oo_ab = (self.vects @ value[nc*nv+nc*no+no*nv:].reshape(-1,1)).reshape(no,no)
             else:
                 x_oo_ab = value[nc*nv+nc*no+no*nv:].reshape(no,no)
+            #print('norm self.v',np.linalg.norm(value))
+            #tmp_v1 = np.concatenate((x_cv_ab, x_co_ab),axis=1)
+            #tmp_v2 = np.concatenate((x_ov_ab, x_oo_ab),axis=1)
+            #tmp_v = np.concatenate((tmp_v1,tmp_v2),axis=0)
+            #print('norm v',np.linalg.norm(tmp_v))
+            
 
             for o,v in zip(* np.where(abs(x_cv_ab)>0.1)):
                 if abs(x_cv_ab[o,v]) > m_excited:
@@ -589,7 +602,7 @@ class SA_SF_TDA():
                 if abs(x_co_ab[o,v]) > m_excited:
                     m_excited = abs(x_co_ab[o,v])
                     orb1 = o
-                    orb2 = v+self.nv
+                    orb2 = v+self.nc
                 print(f'{100*x_co_ab[o,v]**2:3.0f}% CO(ab) {o+1}a -> {v+1+self.nc}b {x_co_ab[o,v]:10.5f} ')
             for o,v in zip(* np.where(abs(x_ov_ab)>0.1)):
                 if abs(x_ov_ab[o,v]) > m_excited:
@@ -821,10 +834,12 @@ class SA_SF_TDA():
             hdiag = new_hdiag
         else:
             hdiag = e_ia.ravel()
-        if self.method == 0:
-            vresp = gen_response_sf(self.mf,hermi=0)
-        elif self.method == 1:
+
+        if self.method == 1:
             vresp = gen_response_sf_mc(self.mf,hermi=0)
+            #vresp = _gen_uhf_tda_response_sf(self.mf)
+        else:
+            vresp = gen_response_sf(self.mf,hermi=0,method=self.method)
 
         if self.SA > 0:
             vresp_hf = self.gen_response_sf_delta_A(hermi=0)# to calculate \Delta A
@@ -991,9 +1006,6 @@ class SA_SF_TDA():
                 new_hx[:,nc*nvir+(no-1)*nvir:nc*nvir+(no-1)*nvir+no-1] = new_oo[:,(no-1)*no:]
                 new_hx[:,nc*nvir+(no-1)*nvir+no-1:] = hx[:,nc*nvir+(no-1)*nvir+no:]
                 hx = new_hx.copy()
-                #zs0 = zs0.copy()
-                #print('zs0.shape ',zs0.shape)
-                #print('hx.shape ',hx.shape)
                 
             else:
                 new_hx = hx.copy()
@@ -1183,7 +1195,7 @@ class SA_SF_TDA():
         #print(f'init_guess times use {(end_t-start_t)/3600:6.4f} hours')
         #print('x0.shape ',x0.shape)
         converged, e, x1 = lib.davidson1(vind, x0, precond,
-                              tol=1e-8,
+                              tol=1e-7,lindep=1e-10,
                               nroots=self.nstates,
                               max_cycle=300)
         end_time = time.time()

@@ -7,6 +7,10 @@ import functools
 from pyscf.dft.gen_grid import NBINS
 from pyscf.dft.numint import _dot_ao_ao_sparse,_scale_ao_sparse,_tau_dot_sparse
 
+#import sys
+#sys.path.append('/home/lenovo2/usrs/zhw/software/test_git_file')
+#from scf_genrep_sftd import _gen_uhf_tda_response_sf
+
 #from utils import unit
 ha2eV = 27.2113834
 
@@ -211,10 +215,11 @@ def gen_tda_operation_sf(mf,isf,method):
         hdiag = e_ai.ravel()
         ndim = (noccb,nvira)
         orbov = (orbob,orbva)
-    if method == 0:
+    if method == 1:
+        vresp = gen_response_sf_mc(mf,hermi=0,collinear_samples=100)
+        #vresp = _gen_uhf_tda_response_sf(mf,hermi=0)
+    else:
         vresp = gen_response_sf(mf,hermi=0)
-    elif method == 1:
-        vresp = gen_response_sf_mc(mf,hermi=0)
 
     #@profile
     def vind(zs0): # vector-matrix product for indexed operations
@@ -222,14 +227,15 @@ def gen_tda_operation_sf(mf,isf,method):
         orbo,orbv = orbov # mo_coeff for alpha and beta
         zs = np.asarray(zs0).reshape(-1,ndim0,ndim1)
         #print('zs.shape ',zs.shape)
-        vs = np.zeros_like(zs)
-        #print('zs.shape',zs.shape)
-        dmov = lib.einsum('xov,qv,po->xpq', zs,orbv.conj(), orbo,optimize=True) # (x,nmo,nmo)
+        #print(zs)
+        #vs = np.zeros_like(zs)
+        dmov = lib.einsum('xov,qv,po->xpq', zs,orbv.conj(), orbo) # (x,nmo,nmo)
         v1ao = vresp(np.asarray(dmov))   # with density and get response function
-        vs += lib.einsum('xpq,po,qv->xov', v1ao, orbo.conj(), orbv,optimize=True) # (-1,nocca,nvirb)
+        vs = lib.einsum('xpq,po,qv->xov', v1ao, orbo.conj(), orbv) # (-1,nocca,nvirb)
         if isf == -1: # spin down
             vs += np.einsum('ab,xib->xia',fockB[noccb:,noccb:],zs,optimize=True)-\
                    np.einsum('ij,xja->xia',fockA[:nocca,:nocca],zs,optimize=True)
+            #vs += lib.einsum('ov,xov->xov', e_ia, zs)
         elif isf == 1: # spin up
             vs += np.einsum('ab,xib->xia',fockA[nocca:,nocca:],zs,optimize=True)-\
                  np.einsum('ij,xja->xia',fockB[:noccb,:noccb],zs,optimize=True)
@@ -238,10 +244,10 @@ def gen_tda_operation_sf(mf,isf,method):
         return hx
     return vind, hdiag
     
-def gen_response_sf(mf,hermi=0,max_memory=None,hf_correction=False):
+def gen_response_sf(mf,hermi=0,max_memory=None,method=0):
     mo_energy,mo_occ,mo_coeff = mf_info(mf)
     mol = mf.mol
-    if isinstance(mf, scf.hf.KohnShamDFT) and not hf_correction:
+    if isinstance(mf, scf.hf.KohnShamDFT):
         ni = mf._numint
         ni.libxc.test_deriv_order(mf.xc, 2, raise_error=True)
         omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, mol.spin)
@@ -249,13 +255,17 @@ def gen_response_sf(mf,hermi=0,max_memory=None,hf_correction=False):
         if max_memory is None:
             mem_now = lib.current_memory()[0]
             max_memory = max(2000, mf.max_memory*.8-mem_now)
-
-        vxc = cache_xc_kernel_sf(mf, mo_coeff, mo_occ,1,max_memory,isf=-1) # XC kerkel 
+        if method == 0:
+            vxc = cache_xc_kernel_sf(mf, mo_coeff, mo_occ,1,max_memory,isf=-1) # XC kerkel 
         dm0 = None
 
         def vind(dm1):
-            v1 = nr_uks_fxc_sf_tda(ni,mol, mf.grids, mf.xc, dm0, dm1, 0, hermi, # XC * dm1
+            if method == 0:
+                v1 = nr_uks_fxc_sf_tda(ni,mol, mf.grids, mf.xc, dm0, dm1, 0, hermi, # XC * dm1
                                     vxc, max_memory=max_memory)
+            else:
+                v1 = np.zeros_like(dm1)
+                
 
             if not hybrid:
                 # No with_j because = 0 in spin flip part.
@@ -267,7 +277,7 @@ def gen_response_sf(mf,hermi=0,max_memory=None,hf_correction=False):
                     vk += mf.get_k(mol, dm1, hermi, omega) * (alpha-hyb)
                 v1 -= vk
             return v1
-    if not isinstance(mf, scf.hf.KohnShamDFT) and not hf_correction : # in HF case
+    if not isinstance(mf, scf.hf.KohnShamDFT): # in HF case
         def vind(dm1):
             return -mf.get_k(mol,dm1,hermi=hermi)
     #if hf_correction: # for \Delta A
@@ -370,17 +380,18 @@ def init_guess(mf, nstates,isf=-1):
             x0[i, j] = 1
     return x0
     
-def davidson_process(mf,nstates,isf=-1,method=0):
+def davidson_process(mf,nstates,method,isf=-1):
     vind, hdiag = gen_tda_operation_sf(mf,isf,method)
     precond = hdiag
     #start_t = time.time()
     x0 = init_guess(mf, nstates,isf)
-    print('x0.shape',x0.shape)
+    #print(x0)
+    #print('x0.shape',x0.shape)
     #end_t = time.time()
     #print(f'init_guess times use {(end_t-start_t)/3600:6.4f} hours')
     #print('x0.shape ',x0.shape)
     converged, e, x1 = lib.davidson1(vind, x0, precond,
-                          tol=1e-8,
+                          tol=1e-7,lindep=1e-10,
                           nroots=nstates,
                           max_cycle=3000)
     #end_time = time.time()
@@ -395,7 +406,7 @@ def davidson_process(mf,nstates,isf=-1,method=0):
     return e,v
 
 class SF_TDA_up():
-    def __init__(self,mf,kernel,davidson=False):
+    def __init__(self,mf,method,davidson=False):
         if np.array(mf.mo_coeff).ndim==3:# UKS
             self.mo_energy = mf.mo_energy
             self.mo_coeff = mf.mo_coeff
@@ -412,7 +423,7 @@ class SF_TDA_up():
         mol = mf.mol
         self.mf = mf
         self.nao = mol.nao_nr()
-        self.kernel = kernel
+        self.method = method
         self.davidson = davidson
         occidx_a = np.where(self.mo_occ[0]==1)[0]
         viridx_a = np.where(self.mo_occ[0]==0)[0]
@@ -547,13 +558,16 @@ class SF_TDA_up():
         self.A = (a_b2a + np.einsum('ij,ab->iajb',delta_ij[self.no:,self.no:],fockA[self.nc+self.no:,self.nc+self.no:])\
                   -np.einsum('ij,ab->iajb',fockB[:self.nc,:self.nc],delta_ab[self.no:,self.no:])).reshape((self.nc*self.nv,self.nc*self.nv))
         
-    def kernel(self,nstates=None):
+    def kernel(self,nstates=1):
         if nstates==None:
             nstates=self.nstates
         if self.davidson:
-            self.e,self.v = davidson_process(self.mf,nstates,isf=1)
+            self.e,self.v = davidson_process(self.mf,nstates,self.method,isf=1)
         else:
-            self.get_Amat()
+            if self.method == 1:  # multicollinear
+                self.A = get_ab_sf(sef.mf)[0]
+            else:
+                self.get_Amat()
             self.e,self.v = scipy.linalg.eigh(self.A)
         return self.e[:nstates]*ha2eV,self.v[:,:nstates]
     
@@ -674,7 +688,7 @@ class SF_TDA_down():
             mem_now = lib.current_memory()[0]
             max_memory = max(2000, self.mf.max_memory*.8-mem_now)
         
-        if xctype == 'LDA' and self.method!=3:
+        if xctype == 'LDA' and self.method!=2:
             ao_deriv = 0
             for ao, mask, weight, coords \
                     in ni.block_loop(mol, self.mf.grids, self.nao, ao_deriv, max_memory):
@@ -695,7 +709,7 @@ class SF_TDA_down():
                 a_a2b += iajb
                 
                 
-        elif xctype == 'GGA' and self.method!=3:
+        elif xctype == 'GGA' and self.method!=2:
             ao_deriv = 1
             for ao, mask, weight, coords \
                  in ni.block_loop(mol, self.mf.grids, self.nao, ao_deriv, max_memory):#ao(4,N,nao):AO values and derivatives in x,y,z compoents in grids
@@ -822,7 +836,12 @@ class SF_TDA_down():
         if self.davidson:
             self.e,self.v = davidson_process(self.mf,nstates,isf=-1,method=self.method)
         else:
-            self.A = self.get_Amat()
+            if self.method == 1: # multicollinear function
+                A = get_ab_sf(self.mf)[1]
+                dim = (self.nc+self.no)*(self.nv+self.no)
+                self.A = A.reshape((dim,dim))
+            else:
+                self.A = self.get_Amat()
             self.e,self.v = scipy.linalg.eigh(self.A)
         return self.e[:nstates]*ha2eV, self.v[:,:nstates]
     
@@ -903,6 +922,7 @@ def nr_uks_fxc_sf_tda_mc(ni, mol, grids, xc_code, dm0, dms, relativity=0, hermi=
         vmat = np.asarray(vmat, dtype=dtype)
     return vmat
 
+# This function is copied from pyscf.dft.numint2c.py
 def __mcfun_fn_eval_xc(ni, xc_code, xctype, rho, deriv):
     evfk = ni.eval_xc_eff(xc_code, rho, deriv=deriv, xctype=xctype)
     for order in range(1, deriv+1):
@@ -930,7 +950,7 @@ def mcfun_eval_xc_adapter_sf(ni, xc_code):
     fn_eval_xc = functools.partial(__mcfun_fn_eval_xc, ni, xc_code, xctype)
     nproc = lib.num_threads()
 
-    def eval_xc_eff(xc_code, rho, deriv, omega=None, xctype=None,
+    def eval_xc_eff(xc_code, rho, deriv=1, omega=None, xctype=None,
                 verbose=None):
         return mcfun.eval_xc_eff_sf(
             fn_eval_xc, rho, deriv,
@@ -938,8 +958,7 @@ def mcfun_eval_xc_adapter_sf(ni, xc_code):
     return eval_xc_eff
 
 # This function should be a class function in the Numint2c class.
-def cache_xc_kernel_sf_mc(self, mol, grids, xc_code, mo_coeff, mo_occ, deriv=2,
-                       spin=1, max_memory=2000):
+def cache_xc_kernel_sf_mc(self,mol, grids, xc_code, mo_coeff, mo_occ, spin=1,max_memory=2000):
     '''Compute the fxc_sf, which can be used in SF-TDDFT/TDA
     '''
     MGGA_DENSITY_LAPL = False
@@ -950,7 +969,7 @@ def cache_xc_kernel_sf_mc(self, mol, grids, xc_code, mo_coeff, mo_occ, deriv=2,
         ao_deriv = 2 if MGGA_DENSITY_LAPL else 1
     else:
         ao_deriv = 0
-    with_lapl = False
+    with_lapl = MGGA_DENSITY_LAPL
 
     assert mo_coeff[0].ndim == 2
     assert spin == 1
@@ -970,10 +989,10 @@ def cache_xc_kernel_sf_mc(self, mol, grids, xc_code, mo_coeff, mo_occ, deriv=2,
     rho_tmz[0] += rho_ab[0]+rho_ab[1]
     rho_tmz[1] += rho_ab[0]-rho_ab[1]
     eval_xc = mcfun_eval_xc_adapter_sf(self,xc_code)
-    fxc_sf = eval_xc(xc_code, rho_tmz, deriv=deriv, xctype=xctype)
+    fxc_sf = eval_xc(xc_code, rho_tmz, deriv=2, xctype=xctype)
     return fxc_sf
 
-def gen_response_sf_mc(mf, mo_coeff=None, mo_occ=None, hermi=0, collinear_samples=200, max_memory=None):
+def gen_response_sf_mc(mf, mo_coeff=None, mo_occ=None, hermi=0, collinear_samples=100, max_memory=None):
     '''Generate a function to compute the product of Spin Flip UKS response function
     and UKS density matrices.
     '''
@@ -996,7 +1015,8 @@ def gen_response_sf_mc(mf, mo_coeff=None, mo_occ=None, hermi=0, collinear_sample
         'MultiGridFFTDF' == getattr(mf, 'with_df', None).__class__.__name__):
         raise NotImplementedError("Spin Flip TDDFT doesn't support pbc calculations.")
 
-    fxc = cache_xc_kernel_sf_mc(ni,mol, mf.grids, mf.xc, mo_coeff, mo_occ, deriv=2, spin=1)[2]
+
+    fxc = cache_xc_kernel_sf_mc(ni,mol, mf.grids, mf.xc, mo_coeff, mo_occ, 1)[2]
     dm0 = None
 
     if max_memory is None:
@@ -1006,7 +1026,7 @@ def gen_response_sf_mc(mf, mo_coeff=None, mo_occ=None, hermi=0, collinear_sample
     def vind(dm1):
         in2 = numint.NumInt()
         v1 = nr_uks_fxc_sf_tda_mc(in2,mol, mf.grids, mf.xc, dm0, dm1, 0, hermi,
-                               None, None, fxc, max_memory=max_memory)
+                               None, None, fxc,max_memory=max_memory)
         if not hybrid:
             # No with_j because = 0 in spin flip part.
             pass
@@ -1019,4 +1039,202 @@ def gen_response_sf_mc(mf, mo_coeff=None, mo_occ=None, hermi=0, collinear_sample
         return v1
     return vind
 
+#construct full A matrix for mulitcollinear function
+def get_ab_sf(mf, mo_energy=None, mo_coeff=None, mo_occ=None, collinear_samples=50):
+    r'''A and B matrices for TDDFT response function.
+
+    A[i,a,j,b] = \delta_{ab}\delta_{ij}(E_a - E_i) + (ia||bj)
+    B[i,a,j,b] = (ia||jb)
+
+    Spin symmetry is not considered in the returned A, B lists.
+    List A has two items: (A_baba, A_abab).
+    List B has two items: (B_baab, B_abba).
+    '''
+    #if mo_energy is None: mo_energy = mf.mo_energy
+    #if mo_coeff is None: mo_coeff = mf.mo_coeff
+    #if mo_occ is None: mo_occ = mf.mo_occ
+    mo_energy,mo_occ,mo_coeff = mf_info(mf)
+
+    mol = mf.mol
+    nao = mol.nao_nr()
+    occidx_a = np.where(mo_occ[0]==1)[0]
+    viridx_a = np.where(mo_occ[0]==0)[0]
+    occidx_b = np.where(mo_occ[1]==1)[0]
+    viridx_b = np.where(mo_occ[1]==0)[0]
+    orbo_a = mo_coeff[0][:,occidx_a]
+    orbv_a = mo_coeff[0][:,viridx_a]
+    orbo_b = mo_coeff[1][:,occidx_b]
+    orbv_b = mo_coeff[1][:,viridx_b]
+    nocc_a = orbo_a.shape[1]
+    nvir_a = orbv_a.shape[1]
+    nocc_b = orbo_b.shape[1]
+    nvir_b = orbv_b.shape[1]
+    no = nocc_a - nocc_b
+    dm = mf.make_rdm1()
+    vhf = mf.get_veff(mf.mol, dm)
+    h1e = mf.get_hcore()
+    focka = h1e + vhf[0]
+    fockb = h1e + vhf[1]
+    fockA = mo_coeff[0].T @ focka @ mo_coeff[0]
+    fockB = mo_coeff[1].T @ fockb @ mo_coeff[1]
+    delta_ij = np.eye(nocc_a)
+    delta_ab = np.eye(nvir_b)
+
+    e_ia_b2a = (mo_energy[0][viridx_a,None] - mo_energy[1][occidx_b]).T
+    e_ia_a2b = (mo_energy[1][viridx_b,None] - mo_energy[0][occidx_a]).T
+
+    a_b2a = np.diag(e_ia_b2a.ravel()).reshape(nocc_b,nvir_a,nocc_b,nvir_a)
+    a_a2b = np.diag(e_ia_a2b.ravel()).reshape(nocc_a,nvir_b,nocc_a,nvir_b)
+    #a_b2a = (np.einsum('ij,ab->iajb',delta_ij[no:,no:],fockA[nocc_a:,nocc_a:])\
+    #      -np.einsum('ij,ab->iajb',fockB[:nocc_b,:nocc_b],delta_ab[no:,no:])).reshape((nocc_b,nvir_a,nocc_b,nvir_a))
+    #a_a2b = (np.einsum('ij,ab->iajb',delta_ij,fockB[nocc_b:,nocc_b:])\
+    #      -np.einsum('ij,ab ->iajb',fockA[:nocc_a,:nocc_a],delta_ab)).reshape((nocc_a,nvir_b,nocc_a,nvir_b))
+    #b_b2a = np.zeros((nocc_b,nvir_a,nocc_a,nvir_b))
+    #b_a2b = np.zeros((nocc_a,nvir_b,nocc_b,nvir_a))
+    a = (a_b2a, a_a2b)
+    #b = (b_b2a, b_a2b)
+
+    def add_hf_(a, b, hyb=1):
+        # In spin flip TDA/ TDDFT, hartree potential is zero.
+        # A : iabj ---> ijba; B : iajb ---> ibja
+        eri_a_b2a = ao2mo.general(mol, [orbo_b,orbo_b,orbv_a,orbv_a], compact=False)
+        eri_a_a2b = ao2mo.general(mol, [orbo_a,orbo_a,orbv_b,orbv_b], compact=False)
+        #eri_b_b2a = ao2mo.general(mol, [orbo_b,orbv_b,orbo_a,orbv_a], compact=False)
+        #eri_b_a2b = ao2mo.general(mol, [orbo_a,orbv_a,orbo_b,orbv_b], compact=False)
+
+        eri_a_b2a = eri_a_b2a.reshape(nocc_b,nocc_b,nvir_a,nvir_a)
+        eri_a_a2b = eri_a_a2b.reshape(nocc_a,nocc_a,nvir_b,nvir_b)
+        #eri_b_b2a = eri_b_b2a.reshape(nocc_b,nvir_b,nocc_a,nvir_a)
+        #eri_b_a2b = eri_b_a2b.reshape(nocc_a,nvir_a,nocc_b,nvir_b)
+
+        a_b2a, a_a2b = a
+        #b_b2a, b_a2b = b
+
+        a_b2a-= np.einsum('ijba->iajb', eri_a_b2a) * hyb
+        a_a2b-= np.einsum('ijba->iajb', eri_a_a2b) * hyb
+        #b_b2a-= np.einsum('ibja->iajb', eri_b_b2a) * hyb
+        #b_a2b-= np.einsum('ibja->iajb', eri_b_a2b) * hyb
+
+    if isinstance(mf, scf.hf.KohnShamDFT):
+        from pyscf.dft import xc_deriv
+        from pyscf.dft import numint2c
+        ni0 = mf._numint
+        ni = numint2c.NumInt2C()
+        ni.collinear = 'mcol'
+        ni.collinear_samples = collinear_samples
+        ni.libxc.test_deriv_order(mf.xc, 2, raise_error=True)
+        if mf.nlc or ni.libxc.is_nlc(mf.xc):
+            logger.warn(mf, 'NLC functional found in DFT object.  Its second '
+                        'deriviative is not available. Its contribution is '
+                        'not included in the response function.')
+        omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, mol.spin)
+
+        add_hf_(a, hyb)
+
+        xctype = ni._xc_type(mf.xc)
+        mem_now = lib.current_memory()[0]
+        max_memory = max(2000, mf.max_memory*.8-mem_now)
+
+        # it should be optimized, which is the disadvantage of mc approach.
+        fxc = cache_xc_kernel_sf_mc(ni, mol, mf.grids, mf.xc, mo_coeff, mo_occ,deriv=2,spin=1)[2]
+        p0,p1=0,0 # the two parameters are used for counts the batch of grids.
+
+        if xctype == 'LDA':
+            ao_deriv = 0
+            for ao, mask, weight, coords \
+                    in ni0.block_loop(mol, mf.grids, nao, ao_deriv, max_memory):
+                p0 = p1
+                p1+= weight.shape[0]
+                wfxc= fxc[0,0][...,p0:p1] * weight
+
+                rho_o_a = lib.einsum('rp,pi->ri', ao, orbo_a)
+                rho_v_a = lib.einsum('rp,pi->ri', ao, orbv_a)
+                rho_o_b = lib.einsum('rp,pi->ri', ao, orbo_b)
+                rho_v_b = lib.einsum('rp,pi->ri', ao, orbv_b)
+                rho_ov_b2a = np.einsum('ri,ra->ria', rho_o_b, rho_v_a)
+                rho_ov_a2b = np.einsum('ri,ra->ria', rho_o_a, rho_v_b)
+
+                w_ov = np.einsum('ria,r->ria', rho_ov_b2a, wfxc*2.0)
+                iajb = lib.einsum('ria,rjb->iajb', rho_ov_b2a, w_ov)
+                a_b2a += iajb
+                #iajb = lib.einsum('ria,rjb->iajb', rho_ov_a2b, w_ov)
+                #b_a2b += iajb
+
+                w_ov = np.einsum('ria,r->ria', rho_ov_a2b, wfxc*2.0)
+                iajb = lib.einsum('ria,rjb->iajb', rho_ov_a2b, w_ov)
+                a_a2b += iajb
+                #iajb = lib.einsum('ria,rjb->iajb', rho_ov_b2a, w_ov)
+                #b_b2a += iajb
+
+        elif xctype == 'GGA':
+            ao_deriv = 1
+            for ao, mask, weight, coords \
+                    in ni.block_loop(mol, mf.grids, nao, ao_deriv, max_memory):
+                p0 = p1
+                p1+= weight.shape[0]
+                wfxc= fxc[...,p0:p1] * weight
+
+                rho_o_a = lib.einsum('xrp,pi->xri', ao, orbo_a)
+                rho_v_a = lib.einsum('xrp,pi->xri', ao, orbv_a)
+                rho_o_b = lib.einsum('xrp,pi->xri', ao, orbo_b)
+                rho_v_b = lib.einsum('xrp,pi->xri', ao, orbv_b)
+                rho_ov_b2a = np.einsum('xri,ra->xria', rho_o_b, rho_v_a[0])
+                rho_ov_a2b = np.einsum('xri,ra->xria', rho_o_a, rho_v_b[0])
+                rho_ov_b2a[1:4] += np.einsum('ri,xra->xria', rho_o_b[0], rho_v_a[1:4])
+                rho_ov_a2b[1:4] += np.einsum('ri,xra->xria', rho_o_a[0], rho_v_b[1:4])
+
+                w_ov = np.einsum('xyr,xria->yria', wfxc*2.0, rho_ov_b2a)
+                iajb = lib.einsum('xria,xrjb->iajb', w_ov, rho_ov_b2a)
+                a_b2a += iajb
+                #iajb = lib.einsum('xria,xrjb->iajb', w_ov, rho_ov_a2b)
+                #b_b2a += iajb
+
+                w_ov = np.einsum('xyr,xria->yria', wfxc*2.0, rho_ov_a2b)
+                iajb = lib.einsum('xria,xrjb->iajb', w_ov, rho_ov_a2b)
+                a_a2b += iajb
+                #iajb = lib.einsum('xria,xrjb->iajb', w_ov, rho_ov_b2a)
+                #b_a2b += iajb
+
+        elif xctype == 'HF':
+            pass
+
+        elif xctype == 'NLC':
+            raise NotImplementedError('NLC')
+
+        elif xctype == 'MGGA':
+            ao_deriv = 1
+            for ao, mask, weight, coords \
+                    in ni.block_loop(mol, mf.grids, nao, ao_deriv, max_memory):
+                p0 = p1
+                p1+= weight.shape[0]
+                wfxc = fxc[...,p0:p1] * weight
+
+                rho_oa = lib.einsum('xrp,pi->xri', ao, orbo_a)
+                rho_ob = lib.einsum('xrp,pi->xri', ao, orbo_b)
+                rho_va = lib.einsum('xrp,pi->xri', ao, orbv_a)
+                rho_vb = lib.einsum('xrp,pi->xri', ao, orbv_b)
+                rho_ov_b2a = np.einsum('xri,ra->xria', rho_ob, rho_va[0])
+                rho_ov_a2b = np.einsum('xri,ra->xria', rho_oa, rho_vb[0])
+                rho_ov_b2a[1:4] += np.einsum('ri,xra->xria', rho_ob[0], rho_va[1:4])
+                rho_ov_a2b[1:4] += np.einsum('ri,xra->xria', rho_oa[0], rho_vb[1:4])
+                tau_ov_b2a = np.einsum('xri,xra->ria', rho_ob[1:4], rho_va[1:4]) * .5
+                tau_ov_a2b = np.einsum('xri,xra->ria', rho_oa[1:4], rho_vb[1:4]) * .5
+                rho_ov_b2a = np.vstack([rho_ov_b2a, tau_ov_b2a[np.newaxis]])
+                rho_ov_a2b = np.vstack([rho_ov_a2b, tau_ov_a2b[np.newaxis]])
+
+                w_ov = np.einsum('xyr,xria->yria', wfxc*2.0, rho_ov_b2a)
+                iajb = lib.einsum('xria,xrjb->iajb', w_ov, rho_ov_b2a)
+                a_b2a += iajb
+                #iajb = lib.einsum('xria,xrjb->iajb', w_ov, rho_ov_a2b)
+                #b_b2a += iajb
+
+                w_ov = np.einsum('xyr,xria->yria', wfxc*2.0, rho_ov_a2b)
+                iajb = lib.einsum('xria,xrjb->iajb', w_ov, rho_ov_a2b)
+                a_a2b += iajb
+                #iajb = lib.einsum('xria,xrjb->iajb', w_ov, rho_ov_b2a)
+                #b_a2b += iajb
+    else:
+        add_hf_(a)
+
+    return a
 
