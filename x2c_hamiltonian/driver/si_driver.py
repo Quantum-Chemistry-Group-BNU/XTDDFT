@@ -128,7 +128,7 @@ class SI_driver():
         logging.info(f"|Ref⟩ with E (in Hatree) = {self.mf.e_tot}")
         logging.info(f"Interaction among {self.nSm} |S-⟩, {self.ngs} |GS⟩, {self.nSo} |So⟩, {self.nSp} |S+⟩.")
         logging.info(f"{'='*18} Summary of S I calculation {'='*18}")
-        print(f"  No   i-th   Excited state    v**2        Esf(eV)       Eso(eV)      Eex(eV)       Eex(cm-1)")
+        print(f"  No   i-th   Excited state    v**2        Esf(eV)       Eso(eV)    En-E1(eV)     En-E1(cm-1)")
         for i, e in enumerate(self.eso[:printnum]):
             str_state, e_sf = self.v2state(self.vso[:,i])
             print(f"{i:4d} {str_state}  {e_sf*unit.ha2eV:>12.8f}  {self.eso[i]*unit.ha2eV:>12.8f}     {((self.eso[i]-self.eso[0])*unit.ha2eV):>10.8f}    {((self.eso[i]-self.eso[0])*unit.ha2eV*unit.eV2cm_1):>10.2f}")
@@ -547,7 +547,7 @@ class SI_driver():
         hX[self.sl_S_1_dim2] += factor*einsum('aum->uam', self.hm[self.slv,self.slo,:]).reshape(self.ov,3)
         # =============== line3 ===============
         # Case (30) (S-1)(O1O2) GS
-        factor = sqrt((2*self.S-1)/(2*self.S+1))
+        factor = 1.0
         hX[self.sl_S_1_dim3] += factor*einsum('uvm->vum', self.hm[self.slo,self.slo,:]).reshape(self.oo,3)
         # =============== line4 ===============
         # Case (36) (S-1)(O1O1) GS = 0
@@ -770,3 +770,17 @@ class SI_driver():
         XhX += factor*einsum('ia,abm,ij,jb->m',XL, self.hm[self.slv,self.slv,:], self.delta_c, XR)
         XhX += factor*einsum('ia,jim,ab,jb->m',XL, self.hm[self.slc,self.slc,:], self.delta_v, XR)
         return XhX
+    
+    # The following content concerns the calculation of the transition density matrices.
+    def TDM_S_1(self,X):
+        TDMS_1 = numpy.zeros_like(X)
+        return TDMS_1
+    
+    def TDM_S(self,X):
+        return TDMS
+    
+    def TDM_S(self,X):
+        return TDMS
+    
+    def TDM_S1(self,X):
+        return TDMS1

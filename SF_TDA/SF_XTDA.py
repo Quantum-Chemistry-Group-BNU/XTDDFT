@@ -14,7 +14,7 @@ from pyscf.symm import direct_prod
 #from line_profiler import profile
 
 from .SF_TDA import SF_TDA, mf_info,gen_response_sf,gen_response_sf_mc
-au2ev = 27.21138505
+au2ev = 27.21138505 # 27.2113834 in whb's untils
 
 def get_irrep_occupancy_directly(mol, mf):
     results = {}
@@ -562,7 +562,7 @@ class SA_SF_TDA():
         nv = self.nv
         no = self.no
         Ds = []
-        syms = []
+        self.syms = []
 
         for nstate in range(self.nstates):
             m_excited = 0.
@@ -589,7 +589,7 @@ class SA_SF_TDA():
                 if abs(x_co_ab[o,v]) > m_excited:
                     m_excited = abs(x_co_ab[o,v])
                     orb1 = o
-                    orb2 = v+self.nv
+                    orb2 = v+self.nc
                 print(f'{100*x_co_ab[o,v]**2:3.0f}% CO(ab) {o+1}a -> {v+1+self.nc}b {x_co_ab[o,v]:10.5f} ')
             for o,v in zip(* np.where(abs(x_ov_ab)>0.1)):
                 if abs(x_ov_ab[o,v]) > m_excited:
@@ -607,7 +607,7 @@ class SA_SF_TDA():
                 sym = self.calculate_irrep(orb1,orb2)
             else:
                 sym = 'A'
-            syms.append(sym)
+            self.syms.append(sym)
 
             if self.SA == 0 and not self.type_u:
                 Dp_ab = 0.
@@ -626,10 +626,13 @@ class SA_SF_TDA():
                 print(f'Excited state {nstate+1} {self.e[nstate]*27.21138505:10.5f} eV {self.e[nstate]+self.mf.e_tot:11.8f} Hartree D<S^2>={ds2:3.2f} {sym}')
             else:
                 print(f'Excited state {nstate+1} {self.e[nstate]*27.21138505:10.5f} eV {self.e[nstate]+self.mf.e_tot:11.8f} Hartree {sym}')
-
-
-            print('  ')
-        return Ds,syms
+            print('')
+        print('='*60)
+        print(f'SF(down)-TDA |S-⟩ Energy: cost time {self.times:.2f}s')
+        em = self.e * au2ev
+        for i in range(0,self.nstates,1):
+            print(f"No.{i:3d}  Esf={(em[i]):>10.5f} eV, En-E1={(em[i]-em[0]):>10.5f} eV,  symmetry={self.syms[i]}")
+        return Ds,self.syms
     
     def recoder(self): # pec for HF molecule in 6-31G
         print("Return first three excited vectors(CO(3->5 4->5) OO(6->5) or OO(5->5 6->6) configurations).")
@@ -1183,7 +1186,7 @@ class SA_SF_TDA():
         #print(f'init_guess times use {(end_t-start_t)/3600:6.4f} hours')
         #print('x0.shape ',x0.shape)
         converged, e, x1 = lib.davidson1(vind, x0, precond,
-                              tol=1e-8,
+                              tol=1e-16,
                               nroots=self.nstates,
                               max_cycle=300)
         end_time = time.time()
@@ -1215,6 +1218,7 @@ class SA_SF_TDA():
         return tmp_A
             
     def kernel(self, nstates=1,remove=False,frozen=None,foo=1.0,d_lda=0.3,fglobal=None):
+        time0 = time.time()
         self.re = remove
         nov = (self.nc+self.no) * (self.no+self.nv)
         self.nstates = min(nstates,nov)
@@ -1253,6 +1257,8 @@ class SA_SF_TDA():
                     e,v = scipy.sparse.linalg.eigsh(self.A,k=nroots,which='SA')
                 self.e = e[:nstates]
                 self.v = v[:,:nstates]
+        time1 = time.time()
+        self.times = time1-time0
         return self.e*27.21138505, self.v
 
 

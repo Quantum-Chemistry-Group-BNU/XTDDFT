@@ -1,6 +1,5 @@
 #!/usr/bin/env python
-import os
-import sys
+import os, sys, time
 os.environ["OMP_NUM_THREADS"] = "4"
 sys.path.append('/')
 sys.path.append('./../')
@@ -9,6 +8,7 @@ import numpy as np
 import pandas as pd
 from pyscf import dft, gto, scf, lib, ao2mo, tddft
 from pyscf.lib import logger
+from pyscf.symm import direct_prod
 from utils import unit, atom, utils
 
 
@@ -25,7 +25,7 @@ class XTDA:
         if self.basis == 'tensor':
             self.x_tda = X_TDA(self.mf)
             self.e, self.v = self.x_tda.kernel(nstates=self.nstates)
-            self.x_tda.analyze()
+            self.syms = self.x_tda.analyze()
             # x_tda.analyze_TDM()
             return self.e, self.v
         elif self.basis == 'orbital':
@@ -544,12 +544,14 @@ class X_TDA():
             mo_energy = mf.mo_energy
             mo_coeff = mf.mo_coeff
             mo_occ = mf.mo_occ
+            self.type_u = True
         else:  # ROKS
             mo_energy = np.array([mf.mo_energy, mf.mo_energy])
             mo_coeff = np.array([mf.mo_coeff, mf.mo_coeff])
             mo_occ = np.zeros((2, len(mf.mo_coeff)))
             mo_occ[0][np.where(mf.mo_occ >= 1)[0]] = 1
             mo_occ[1][np.where(mf.mo_occ >= 2)[0]] = 1
+            self.type_u = False
 
         self.s_tda = s_tda
         self.mol = mf.mol
@@ -946,6 +948,7 @@ class X_TDA():
         dim1 = nc * nv
         dim2 = dim1 + nc * no
         dim3 = dim2 + no * nv
+        self.syms = []
         for i in range(len(self.e)):
             value = self.values[:, i]
             # print(lib.norm(value)) # 1
@@ -953,30 +956,70 @@ class X_TDA():
             x_co0 = value[dim1:dim2].reshape(nc, no)
             x_ov0 = value[dim2:dim3].reshape(no, nv)
             x_cv1 = value[dim3:].reshape(nc, nv)
-            Dp_ab = 0.
-            print(f'Excited state {i + 1} {self.e[i] * unit.ha2eV:12.5f} eV')
+            main_pos = np.argmax(value**2)
+            if nc*nv>main_pos>=0: # cv
+                orb1, orb2 = divmod(main_pos, nc)
+            elif nc*(nv+no)>main_pos>=nc*nv: # co
+                main_pos -= nc*nv
+                orb1, orb2 = divmod(main_pos, nc)
+            elif nc*(nv+no)+no*nv>main_pos>=nc*(nv+no): # ov
+                main_pos -= nc*nv + nc*no
+                orb1, orb2 = divmod(main_pos, no)
+            elif main_pos>=nc*(nv+no)+no*nv: # cv
+                main_pos -= nc*nv + nc*no + no*nv
+                orb1, orb2 = divmod(main_pos, nc)
 
-            for o, v in zip(*np.where(abs(x_cv0) > 0.1)):
-                # print(f'CV(0) {o+1}b -> {v+1+self.nc+self.no}b {x_cv_bb[o,v]:10.5f} {100*x_cv_bb[o,v]**2:2.2f}%')
-                print(
-                    f'CV(0) {o + 1}b -> {v + 1 + self.nc + self.no}b {x_cv0[o, v]:10.5f} {100 * x_cv0[o, v] ** 2:2.2f}%')
-            for o, v in zip(*np.where(abs(x_co0) > 0.1)):
-                print(f'CO(0) {o + 1}b -> {v + 1 + self.nc}b {x_co0[o, v]:10.5f} {100 * x_co0[o, v] ** 2:5.2f}%')
+            if self.mol.groupname != 'C1':
+                sym = self.calculate_irrep(orb1,orb2)
+            else:
+                sym = 'A'
+            self.syms.append(sym)
+
+            print(f'Excited state {i + 1} {self.e[i] * unit.ha2eV:12.5f} eV, symmetry={sym}')
+
+            for c, v in zip(*np.where(abs(x_cv0) > 0.1)):
+                print(f'CV(0) {c + 1}b -> {v + 1 + self.nc + self.no}b {x_cv0[c, v]:10.5f} {100 * x_cv0[c, v] ** 2:2.2f}%')
+            for c, o in zip(*np.where(abs(x_co0) > 0.1)):
+                print(f'CO(0) {c + 1}b -> {o + 1 + self.nc}b {x_co0[c, o]:10.5f} {100 * x_co0[c, o] ** 2:5.2f}%')
             for o, v in zip(*np.where(abs(x_ov0) > 0.1)):
-                print(
-                    f'OV(0) {o + self.nc + 1}a -> {v + 1 + self.nc + self.no}a {x_ov0[o, v]:10.5f} {100 * x_ov0[o, v] ** 2:5.2f}%')
-            for o, v in zip(*np.where(abs(x_cv1) > 0.1)):
-                # print(f'CV(1) {o+1}a -> {v+1+self.nc+self.no}a {x_cv_aa[o,v]:10.5f} {100*x_cv_aa[o,v]**2:5.2f}%')
-                print(
-                    f'CV(1) {o + 1}a -> {v + 1 + self.nc + self.no}a {x_cv1[o, v]:10.5f} {100 * x_cv1[o, v] ** 2:5.2f}%')
+                print(f'OV(0) {o + self.nc + 1}a -> {v + 1 + self.nc + self.no}a {x_ov0[o, v]:10.5f} {100 * x_ov0[o, v] ** 2:5.2f}%')
+            for c, v in zip(*np.where(abs(x_cv1) > 0.1)):
+                print(f'CV(1) {c + 1}a -> {v + 1 + self.nc + self.no}a {x_cv1[c, v]:10.5f} {100 * x_cv1[c, v] ** 2:5.2f}%')
             print(' ')
+        eo = self.e * unit.ha2eV
+        print('='*60)
+        print(f'XTDA |So⟩ Energy: cost time {self.times:.2f}s')
+        for i in range(0,self.nstates,1):
+            print(f"No.{i:3d}  Esf={eo[i]:>10.5f} eV,  En-E1={(eo[i]-eo[0]):>10.5f} eV,  symmetry={self.syms[i]}")
+        return self.syms
 
     def kernel(self, nstates=1):
+        time0 = time.time()
         e, v = scipy.linalg.eigh(self.A)
         self.e = e[:nstates]
         self.values = v[:, :nstates]
         self.nstates = nstates
+        time1 = time.time()
+        self.times = time1-time0
         return self.e * unit.ha2eV, self.values
+    
+    def calculate_irrep(self,orb1,orb2):
+        orb_sym = self.mf.get_orbsym(self.mf.mo_coeff)
+        ground_sym = self.mf.get_wfnsym()
+        print('ground_irrep ',ground_sym)
+        if self.type_u:
+            print('UKS')
+            orb1_sym = np.array([orb_sym[0][orb1]])
+            orb2_sym = np.array([orb_sym[1][orb2]])
+        else:
+            orb1_sym = np.array([orb_sym[orb1]])
+            orb2_sym = np.array([orb_sym[orb2]])
+        direct_s = direct_prod(orb1_sym,orb2_sym,self.mol.groupname)
+        direct_s = direct_prod(direct_s[0],np.array(ground_sym),self.mol.groupname)
+        if direct_s[0][0] >= len(self.mol.irrep_name):
+            return 'A'
+        else:
+            return self.mol.irrep_name[direct_s[0][0]]
 
 if __name__ == "__main__":
     mol = gto.M(

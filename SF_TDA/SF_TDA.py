@@ -1,7 +1,8 @@
 import numpy as np
-import scipy, sys
+import scipy, sys, time
 from pyscf import gto, dft, scf, ao2mo, lib, tddft
 from pyscf.dft import numint,numint2c,xc_deriv
+from pyscf.symm import direct_prod
 from functools import reduce
 import functools
 from pyscf.dft.gen_grid import NBINS
@@ -289,8 +290,8 @@ def deal_v_davidson2(mf,nstates,v):
     for state in range(nstates):
         tmp_data = v[:,state]
         for i in range(nc):
-            cv[state,i,:] += tmp_data[i*nv:i*nv+nv]
-    return cv
+            cv[state,i,:] += tmp_data[i*nv:i*nv+nc]
+    return v
 
 def deal_v_davidson(mf,nstates,v,remove=False):
     # change davidson data form like nvir|nvir|nvir|...(alpha->beta nc|no -> no|nv)  to cv|co|ov|oo
@@ -324,7 +325,7 @@ def deal_v_davidson(mf,nstates,v,remove=False):
         if remove:
             for i in range(no-1):
                 oo[state,i*no:(i+1)*no] += tmp_data[passed+i*nvir:passed+i*nvir+no]
-                ov[state,i,:] += tmp_data[passed+i*nvir+self.no:passed+i*nvir+no+nv]
+                ov[state,i,:] += tmp_data[passed+i*nvir+no:passed+i*nvir+no+nv]
             oo[state,(no-1)*no:] += tmp_data[passed+(no-1)*nvir:passed+(no-1)*nvir+no-1]
             ov[state,no-1,:] += tmp_data[passed+(no-1)*nvir+no-1:]
         else:
@@ -390,7 +391,10 @@ def davidson_process(mf,nstates,isf=-1,method=0):
     if isf == -1:
         v = deal_v_davidson(mf,nstates,v)
     elif isf == 1:
-        v = deal_v_davidson2(mf,nstates,v)
+        ...
+        # here may have some problem
+        # if davidson =0 or 1 is different please open `v = deal_v_davidson2(mf,nstates,v)`
+        # v = deal_v_davidson2(mf,nstates,v)
     print('Converged ',converged)
     return e,v
 
@@ -400,17 +404,17 @@ class SF_TDA_up():
             self.mo_energy = mf.mo_energy
             self.mo_coeff = mf.mo_coeff
             self.mo_occ = mf.mo_occ
-            #self.type_u = True
-        
+            self.type_u = True
         else: # ROKS
             self.mo_energy = np.array([mf.mo_energy, mf.mo_energy])
             self.mo_coeff = np.array([mf.mo_coeff, mf.mo_coeff])
             self.mo_occ = np.zeros((2,len(mf.mo_coeff)))
             self.mo_occ[0][np.where(mf.mo_occ>=1)[0]]=1
             self.mo_occ[1][np.where(mf.mo_occ>=2)[0]]=1
-            #self.type_u = False
+            self.type_u = False
         mol = mf.mol
         self.mf = mf
+        self.mol = self.mf.mol
         self.nao = mol.nao_nr()
         self.method = method
         self.davidson = davidson
@@ -548,6 +552,7 @@ class SF_TDA_up():
                   -np.einsum('ij,ab->iajb',fockB[:self.nc,:self.nc],delta_ab[self.no:,self.no:])).reshape((self.nc*self.nv,self.nc*self.nv))
         
     def kernel(self,nstates=None):
+        time0 = time.time()
         if nstates==None:
             nstates=self.nstates
         else:
@@ -557,18 +562,52 @@ class SF_TDA_up():
         else:
             self.get_Amat()
             self.e,self.v = scipy.linalg.eigh(self.A)
+        time1 = time.time()
+        self.times = time1-time0
         return self.e[:nstates]*ha2eV,self.v[:,:nstates]
     
     def analyse(self):
         nc = self.nc
         nv = self.nv
+        self.syms = []
         for istate in range(self.e[:self.nstates].shape[0]):
             value = self.v[:,istate]
-            x_cv_ab = value[:nc*nv].reshape(nc,nv)
+            main_pos = np.argmax(value**2)
+            orb1, orb2 = divmod(main_pos, nc)
+            if self.mol.groupname != 'C1':
+                sym = self.calculate_irrep(orb1,orb2)
+            else:
+                sym = 'A'
+            self.syms.append(sym)
+            x_cv_ab = value.reshape(nc,nv)
             print(f'Excited state {istate+1} {self.e[istate]*ha2eV:10.5f} eV')
             for o,v in zip(* np.where(abs(x_cv_ab)>0.1)):
                 print(f'{100*x_cv_ab[o,v]**2:3.0f}% CV(ab) {o+1}a -> {v+1+self.nc+self.no}b {x_cv_ab[o,v]:10.5f}')
             print(' ')
+        print('='*60)
+        print(f'SF(up)-TDA |S+⟩ Energy: cost time {self.times:.2f}s')
+        ep = self.e * ha2eV
+        for i in range(0,self.nstates,1):
+            print(f"No.{i:3d}  Esf={(ep[i]):>10.5f} eV, En-E1={(ep[i]-ep[0]):>10.5f} eV,  symmetry={self.syms[i]}")
+        return self.syms
+
+    def calculate_irrep(self,orb1,orb2):
+        orb_sym = self.mf.get_orbsym(self.mf.mo_coeff)
+        ground_sym = self.mf.get_wfnsym()
+        print('ground_irrep ',ground_sym)
+        if self.type_u:
+            print('UKS')
+            orb1_sym = np.array([orb_sym[0][orb1]])
+            orb2_sym = np.array([orb_sym[1][orb2]])
+        else:
+            orb1_sym = np.array([orb_sym[orb1]])
+            orb2_sym = np.array([orb_sym[orb2]])
+        direct_s = direct_prod(orb1_sym,orb2_sym,self.mol.groupname)
+        direct_s = direct_prod(direct_s[0],np.array(ground_sym),self.mol.groupname)
+        if direct_s[0][0] >= len(self.mol.irrep_name):
+            return 'A'
+        else:
+            return self.mol.irrep_name[direct_s[0][0]]
 
 # spin_down
 class SF_TDA_down():
@@ -819,6 +858,7 @@ class SF_TDA_down():
             print(' ')
             Ds.append(-no+1+Dp_ab)
         return None
+
     def kernel(self, nstates=1):
         self.nstates = nstates
         if self.davidson:
@@ -827,9 +867,6 @@ class SF_TDA_down():
             self.A = self.get_Amat()
             self.e,self.v = scipy.linalg.eigh(self.A)
         return self.e[:nstates]*ha2eV, self.v[:,:nstates]
-    
-    
-    
     
 # code from pyscf-forge to construct multicollinear functional
 def nr_uks_fxc_sf_tda_mc(ni, mol, grids, xc_code, dm0, dms, relativity=0, hermi=0,rho0=None,
