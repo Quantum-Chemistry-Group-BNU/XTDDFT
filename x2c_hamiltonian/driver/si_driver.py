@@ -111,12 +111,6 @@ class SI_driver():
         time2 = time.time()
         self.codetime = time2-time0
         logging.info(f"End diagonalization, cost time {time2-time1:.2f}s")
-        logging.info(f"Ref. E (in Hatree) = {self.mf.e_tot}")
-        # logging.info(f"The  E (in eV), shape={self.eso.shape} --")
-        # logging.info(f"{numpy.diag(self.Omega)[:20] * unit.ha2eV}")
-        # logging.info(f"{self.esf[:20] * unit.ha2eV}")
-        # logging.info(f"The  E_soc (in eV) --")
-        # logging.info(f"{self.eso[:20] * unit.ha2eV}")
         logging.info(f"End SI calculation, cost time {self.codetime:.2f}s")
         self.summary(print)
         return self.eso, self.vso
@@ -128,7 +122,7 @@ class SI_driver():
         logging.info(f"|Ref⟩ with E (in Hatree) = {self.mf.e_tot}")
         logging.info(f"Interaction among {self.nSm} |S-⟩, {self.ngs} |GS⟩, {self.nSo} |So⟩, {self.nSp} |S+⟩.")
         logging.info(f"{'='*18} Summary of S I calculation {'='*18}")
-        print(f"  No   i-th   Excited state    v**2        Esf(eV)       Eso(eV)    En-E1(eV)     En-E1(cm-1)")
+        print(f"  No   i-th   Excited state    v**2        Esf(eV)       Eso(eV)     En-E1(eV)    En-E1(cm-1)")
         for i, e in enumerate(self.eso[:printnum]):
             str_state, e_sf = self.v2state(self.vso[:,i])
             print(f"{i:4d} {str_state}  {e_sf*unit.ha2eV:>12.8f}  {self.eso[i]*unit.ha2eV:>12.8f}     {((self.eso[i]-self.eso[0])*unit.ha2eV):>10.8f}    {((self.eso[i]-self.eso[0])*unit.ha2eV*unit.eV2cm_1):>10.2f}")
@@ -181,6 +175,18 @@ class SI_driver():
         assert numpy.allclose(hm[...,1], -hm[...,1].conjugate())
         return hm[...,::-1]
     
+    def cal_osc_mu(self,):
+        '''
+        Get electronic integral h_{pq}^i of electric dipole moment
+        '''
+        def _charge_center(mol):
+            charges = mol.atom_charges()
+            coords = mol.atom_coords()
+            return numpy.einsum('z,zr->r', charges, coords)/charges.sum()
+        with self.mol.with_common_orig(_charge_center(self.mol)):
+            ints = self.mol.intor_symmetric('int1e_r', comp=3) # (3,nao,nao)
+        return numpy.einsum('xpq,pi,qj->xij', ints, self.mf.mo_coeff, self.mf.mo_coeff)
+    
     def cal_dims(self) -> None:
         '''
         Calculate some dimesions
@@ -188,7 +194,8 @@ class SI_driver():
         self.norb = self.mol.nao
         self.nelec = self.mol.nelectron
         Smax = int(self.S*2)
-        self.nc,self.no,self.nv = (self.nelec-Smax)//2, Smax, self.norb-(self.nelec-Smax)//2-Smax
+        self.n = (self.nelec-Smax)//2, Smax, self.norb-(self.nelec-Smax)//2-Smax
+        self.nc,self.no,self.nv = self.n
         # delta
         self.delta_c = numpy.eye(self.nc)
         self.delta_o = numpy.eye(self.no)
@@ -210,7 +217,8 @@ class SI_driver():
         self.o1o1 = self.no-1
         # make slice
         ## |S->
-        self.sl_S_1_dim0 = slice(0, self.cv, 1)  
+        self.dim_Sm = self.cv+self.co+self.ov+self.oo+self.no
+        self.sl_S_1_dim0 = slice(0, self.cv, 1)
         self.sl_S_1_dim1 = slice(self.cv, self.cv+self.co, 1)
         self.sl_S_1_dim2 = slice(self.cv+self.co, self.cv+self.co+self.ov, 1)
         self.sl_S_1_dim3 = slice(self.cv+self.co+self.ov, self.cv+self.co+self.ov+self.oo, 1)
@@ -223,6 +231,7 @@ class SI_driver():
         logging.info(f"|S-⟩ O1O2(1): Slice {self.sl_S_1_dim3}, length: {self.oo}")
         logging.info(f"|S-⟩ O1O1(1): Slice {self.sl_S_1_dim4}, length: {self.no}")
         ## |S>
+        self.dim_So = self.cv+self.co+self.ov+self.cv
         self.sl_S_dim0 = slice(0, self.cv, 1)
         self.sl_S_dim1 = slice(self.cv, self.cv+self.co, 1)
         self.sl_S_dim2 = slice(self.cv+self.co, self.cv+self.co+self.ov, 1)
@@ -234,6 +243,7 @@ class SI_driver():
         logging.info(f"|So⟩ CV(1):   Slice {self.sl_S_dim3}, length: {self.cv}")
         ## |S+>
         logging.info(f"Slice of |S+⟩ is")
+        self.dim_Sp = self.cv
         logging.info(f"|S+⟩ CV(1):                           length: {self.cv}")
         # hso pos
         self.nGS = self.ngs
@@ -772,15 +782,77 @@ class SI_driver():
         return XhX
     
     # The following content concerns the calculation of the transition density matrices.
-    def TDM_S_1(self,X):
-        TDMS_1 = numpy.zeros_like(X)
-        return TDMS_1
+    # then obtain oscillator strength
+    def reformat_S_1(self,X):
+        X = [
+            X[self.sl_S_1_dim0].reshape(self.nc,self.nv),
+            X[self.sl_S_1_dim1].reshape(self.nc,self.no),
+            X[self.sl_S_1_dim2].reshape(self.no,self.nv),
+            X[self.sl_S_1_dim3].reshape(self.no,self.no),
+            X[self.sl_S_1_dim4]
+            ]
+        return X
+
+    def reformat_S(self,X):
+        X = [
+            X[self.sl_S_dim0].reshape(self.nc,self.nv),
+            X[self.sl_S_dim1].reshape(self.nc,self.no),
+            X[self.sl_S_dim2].reshape(self.no,self.nv),
+            X[self.sl_S_dim3].reshape(self.nc,self.nv),
+            ]
+        return X
     
-    def TDM_S(self,X):
-        return TDMS
-    
-    def TDM_S(self,X):
-        return TDMS
-    
-    def TDM_S1(self,X):
-        return TDMS1
+    def cal_osc(self,EL,XL,ER,XR):
+        from XTDA import TDM_GSS, TDM_SGS, TDM_S
+        from SF_TDA.SF_TDA import TDM_S1
+        from SF_TDA.SF_XTDA import TDM_S_1
+        '''
+        Calculate the oscillator strength
+        XL, XR given must obey this order S-1 GS S S+1
+        By using Wigner--Eckart Thm. the number of nonvanishing term only six:
+            ⟨S-1|O|S-1⟩      0          0          0       
+                 0       ⟨GS|O|GS⟩  ⟨GS|O|S⟩       0       
+                 0        ⟨S|O|GS⟩   ⟨S|O|S⟩       0       
+                 0           0          0     ⟨S+1|O|S+1⟩  
+        here ⟨GS|O|GS⟩ == 0.
+        '''
+        osc = numpy.zeros((3,))
+        begin_GS = self.dim0*self.dim_Sm
+        begin_S = begin_GS + int((2*self.S+1))
+        begin_S1 = begin_S + int((2*self.S+1)*self.dim_So)
+        assert begin_S1 + int((2*self.S+3)*self.dim_Sp) == self.vso.shape[0]
+        ints_mo = self.self.cal_osc_mu()
+        # S-1 S-1
+        for M in range(0, 2*self.S-1, 1):
+            XL = XL[M*self.dim_Sm:(M+1)*self.dim_Sm]
+            XR = XR[M*self.dim_Sm:(M+1)*self.dim_Sm]
+            XL = self.reformat_S_1(XL)
+            XR = self.reformat_S_1(XR)
+            osc += TDM_S_1(XL,XR,ints_mo,self.n,self.sl)
+        # GS S
+        for M in range(0, 2*self.S+1, 1):
+            XL = numpy.ones((1,))
+            XR = XR[begin_S + M*self.dim_So: begin_S + (M+1)*self.dim_So]
+            XR = self.reformat_S(XR)
+            osc += TDM_GSS(XL,XR,ints_mo,self.n,self.sl)
+        # S GS
+        for M in range(0, 2*self.S+1, 1):
+            XL = XL[begin_S + M*self.dim_So: begin_S + (M+1)*self.dim_So]
+            XL = self.reformat_S(XL)
+            XR = numpy.ones((1,))
+            osc += TDM_SGS(XL,XR,ints_mo,self.n,self.sl)
+        # S S
+        for M in range(0, 2*self.S+1, 1):
+            XL = XL[begin_S + M*self.dim_So: begin_S + (M+1)*self.dim_So]
+            XR = XR[begin_S + M*self.dim_So: begin_S + (M+1)*self.dim_So]
+            XL = self.reformat_S(XL)
+            XR = self.reformat_S(XR)
+            osc += TDM_S(XL,XR,ints_mo,self.n,self.sl)
+        # S+1 S+1
+        for M in range(0, 2*self.S+3, 1):
+            XL = XL[begin_S1 + M*self.dim_Sp: begin_S1 + (M+1)*self.dim_Sp]
+            XR = XR[begin_S1 + M*self.dim_Sp: begin_S1 + (M+1)*self.dim_Sp]
+            osc += TDM_S([XL,],[XR,],ints_mo,self.n,self.sl)
+        
+        osc = (2/3)*(EL-ER)*(osc[0]**2 + osc[1]**2 + osc[2]**2)
+        return osc

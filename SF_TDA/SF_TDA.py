@@ -7,7 +7,8 @@ from functools import reduce
 import functools
 from pyscf.dft.gen_grid import NBINS
 from pyscf.dft.numint import _dot_ao_ao_sparse,_scale_ao_sparse,_tau_dot_sparse
-
+from opt_einsum import contract as einsum
+from utils import unit
 #from utils import unit
 ha2eV = 27.2113834
 
@@ -290,8 +291,8 @@ def deal_v_davidson2(mf,nstates,v):
     for state in range(nstates):
         tmp_data = v[:,state]
         for i in range(nc):
-            cv[state,i,:] += tmp_data[i*nv:i*nv+nc]
-    return v
+            cv[state,i,:] += tmp_data[i*nv:i*nv+nv]
+    return cv.reshape(nstates,-1).T
 
 def deal_v_davidson(mf,nstates,v,remove=False):
     # change davidson data form like nvir|nvir|nvir|...(alpha->beta nc|no -> no|nv)  to cv|co|ov|oo
@@ -391,10 +392,10 @@ def davidson_process(mf,nstates,isf=-1,method=0):
     if isf == -1:
         v = deal_v_davidson(mf,nstates,v)
     elif isf == 1:
-        ...
+        # ...
         # here may have some problem
         # if davidson =0 or 1 is different please open `v = deal_v_davidson2(mf,nstates,v)`
-        # v = deal_v_davidson2(mf,nstates,v)
+        v = deal_v_davidson2(mf,nstates,v)
     print('Converged ',converged)
     return e,v
 
@@ -564,7 +565,9 @@ class SF_TDA_up():
             self.e,self.v = scipy.linalg.eigh(self.A)
         time1 = time.time()
         self.times = time1-time0
-        return self.e[:nstates]*ha2eV,self.v[:,:nstates]
+        self.e = self.e[:nstates]
+        self.v = self.v[:,:nstates]
+        return self.e*ha2eV,self.v
     
     def analyse(self):
         nc = self.nc
@@ -608,6 +611,64 @@ class SF_TDA_up():
             return 'A'
         else:
             return self.mol.irrep_name[direct_s[0][0]]
+
+    def calculate_TDM(self):
+        def _charge_center(mol):
+            charges = mol.atom_charges()
+            coords = mol.atom_coords()
+            return np.einsum('z,zr->r', charges, coords)/charges.sum()
+        with self.mol.with_common_orig(_charge_center(self.mol)):
+            ints = self.mol.intor_symmetric('int1e_r', comp=3) # (3,nao,nao)
+        ints_mo = np.einsum('xpq,pi,qj->xij', ints, self.mf.mo_coeff, self.mf.mo_coeff)
+
+        dip_elec = -self.mf.dip_moment(unit='au')
+        nuc_charges = self.mol.atom_charges()
+        nuc_coords = self.mol.atom_coords()
+        dip_nuc = np.einsum('i,ix->x', nuc_charges, nuc_coords)
+        gs = dip_elec + dip_nuc
+        
+        print("\nExcited state to Excited state transition dipole moments(a.u.)")
+        print("StateL StateR      X        Y        Z     f(L<-R)")
+        si = self.mol.spin/2
+        for i in range(len(self.e)):
+            for j in range(len(self.e)):
+                XL = [self.v[:,i].reshape(self.nc,self.nv)]
+                XR = [self.v[:,j].reshape(self.nc,self.nv)]
+                n = (self.nc, self.no, self.nv)
+                sl = (slice(0,self.nc,1), slice(self.nc,self.nc+self.no,1), slice(self.nc+self.no,self.nc+self.no+self.nv,1))
+                tdm = TDM_S1(si,XL,XR,ints_mo,n,sl)
+                if i == j: tdm += gs
+                osc = (2/3)*(self.e[i]-self.e[j])*(tdm[0]**2 + tdm[1]**2 + tdm[2]**2)
+                # tdm *= unit.au2D
+                print(f' {i+1:2d}     {j+1:2d}    {tdm[0]:>8.4f} {tdm[1]:>8.4f} {tdm[2]:>8.4f}  {osc:>8.4f} ')
+
+def TDM_S1(S,XL,XR,ints_mo,n,sl):
+    '''
+    TDM_S1: Calculate
+        XL⟨Psi_L|O|Psi_R⟩XR = \sum_pq r_{pq}^{l} (XL ⟨Psi_L|E_{pq}|Psi_R⟩ XR)
+    Case(31)
+    here
+        XL⟨Psi_L|E_{pq}|Psi_R⟩XR is TDM1;
+        S: Spin projection Sz of |ref.⟩
+        XL: CI coefficient of |Psi_L⟩
+        XR: CI coefficient of |Psi_R⟩
+        and here |Psi_L⟩ and |Psi_R⟩ spin (S+1)(S+1)
+        ints_mo: r_{pq}^{l} (Note that the other dimension (l) should be placed at the foremost index.)
+        n: nc,no,nv: number of spatial orbitals (core, open-shell, vitural)
+        sl: slc,slo,slv: slice of spatial orbitals (core, open-shell, vitural)
+    '''
+    nc,no,nv=n
+    slc,slo,slv=sl
+    delta_c = np.eye(nc)
+    delta_o = np.eye(no)
+    delta_v = np.eye(nv)
+    assert len(XL) == 1 and len(XR) == 1
+    assert len(XL[0].shape) == 2 and len(XR[0].shape) == 2
+    tdm = np.zeros((3,))
+    # Case(31) CV1-CV1
+    tdm +=  einsum('ia,xab,ij,jb->x', XL[0], ints_mo[:,slv,slv], delta_c, XR[0])
+    tdm += -einsum('ia,xji,ab,jb->x', XL[0], ints_mo[:,slc,slc], delta_v, XR[0])
+    return tdm
 
 # spin_down
 class SF_TDA_down():
@@ -867,7 +928,7 @@ class SF_TDA_down():
             self.A = self.get_Amat()
             self.e,self.v = scipy.linalg.eigh(self.A)
         return self.e[:nstates]*ha2eV, self.v[:,:nstates]
-    
+
 # code from pyscf-forge to construct multicollinear functional
 def nr_uks_fxc_sf_tda_mc(ni, mol, grids, xc_code, dm0, dms, relativity=0, hermi=0,rho0=None,
                       vxc=None, fxc=None, extype=0, max_memory=2000, verbose=None):
