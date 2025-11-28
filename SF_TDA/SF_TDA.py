@@ -573,7 +573,7 @@ class SF_TDA_up():
         nc = self.nc
         nv = self.nv
         self.syms = []
-        for istate in range(self.e[:self.nstates].shape[0]):
+        for istate in range(self.e.shape[0]):
             value = self.v[:,istate]
             main_pos = np.argmax(value**2)
             orb1, orb2 = divmod(main_pos, nc)
@@ -590,7 +590,7 @@ class SF_TDA_up():
         print('='*60)
         print(f'SF(up)-TDA |S+⟩ Energy: cost time {self.times:.2f}s')
         ep = self.e * ha2eV
-        for i in range(0,self.nstates,1):
+        for i in range(0,self.e.shape[0],1):
             print(f"No.{i:3d}  Esf={(ep[i]):>10.5f} eV, En-E1={(ep[i]-ep[0]):>10.5f} eV,  symmetry={self.syms[i]}")
         return self.syms
 
@@ -628,7 +628,7 @@ class SF_TDA_up():
         gs = dip_elec + dip_nuc
         
         print("\nExcited state to Excited state transition dipole moments(a.u.)")
-        print("StateL StateR      X        Y        Z     f(L<-R)")
+        print("StateL StateR      X        Y        Z      f(L<-R)")
         si = self.mol.spin/2
         for i in range(len(self.e)):
             for j in range(len(self.e)):

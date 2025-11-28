@@ -13,6 +13,9 @@ from pyscf import scf, dft
 from opt_einsum import contract as einsum
 
 from utils import unit
+from XTDA import TDM_GSS, TDM_S
+from SF_TDA.SF_TDA import TDM_S1
+from SF_TDA.SF_XTDA import TDM_S_1
 
 def progress_bar(current, total, start_time, bar_length=30):
     fraction = current / total
@@ -66,10 +69,12 @@ class SI_driver():
             Vso: numpy.ndarray = None,
             ngs: Optional[Union[int, bool]] = 1,
             states:dict = {},
+            cal_osc:bool = 0,
     ) -> None:
         super().__init__()
         self.mf = mf
         self.mol = mf.mol
+        self.cal_osc = cal_osc
         # Spin and corresponding relationship
         self.S = S
         assert self.S == self.mol.spin/2.
@@ -77,6 +82,7 @@ class SI_driver():
         self.S2str = {(self.S, 1):'|GS>', (self.S, 0):'|So>', (self.S+1, 0):'|S+>', (self.S-1, 0):'|S->'}
         # Vso to hm
         self.hm = self.cal_hm(Vso)
+        if self.cal_osc: self.ints_mo = self.cal_edm_mu()
         # check state label
         self.ngs = ngs
         self.states = states
@@ -98,6 +104,8 @@ class SI_driver():
            one can use `self.cal_hso_pos` function
            to determine the posision of matrix element of your interesting state.
         1. Summary of eso, esf and corresponding state.
+        2. Transform the density matrix in |Psi⟩ to the |Psi'⟩ basis using the eigenvector self.vso.
+        3. Summary of f(I,J) oscillator strength bewteen state I and state J.
         '''
         logging.info(f"Perform SI calculation with Si={self.S}")
         time0 = time.time()
@@ -107,12 +115,15 @@ class SI_driver():
         logging.info(f"{'='*20} Heff diagonalization {'='*20}")
         time1 = time.time()
         self.eso, self.vso = scipy.linalg.eigh(self.heff, driver='evd')
+        if self.cal_osc:
+            self.dmso = einsum('ij,ikn,kl->iln',self.vso.conjugate(),self.dm,self.vso)
         self.esf = numpy.diag(self.vso.T.conjugate()@self.Omega@self.vso).real
         time2 = time.time()
         self.codetime = time2-time0
         logging.info(f"End diagonalization, cost time {time2-time1:.2f}s")
         logging.info(f"End SI calculation, cost time {self.codetime:.2f}s")
         self.summary(print)
+        # self.summary_osc(20)
         return self.eso, self.vso
     
     def summary(self,printnum=100):
@@ -127,6 +138,32 @@ class SI_driver():
             str_state, e_sf = self.v2state(self.vso[:,i])
             print(f"{i:4d} {str_state}  {e_sf*unit.ha2eV:>12.8f}  {self.eso[i]*unit.ha2eV:>12.8f}     {((self.eso[i]-self.eso[0])*unit.ha2eV):>10.8f}    {((self.eso[i]-self.eso[0])*unit.ha2eV*unit.eV2cm_1):>10.2f}")
     
+    def summary_osc(self,printnum=100,unit='eV'):
+        logging.info(f"{'='*16} Dipole moments and Oscillator strength {'='*16}")
+        # print(f" I-th     J-th         X              Y              Z              f(I,J)")
+        for i, ei in enumerate(self.eso[:printnum]):
+            for j, ej in enumerate(self.eso[:printnum]):
+                self.print_osc_local(i,j,unit)
+
+    def print_osc_local(self,i,j,unit_='eV'):
+        if not self.cal_osc: raise ValueError(f"You must set `cal_osc=True` to calculate Dipole moments and Oscillator strength!")
+        if unit_ == 'au':
+            trans_unit = 1.
+        elif unit_ == 'eV':
+            trans_unit = unit.ha2eV
+        elif unit_ == 'debye':
+            trans_unit = unit.au2D
+        dm = self.dmso[i,j,:]
+        dE = self.eso[j]-self.eso[i]
+        dmu = dm.T.conjugate()@dm
+        f = ((2/3)*(dE)*dmu).real
+        print(f'\n[{i:>3d}] <--- [{j:>3d}]: |rij|**2={dmu.real:<10.8f}, △E = {dE*trans_unit:>10.8f} {unit_}, f = {f:<10.8f}')
+        print(f"                          X           Y           Z")
+        print(f"              Real   {dm[0].real:>8.4f}    {dm[1].real:>8.4f}    {dm[2].real:>8.4f}")
+        print(f"              Imag   {dm[0].imag:>8.4f}    {dm[1].imag:>8.4f}    {dm[2].imag:>8.4f}")
+        print('-'*50)
+        return dE, f
+
     def print_hso_local(self,SML,SMR):
         SL, ML, iL, igsL = SML
         SR, MR, iR, igsR = SMR
@@ -140,7 +177,6 @@ class SI_driver():
     
     def print_hso(self,):
         for L_pos in range(0,self.dim_hso,1):
-            breakpoint()
             for R_pos in range(L_pos,self.dim_hso,1):
                 SML = self.cal_pos(L_pos)
                 SMR = self.cal_pos(R_pos)
@@ -175,17 +211,22 @@ class SI_driver():
         assert numpy.allclose(hm[...,1], -hm[...,1].conjugate())
         return hm[...,::-1]
     
-    def cal_osc_mu(self,):
+    def cal_edm_mu(self,):
         '''
         Get electronic integral h_{pq}^i of electric dipole moment
         '''
         def _charge_center(mol):
             charges = mol.atom_charges()
             coords = mol.atom_coords()
-            return numpy.einsum('z,zr->r', charges, coords)/charges.sum()
+            return einsum('z,zr->r', charges, coords)/charges.sum()
         with self.mol.with_common_orig(_charge_center(self.mol)):
             ints = self.mol.intor_symmetric('int1e_r', comp=3) # (3,nao,nao)
-        return numpy.einsum('xpq,pi,qj->xij', ints, self.mf.mo_coeff, self.mf.mo_coeff)
+        dip_elec = -self.mf.dip_moment(unit='au')
+        nuc_charges = self.mol.atom_charges()
+        nuc_coords = self.mol.atom_coords()
+        dip_nuc = einsum('i,ix->x', nuc_charges, nuc_coords)
+        self.mu_nuc = dip_elec + dip_nuc
+        return einsum('xpq,pi,qj->xij', ints, self.mf.mo_coeff, self.mf.mo_coeff)
     
     def cal_dims(self) -> None:
         '''
@@ -253,6 +294,7 @@ class SI_driver():
         self.dim0 = int((2*self.S-1)*self.nSm)
         self.dim1 = int((2*self.S-1)*self.nSm + (2*self.S+1)*self.nGS)
         self.dim2 = int((2*self.S-1)*self.nSm + (2*self.S+1)*(self.nGS+self.nSo))
+        self.dim3 = int((2*self.S-1)*self.nSm + (2*self.S+1)*(self.nGS+self.nSo) + (2*self.S+3)*(self.nSp))
         self.dim_hso = int((2*self.S-1)*self.nSm + (2*self.S+1)*(self.nGS+self.nSo) + (2*self.S+3)*self.nSp)
         self.str2dim = {'|S->': 0,'|GS>': self.dim0,'|So>': self.dim1,'|S+>': self.dim2}
         self.str2nS = {'|S->': self.nSm,'|GS>': self.nGS,'|So>': self.nSo,'|S+>': self.nSp}
@@ -329,6 +371,8 @@ class SI_driver():
         logging.info(f"{'='*20} Begin to make heff {'='*20}")
         logging.info(f"dim of Heff = {self.dim_hso}")
         time0 = time.time()
+        if self.cal_osc:
+            self.dm = numpy.zeros((self.dim_hso, self.dim_hso,3,))
         hso = numpy.zeros((self.dim_hso, self.dim_hso,),dtype=numpy.complex128)
         Omega = numpy.zeros((self.dim_hso, self.dim_hso,))
         count = 0
@@ -343,6 +387,8 @@ class SI_driver():
                         R = (R_index, R_value)
                         # ============ construct matrix element ============
                         h, exitcode = self.make_hso_local(SL,SR,L,R) # <Phi|hm|Phi> without geo-factor w(SL,ML,SR,MR)
+                        if self.cal_osc:
+                            d = self.make_dm_local(SL,SR,L,R) # <Phi|Ol|Phi>
                         for ML in numpy.arange(-SL,SL+1,1): # Different [ML] for fixed SL
                             for MR in numpy.arange(-SR,SR+1,1): # Different [MR] for fixed SR
                                 igsL, igsR = 0, 0
@@ -363,8 +409,11 @@ class SI_driver():
                                     if abs(MR-ML)<=1 and abs(SR-SL)<=1:
                                         # Calculate h*w
                                         hso[Lpos, Rpos] = h[int(MR-ML)+1]*w(SL,ML,SR,MR)
-                                    else:
-                                        hso[Lpos, Rpos] = 0.0
+                                    # else:
+                                        # hso[Lpos, Rpos] = 0.0
+                                    if self.cal_osc:
+                                        if abs(MR-ML)<1e-6 and abs(SR-SL)<=1e-6:
+                                            self.dm[Lpos, Rpos, :] = d
                                     count += 1
                                     if logging.getLogger().isEnabledFor(logging.DEBUG):
                                         if count%n_sum == 0: progress_bar(count, n_sum, time0)
@@ -372,11 +421,16 @@ class SI_driver():
                                         if count%int(n_sum/10) == 0:
                                             logging.info(f"{count//int(n_sum/10)}0% -- finish {count}/{n_sum}")
                                 if Lpos == Rpos: # E^{(0)}_I
+                                    if self.cal_osc:
+                                        self.dm[Lpos, Rpos, :] += self.mu_nuc
                                     assert abs(L_value[0]-R_value[0])<1e-6 # share the same energy
                                     if abs(hso[Lpos, Rpos].imag) > 1e-6: # real if diagonal
                                         logging.warning(f"{(Lpos, Rpos), (SL,ML,Li,igsL,SR,MR,Ri,igsR)},abs(hso[Lpos, Rpos].imag) = {abs(hso[Lpos, Rpos].imag):.2e}")
                                     Omega[Lpos, Rpos] = L[1][0]
         self.hso = symm_matrix(hso)
+        if self.cal_osc:
+            for i in range(0,self.dm.shape[-1],1):
+                self.dm[...,i] = symm_matrix(self.dm[...,i])
         self.hso = self.hso - numpy.diag(numpy.diag(self.hso))
         self.Omega = Omega
         self.heff = self.hso + self.Omega
@@ -388,7 +442,7 @@ class SI_driver():
         # if ndiff_heff > 1e-6: breakpoint()
         logging.info(f"End of contructing heff, cost time {time1-time0:.2f}s")
         return self.heff
-    
+
     def make_hso_local(self, SL, SR, L, R):
         '''
         SL, XL, SR, XR given
@@ -783,6 +837,53 @@ class SI_driver():
     
     # The following content concerns the calculation of the transition density matrices.
     # then obtain oscillator strength
+    def make_dm_local(self, SL, SR, L, R):
+        '''
+        SL, XL, SR, XR given
+        calculate matirx element XL<Phi(SL)|O^l|Phi(SR)>XR 
+        return a array shape (3,)
+        '''
+        igsL, igsR = 0, 0
+        if L[0] == '|GS>': igsL = 1
+        if R[0] == '|GS>': igsR = 1
+        L = L[1][1]
+        R = R[1][1]
+        dm = numpy.zeros((3,))
+        # S-1 S-1
+        if abs(SL-(self.S-1))<1e-6 and abs(SR-(self.S-1))<1e-6 and int(igsL+igsR) == 0:
+            dm = self.make_dm_S_1(L,R)
+        # GS GS = 0
+        # GS S
+        if abs(SL-(self.S))<1e-6 and abs(SR-(self.S))<1e-6 and int(igsL-igsR) == 1:
+            dm = self.make_dm_GSS(L,R)
+        # S S
+        if abs(SL-(self.S))<1e-6 and abs(SR-(self.S))<1e-6 and int(igsL+igsR) == 0:
+            dm = self.make_dm_S(L,R)
+        # S+1 S+1
+        if abs(SL-(self.S+1))<1e-6 and abs(SR-(self.S+1))<1e-6 and int(igsL+igsR) == 0:
+            dm = self.make_dm_S1(L,R)
+        return dm
+
+    def make_dm_S_1(self,XL,XR):
+        XL = self.reformat_S_1(XL)
+        XR = self.reformat_S_1(XR)
+        return TDM_S_1(self.S,XL,XR,self.ints_mo,self.n,self.sl)
+    
+    def make_dm_S(self,XL,XR):
+        XL = self.reformat_S(XL)
+        XR = self.reformat_S(XR)
+        return TDM_S(self.S,XL,XR,self.ints_mo,self.n,self.sl)
+    
+    def make_dm_GSS(self,XL,XR):
+        XL = numpy.ones((1,))
+        XR = self.reformat_S(XR)
+        return TDM_GSS(self.S,XL,XR,self.ints_mo,self.n,self.sl)
+    
+    def make_dm_S1(self,XL,XR):
+        XL = [XL.reshape(self.nc,self.nv)]
+        XR = [XR.reshape(self.nc,self.nv)]
+        return TDM_S1(self.S,XL,XR,self.ints_mo,self.n,self.sl)
+    
     def reformat_S_1(self,X):
         X = [
             X[self.sl_S_1_dim0].reshape(self.nc,self.nv),
@@ -801,58 +902,3 @@ class SI_driver():
             X[self.sl_S_dim3].reshape(self.nc,self.nv),
             ]
         return X
-    
-    def cal_osc(self,EL,XL,ER,XR):
-        from XTDA import TDM_GSS, TDM_SGS, TDM_S
-        from SF_TDA.SF_TDA import TDM_S1
-        from SF_TDA.SF_XTDA import TDM_S_1
-        '''
-        Calculate the oscillator strength
-        XL, XR given must obey this order S-1 GS S S+1
-        By using Wigner--Eckart Thm. the number of nonvanishing term only six:
-            ⟨S-1|O|S-1⟩      0          0          0       
-                 0       ⟨GS|O|GS⟩  ⟨GS|O|S⟩       0       
-                 0        ⟨S|O|GS⟩   ⟨S|O|S⟩       0       
-                 0           0          0     ⟨S+1|O|S+1⟩  
-        here ⟨GS|O|GS⟩ == 0.
-        '''
-        osc = numpy.zeros((3,))
-        begin_GS = self.dim0*self.dim_Sm
-        begin_S = begin_GS + int((2*self.S+1))
-        begin_S1 = begin_S + int((2*self.S+1)*self.dim_So)
-        assert begin_S1 + int((2*self.S+3)*self.dim_Sp) == self.vso.shape[0]
-        ints_mo = self.self.cal_osc_mu()
-        # S-1 S-1
-        for M in range(0, 2*self.S-1, 1):
-            XL = XL[M*self.dim_Sm:(M+1)*self.dim_Sm]
-            XR = XR[M*self.dim_Sm:(M+1)*self.dim_Sm]
-            XL = self.reformat_S_1(XL)
-            XR = self.reformat_S_1(XR)
-            osc += TDM_S_1(XL,XR,ints_mo,self.n,self.sl)
-        # GS S
-        for M in range(0, 2*self.S+1, 1):
-            XL = numpy.ones((1,))
-            XR = XR[begin_S + M*self.dim_So: begin_S + (M+1)*self.dim_So]
-            XR = self.reformat_S(XR)
-            osc += TDM_GSS(XL,XR,ints_mo,self.n,self.sl)
-        # S GS
-        for M in range(0, 2*self.S+1, 1):
-            XL = XL[begin_S + M*self.dim_So: begin_S + (M+1)*self.dim_So]
-            XL = self.reformat_S(XL)
-            XR = numpy.ones((1,))
-            osc += TDM_SGS(XL,XR,ints_mo,self.n,self.sl)
-        # S S
-        for M in range(0, 2*self.S+1, 1):
-            XL = XL[begin_S + M*self.dim_So: begin_S + (M+1)*self.dim_So]
-            XR = XR[begin_S + M*self.dim_So: begin_S + (M+1)*self.dim_So]
-            XL = self.reformat_S(XL)
-            XR = self.reformat_S(XR)
-            osc += TDM_S(XL,XR,ints_mo,self.n,self.sl)
-        # S+1 S+1
-        for M in range(0, 2*self.S+3, 1):
-            XL = XL[begin_S1 + M*self.dim_Sp: begin_S1 + (M+1)*self.dim_Sp]
-            XR = XR[begin_S1 + M*self.dim_Sp: begin_S1 + (M+1)*self.dim_Sp]
-            osc += TDM_S([XL,],[XR,],ints_mo,self.n,self.sl)
-        
-        osc = (2/3)*(EL-ER)*(osc[0]**2 + osc[1]**2 + osc[2]**2)
-        return osc
