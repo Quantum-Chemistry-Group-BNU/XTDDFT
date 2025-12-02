@@ -173,15 +173,14 @@ class SI_driver():
         # hso = self.hso[L_pos,R_pos]
         hso = self.hso[self.cal_hso_pos(SL, ML, iL, igsL,SR, MR, iR, igsR)]
         print(f"{marker} = {hso:.8f} Ha. = {hso*unit.ha2eV:.8f} eV = {hso*unit.ha2eV*unit.eV2cm_1:.8f} cm-1")
-        return None
     
-    def print_hso(self,):
+    def print_hso(self,debug=0):
         for L_pos in range(0,self.dim_hso,1):
             for R_pos in range(L_pos,self.dim_hso,1):
+                if debug: print(f"(L,R)={(L_pos,R_pos)}")
                 SML = self.cal_pos(L_pos)
                 SMR = self.cal_pos(R_pos)
                 self.print_hso_local(SML,SMR)
-        return None
     
     def v2state(self,v):
         '''
@@ -361,7 +360,7 @@ class SI_driver():
         else:
             logging.warning(f"pos {pos} missing!")
             breakpoint()
-        M = -self.S + M
+        M = -S + M
         return (S,M,ith,igs)
     
     def make_heff(self):
