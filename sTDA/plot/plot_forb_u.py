@@ -21,18 +21,18 @@ plt.rcParams['lines.linewidth'] = 1
 plt.rcParams['axes.linewidth'] = 1
 
 functional = 'pbe0-st/'
-mol = 'ttm/'
+# mol = 'ttm/'
 # mol = 'bispytm/'
 # mol = 'ttm3ncz/'
 # mol = 'ptm3ncz/'
 # mol = 'mttm2/'
-# mol = 'hhcrqpp2/'
+mol = 'hhcrqpp2/'
 file = '../result/'
 
 # ==== 参数 ====
 # solvent = 'cyclohexane-'
-solvent = 'toluene-'
-# solvent = 'acetonitrile-'
+# solvent = 'toluene-'
+solvent = 'acetonitrile-'
 csv_file = solvent+"UsTDAgsol-orb.csv"
 img_dir = file+mol+functional+'cubeneed/'+'VCUBE/'
 prefix = solvent+"UsTDA-" + mol[:-1]

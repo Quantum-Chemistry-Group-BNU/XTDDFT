@@ -1216,26 +1216,26 @@ if __name__ == "__main__":
     # mol.basis = basis
     # mol.build()
 
-    # # add solvents
-    # t_dft0 = time.time()
-    # mf = dft.UKS(mol).SMD()
-    # # mf = dft.UKS(mol).PCM()
-    # # mf.with_solvent.method = 'COSMO'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
-    # # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
-    # # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
-    # mf.with_solvent.eps = 2.3741  # for toluene 甲苯
-    # # mf.with_solvent.eps = 35.688  # for Acetonitrile 乙腈
-
+    # add solvents
     t_dft0 = time.time()
-    mf = dft.UKS(mol)
+    mf = dft.UKS(mol).SMD()
+    # mf = dft.UKS(mol).PCM()
+    # mf.with_solvent.method = 'COSMO'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
+    # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
+    # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
+    mf.with_solvent.eps = 2.3741  # for toluene 甲苯
+    # mf.with_solvent.eps = 35.688  # for Acetonitrile 乙腈
+
+    # t_dft0 = time.time()
+    # mf = dft.UKS(mol)
     mf.conv_tol = 1e-8  # same with orca tightscf criterion
     mf.conv_tol_grad = 1e-5  # same with orca tightscf criterion
     mf.max_cycle = 200
     # xc = 'svwn'
     # xc = 'blyp'
-    xc = 'b3lyp'
+    # xc = 'b3lyp'
     # xc = 'wb97xd3'
-    # xc = 'pbe0'
+    xc = 'pbe0'
     # xc = 'pbe38'
     # xc = '0.50*HF + 0.50*B88 + GGA_C_LYP'  # BHHLYP
     # xc = 'hf'

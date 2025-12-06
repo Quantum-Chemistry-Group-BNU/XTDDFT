@@ -17,7 +17,7 @@ from pyscf.tools import molden, cubegen
 
 from eta import eta
 from utils import unit, atom, utils
-'''U and X opt file select same CSF in CVaa and CVbb'''
+'''use os-sTDA.py, this file have bug, but I am lazy to fix'''
 
 
 def iaia_f(qAk_ss, qAj_ss, qBk_tt, qBj_tt, gamma_k, gamma_j, fock_vir, n1, fock_occ, n2):
@@ -1018,6 +1018,8 @@ class XsTDA:
         print("calculate rotator strength use    {:8.4f} s".format(t_rs))
         print("calculate delta S^2 use           {:8.4f} s".format(t_dS2))
         print("sX-TDA use                        {:8.4f} s".format(t_all))
+
+        print("*****this file have error, use os-sTDA.py*****")
         return self.e_eV, self.os, rs, self.v, pscsf_fdiag
 
     def deltaS2(self):

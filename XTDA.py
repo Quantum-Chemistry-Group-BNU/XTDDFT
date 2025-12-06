@@ -65,6 +65,8 @@ class XTDA:
         h1e = self.mf.get_hcore()
         dm = self.mf.make_rdm1()
         vhf = self.mf.get_veff(self.mol, dm)
+        if getattr(self.mf, 'with_solvent', None) is not None:
+            vhf = vhf + vhf.v_solvent
         focka = h1e + vhf[0]
         fockb = h1e + vhf[1]
         fock_a = mo_coeff.T @ focka @ mo_coeff

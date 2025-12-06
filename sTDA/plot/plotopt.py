@@ -10,8 +10,8 @@ file = '../result/'
 # mol = 'ttm3ncz/'
 # mol = 'ptm3ncz/'
 # mol = 'mttm2/'
-# mol = 'hhcrqpp2/'
-mol = 'g3ttm/'
+mol = 'hhcrqpp2/'
+# mol = 'g3ttm/'
 # mol = 'c6h5nit/'
 if mol == 'hhcrqpp2/':
     rows = 300
@@ -27,13 +27,13 @@ else:
 colors_doc = ["#EF2C2B", "#EF2C2B", "#23B2E0", "#23B2E0", "#A5CC5B", "#000000"]  # doctor paper
 colors = ["#EF2C2B", "#EF2C2B", "#23B2E0", "#23B2E0", "#000000"]  # paper
 colors_functionals = ["#B31E1D", "#EF2C2B", "#F56664", "#1881A7", "#23B2E0", "#6FD0F0", "#000000"]
-solvent = '-TOLUENE'
+# solvent = '-TOLUENE'
 # solvent = '-CYCLOHEXANE'
-# solvent = '-ACETONITRILE'
+solvent = '-ACETONITRILE'
 # solvent = '-METHANOL'
-functional = 'pbe0-st-10eV/'
+# functional = 'pbe0-st-10eV/'
 # functional = 'b3lyp/'
-# functional = 'pbe0-st/'
+functional = 'pbe0-st/'
 # functional = 'tpssh-st-10eV/'
 
 # plt Settings
@@ -521,10 +521,10 @@ ds2_8 = XsTDA_gsol[:rows, 2]
 # XTDDFT_sol = pd.read_csv(file+mol+solvent+'XTDDFT.csv', sep='[,\s]+', header=None, engine='python').to_numpy()
 # e10 = XTDDFT_sol[:, 0]
 # os10 = XTDDFT_sol[:, 1]
-# XTDA_sol = pd.read_csv(file+mol+functional+'XTDA'+solvent+'.csv', sep='[,\s]+', header=None, engine='python').to_numpy()
-# e11 = XTDA_sol[:rows, 0]
-# os11 = XTDA_sol[:rows, 1]
-# # rs11 = XTDA_gsol[:, 2]
+XTDA_sol = pd.read_csv(file+mol+functional+'XTDA'+solvent+'.csv', sep='[,\s]+', header=None, engine='python').to_numpy()
+e11 = XTDA_sol[:rows, 0]
+os11 = XTDA_sol[:rows, 1]
+# rs11 = XTDA_gsol[:, 2]
 UsTDA_gsol = pd.read_csv(file+mol+functional+'UsTDA'+solvent+'.csv', sep='[,\s]+', header=None, engine='python').to_numpy()
 e9 = UsTDA_gsol[:rows, 0]
 os9 = UsTDA_gsol[:rows, 1]
@@ -564,8 +564,8 @@ os7 = int7(e7)
 # maxy2 = np.max(np.concatenate((os8, os9, os11, os12, os13))) * 1.1
 
 # only solvent result
-# maxy2 = np.max(np.concatenate((os8, os9, os11, os12))) * 1.1
-maxy2 = np.max(np.concatenate((os8, os9, os12))) * 1.1  # g3ttm
+maxy2 = np.max(np.concatenate((os8, os9, os11, os12))) * 1.1
+# maxy2 = np.max(np.concatenate((os8, os9, os12))) * 1.1  # g3ttm
 
 # # no use, this function divide X and U in two figure
 # UVvis(
@@ -611,14 +611,15 @@ cv1_9 = UsTDA_gsol[:rows, -1]
 #     colors=colors,
 #     title='UVspec', fwhm=0.2, maxy2=maxy2, norm=norm
 # )
+
 # # g3ttm
-UVvis4(
-    e8, os8, e12, os12, e9, os9, e7, os7,
-    ds2=[e9, ds2_9, colors[2], 'sU-TDA'], cv1=[e8, cv1_8, colors[0], 'sX-TDA'], num_method=[3],
-    labels=['sX-TDA', 'U-TDA', 'sU-TDA', 'Expt.'],
-    colors=["#EF2C2B", "#23B2E0", "#23B2E0", "#000000"],
-    title='UVspec', fwhm=0.2, maxy2=maxy2, norm=norm
-)
+# UVvis4(
+#     e8, os8, e12, os12, e9, os9, e7, os7,
+#     ds2=[e9, ds2_9, colors[2], 'sU-TDA'], cv1=[e8, cv1_8, colors[0], 'sX-TDA'], num_method=[3],
+#     labels=['sX-TDA', 'U-TDA', 'sU-TDA', 'Expt.'],
+#     colors=["#EF2C2B", "#23B2E0", "#23B2E0", "#000000"],
+#     title='UVspec', fwhm=0.2, maxy2=maxy2, norm=norm
+# )
 
 # # doctor paper
 # UVvis2(
@@ -725,13 +726,28 @@ UVvis4(
 # e47 = XsTDA_gsol[:rows, 0]
 # os47 = XsTDA_gsol[:rows, 1]
 # ds2_47 = XsTDA_gsol[:rows, 2]
-# UVvis3(
-#     e8, os8, e46, os46, e7, os7, num_method=[2],
-#     labels=['sX-TDA', 'sX-TDA-noDA-CSF', 'Expt.'],
-#     # colors=[colors[8],colors[11],colors[9],colors[12], colors[13],colors[7]],
-#     colors=colors_functionals,
-#     title='UVspec', fwhm=0.2, norm=norm
-# )
+# ******hhcrqpp2 test result*****
+functional = 'test/noFock-CSF/'
+XsTDA_gsol = pd.read_csv(file+mol+functional+'XsTDA'+solvent+'.csv', sep='[,\s]+', header=None, engine='python').to_numpy()
+e48 = XsTDA_gsol[:rows, 0]
+os48 = XsTDA_gsol[:rows, 1]
+ds2_48 = XsTDA_gsol[:rows, 2]
+UsTDA_gsol = pd.read_csv(file+mol+functional+'UsTDA'+solvent+'.csv', sep='[,\s]+', header=None, engine='python').to_numpy()
+e50 = UsTDA_gsol[:rows, 0]
+os50 = UsTDA_gsol[:rows, 1]
+ds2_50 = UsTDA_gsol[:rows, 2]
+functional = 'test/Xref-sUTDA-noFock-CSF/'
+XsTDA_gsol = pd.read_csv(file+mol+functional+'XsTDA'+solvent+'.csv', sep='[,\s]+', header=None, engine='python').to_numpy()
+e49 = XsTDA_gsol[:rows, 0]
+os49 = XsTDA_gsol[:rows, 1]
+ds2_49 = XsTDA_gsol[:rows, 2]
+UVvis3(
+    e48, os48, e50, os50, e49, os49, e7, os7, num_method=[3],
+    labels=['sX-TDA-noFock-CSF', 'sU-TDA-noFock-CSF', 'Xref-sUTDA-noFock-CSF', 'Expt.'],
+    # colors=[colors[8],colors[11],colors[9],colors[12], colors[13],colors[7]],
+    colors=colors_functionals,
+    title='UVspec', fwhm=0.2, norm=norm
+)
 
 # # ttm XTDA different functional
 # functional = 'blyp-st-8eV/'  # before do not calculate blyp, so XTDA put in -8eV document
