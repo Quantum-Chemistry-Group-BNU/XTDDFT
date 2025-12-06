@@ -1,6 +1,5 @@
 #!/usr/bin/env python
-import os
-import sys
+import os, sys, time
 os.environ["OMP_NUM_THREADS"] = "4"
 sys.path.append('/')
 sys.path.append('./../')
@@ -9,7 +8,9 @@ import numpy as np
 import pandas as pd
 from pyscf import dft, gto, scf, lib, ao2mo, tddft
 from pyscf.lib import logger
+from pyscf.symm import direct_prod
 from utils import unit, atom, utils
+from opt_einsum import contract as einsum
 
 
 class XTDA:
@@ -25,7 +26,7 @@ class XTDA:
         if self.basis == 'tensor':
             self.x_tda = X_TDA(self.mf)
             self.e, self.v = self.x_tda.kernel(nstates=self.nstates)
-            self.x_tda.analyze()
+            self.syms = self.x_tda.analyze()
             # x_tda.analyze_TDM()
             return self.e, self.v
         elif self.basis == 'orbital':
@@ -544,12 +545,14 @@ class X_TDA():
             mo_energy = mf.mo_energy
             mo_coeff = mf.mo_coeff
             mo_occ = mf.mo_occ
+            self.type_u = True
         else:  # ROKS
             mo_energy = np.array([mf.mo_energy, mf.mo_energy])
             mo_coeff = np.array([mf.mo_coeff, mf.mo_coeff])
             mo_occ = np.zeros((2, len(mf.mo_coeff)))
             mo_occ[0][np.where(mf.mo_occ >= 1)[0]] = 1
             mo_occ[1][np.where(mf.mo_occ >= 2)[0]] = 1
+            self.type_u = False
 
         self.s_tda = s_tda
         self.mol = mf.mol
@@ -577,6 +580,9 @@ class X_TDA():
         self.nc = nocc_b
         self.nv = nvir_a
         self.no = abs(nvir_a - nvir_b)
+        self.dim1 = self.nc * self.nv
+        self.dim2 = self.dim1 + self.nc * self.no
+        self.dim3 = self.dim2 + self.no * self.nv
         print('nc ', self.nc)
         print('no ', self.no)
         print('nv ', self.nv)
@@ -618,10 +624,11 @@ class X_TDA():
             print('omega alpha hyb', omega, alpha, hyb)
 
             xctype = ni._xc_type(mf.xc)
-            dm0 = mf.make_rdm1(mf.mo_coeff, mo_occ)
+            dm0 = mf.make_rdm1()
             # dm0 = mf.make_rdm1(mo_coeff0, mo_occ)
             if np.array(mf.mo_coeff).ndim == 2:
                 dm0.mo_coeff = (mf.mo_coeff, mf.mo_coeff)
+                dm0.mo_occ = mo_occ
                 # dm0.mo_coeff = (mo_coeff0, mo_coeff0)
             make_rho = ni._gen_rho_evaluator(mf.mol, dm0, hermi=1, with_lapl=False)[0]
             mem_now = lib.current_memory()[0]
@@ -832,111 +839,121 @@ class X_TDA():
                                            np.einsum('ab,ij->iajb', iden_V, fij_b2) - np.einsum('ab,ij->iajb', iden_V, fij_a2[:-no, :-no])).reshape(nc * nv, nc * nv)
         return A
 
+    # def analyze_TDM(self):
+    #     with self.mol.with_common_orig(_charge_center(self.mol)):
+    #         ints = self.mol.intor_symmetric('int1e_r', comp=3)  # (3,nao,nao)
+    #     ints_mo = np.einsum('xpq,pi,qj->xij', ints, self.mf.mo_coeff, self.mf.mo_coeff)
+    #     print("Ground state to Excited state transition dipole moments(Au)")
+    #     print('X    Y    Z    OSC.')
+    #     nc = self.nc
+    #     nv = self.nv
+    #     no = self.no
+    #     dim1 = nc * nv
+    #     dim2 = dim1 + nc * no
+    #     dim3 = dim2 + no * nv
+    #     self.values = utils.so2st(self.values, nc, no, nv)
+    #     for i in range(len(self.e)):
+    #         cv0 = self.values[:, i][:dim1].reshape(nc, nv)
+    #         co0 = self.values[:, i][dim1:dim2].reshape(nc, no)
+    #         ov0 = self.values[:, i][dim2:dim3].reshape(no, nv)
+    #         cv1 = self.values[:, i][dim3:].reshape(nc, nv)
+    #         hcv0 = np.einsum('...ia,ia->...', ints_mo[:, :nc, nc + no:], cv0)
+    #         hco0 = np.einsum('...iv,iv->...', ints_mo[:, :nc, nc:nc + no], co0)
+    #         hov0 = np.einsum('...va,va->...', ints_mo[:, nc:nc + no, nc + no:], ov0)
+    #         tdm = np.sqrt(2) * hcv0 + hco0 + hov0
+    #         osc = (2 / 3) * self.e[i] * (tdm[0] ** 2 + tdm[1] ** 2 + tdm[2] ** 2)
+    #         print(i + 1, tdm, osc)
+
+    #     dip_elec = -self.mf.dip_moment(unit='au')
+    #     nuc_charges = self.mol.atom_charges()
+    #     nuc_coords = self.mol.atom_coords()
+    #     dip_nuc = np.einsum('i,ix->x', nuc_charges, nuc_coords)
+    #     gs = dip_elec + dip_nuc
+    #     print('Ground state dipole moment (in Debye) ', gs)
+    #     print(' ')
+    #     print("Excited state to Excited state transition dipole moments(a.u.)")
+    #     print('State   State   X    Y    Z    OSC.')
+    #     si = self.mol.spin / 2
+    #     iden_C = np.identity(self.nc)
+    #     iden_O = np.identity(self.no)
+    #     iden_V = np.identity(self.nv)
+    #     dim1 = self.nc * self.nv
+    #     dim2 = dim1 + self.nc * self.no
+    #     dim3 = dim2 + self.no * self.nv
+    #     for i in range(len(self.e)):
+    #         s0_cv0 = self.values[:, i][:dim1].reshape(self.nc, self.nv)
+    #         s0_co0 = self.values[:, i][dim1:dim2].reshape(self.nc, self.no)
+    #         s0_ov0 = self.values[:, i][dim2:dim3].reshape(self.no, self.nv)
+    #         s0_cv1 = self.values[:, i][dim3:].reshape(self.nc, self.nv)
+    #         for j in range(len(self.e)):
+    #             s1_cv0 = self.values[:, j][:dim1].reshape(self.nc, self.nv)
+    #             s1_co0 = self.values[:, j][dim1:dim2].reshape(self.nc, self.no)
+    #             s1_ov0 = self.values[:, j][dim2:dim3].reshape(self.no, self.nv)
+    #             s1_cv1 = self.values[:, j][dim3:].reshape(self.nc, self.nv)
+
+    #             XL = [s0_cv0, s0_co0, s0_ov0, s0_cv1]
+    #             XR = [s1_cv0, s1_co0, s1_ov0, s1_cv1]
+    #             n = (self.nc, self.no, self.nv)
+    #             sl = (slice(0,self.nc,1), slice(self.nc,self.nc+self.no,1), slice(self.nc+self.no,self.nc+self.no+self.nv,1))
+    #             tdm = TDM_S(si,XL,XR,ints_mo,n,sl)
+    #             osc = (2 / 3) * (self.e[i] - self.e[j]) * (tdm[0] ** 2 + tdm[1] ** 2 + tdm[2] ** 2)
+    #             print(f'{i + 1:2d} {j + 1:2d} {tdm[0]:>8.4f} {tdm[1]:>8.4f} {tdm[2]:>8.4f} {osc:>8.4f}')
+    
+    def trans_format(self,X):
+        cv0 = X[:self.dim1].reshape(self.nc, self.nv)
+        co0 = X[self.dim1:self.dim2].reshape(self.nc, self.no)
+        ov0 = X[self.dim2:self.dim3].reshape(self.no, self.nv)
+        cv1 = X[self.dim3:].reshape(self.nc, self.nv)
+        return cv0, co0, ov0, cv1
+    
     def analyze_TDM(self):
+        osc = self.calculate_TDM()
+        return osc
+    
+    def calculate_TDM(self):
+        def _charge_center(mol):
+            charges = mol.atom_charges()
+            coords = mol.atom_coords()
+            return np.einsum('z,zr->r', charges, coords)/charges.sum()
         with self.mol.with_common_orig(_charge_center(self.mol)):
-            ints = self.mol.intor_symmetric('int1e_r', comp=3)  # (3,nao,nao)
+            ints = self.mol.intor_symmetric('int1e_r', comp=3) # (3,nao,nao)
         ints_mo = np.einsum('xpq,pi,qj->xij', ints, self.mf.mo_coeff, self.mf.mo_coeff)
-        print("Ground state to Excited state transition dipole moments(Au)")
-        print('X    Y    Z    OSC.')
-        nc = self.nc
-        nv = self.nv
-        no = self.no
-        dim1 = nc * nv
-        dim2 = dim1 + nc * no
-        dim3 = dim2 + no * nv
-        self.values = utils.so2st(self.values, nc, no, nv)
-        for i in range(len(self.e)):
-            cv0 = self.values[:, i][:dim1].reshape(nc, nv)
-            co0 = self.values[:, i][dim1:dim2].reshape(nc, no)
-            ov0 = self.values[:, i][dim2:dim3].reshape(no, nv)
-            cv1 = self.values[:, i][dim3:].reshape(nc, nv)
-            hcv0 = np.einsum('...ia,ia->...', ints_mo[:, :nc, nc + no:], cv0)
-            hco0 = np.einsum('...iv,iv->...', ints_mo[:, :nc, nc:nc + no], co0)
-            hov0 = np.einsum('...va,va->...', ints_mo[:, nc:nc + no, nc + no:], ov0)
-            tdm = np.sqrt(2) * hcv0 + hco0 + hov0
-            osc = (2 / 3) * self.e[i] * (tdm[0] ** 2 + tdm[1] ** 2 + tdm[2] ** 2)
-            print(i + 1, tdm, osc)
 
         dip_elec = -self.mf.dip_moment(unit='au')
         nuc_charges = self.mol.atom_charges()
         nuc_coords = self.mol.atom_coords()
         dip_nuc = np.einsum('i,ix->x', nuc_charges, nuc_coords)
         gs = dip_elec + dip_nuc
-        print('Ground state dipole moment (in Debye) ', gs)
-        print(' ')
-        print("Excited state to Excited state transition dipole moments(Au)")
-        print('State   State   X    Y    Z    OSC.')
-        si = self.mol.spin / 2
-        iden_C = np.identity(self.nc)
-        iden_O = np.identity(self.no)
-        iden_V = np.identity(self.nv)
-        dim1 = self.nc * self.nv
-        dim2 = dim1 + self.nc * self.no
-        dim3 = dim2 + self.no * self.nv
+
+        si = self.mol.spin/2
+        print("Ground state to Excited state transition dipole moments(a.u.)")
         for i in range(len(self.e)):
-            s0_cv0 = self.values[:, i][:dim1].reshape(self.nc, self.nv)
-            s0_co0 = self.values[:, i][dim1:dim2].reshape(self.nc, self.no)
-            s0_ov0 = self.values[:, i][dim2:dim3].reshape(self.no, self.nv)
-            s0_cv1 = self.values[:, i][dim3:].reshape(self.nc, self.nv)
+            XL = self.trans_format(self.values[:,i])
+            XR = [np.ones((1,))]
+            n = (self.nc, self.no, self.nv)
+            sl = (slice(0,self.nc,1), slice(self.nc,self.nc+self.no,1), slice(self.nc+self.no,self.nc+self.no+self.nv,1))
+            tdm = TDM_SGS(si,XL,XR,ints_mo,n,sl)
+            osc = (2/3)*(self.e[i])*(tdm[0]**2 + tdm[1]**2 + tdm[2]**2)
+            # tdm *= unit.au2D
+            print(f' {i+1:2d}     |GS⟩    {tdm[0]:>8.4f} {tdm[1]:>8.4f} {tdm[2]:>8.4f}  {osc:>8.4f} ')
+
+        print("\nExcited state to Excited state transition dipole moments(a.u.)")
+        print("StateL StateR      X        Y        Z      f(L<-R)")
+
+        for i in range(len(self.e)):
+            s0_cv0, s0_co0, s0_ov0, s0_cv1 = self.trans_format(self.values[:,i])
             for j in range(len(self.e)):
-                s1_cv0 = self.values[:, j][:dim1].reshape(self.nc, self.nv)
-                s1_co0 = self.values[:, j][dim1:dim2].reshape(self.nc, self.no)
-                s1_ov0 = self.values[:, j][dim2:dim3].reshape(self.no, self.nv)
-                s1_cv1 = self.values[:, j][dim3:].reshape(self.nc, self.nv)
-                if i == j:
-                    continue
+                s1_cv0, s1_co0, s1_ov0, s1_cv1 = self.trans_format(self.values[:,j])
 
-                # diagonal
-                # cv0-cv0 delta_ij*r_ab - delta_ab*r_ij
-                h_cv0_cv0 = np.einsum('ia,xba,jb,ij->x', s0_cv0, ints_mo[:, self.nc + self.no:, self.nc + self.no:], s1_cv0, iden_C) - \
-                            np.einsum('ia,xji,jb,ab->x', s0_cv0, ints_mo[:, :self.nc, :self.nc], s1_cv0, iden_V)
-                # print(h_cv0_cv0)
-                # co0-co0 delta_ij*r_uv - delta_uv*r_ij
-                h_co0_co0 = np.einsum('iu,xvu,jv,ij->x', s0_co0, ints_mo[:, self.nc:self.nc + self.no, self.nc:self.nc + self.no], s1_co0, iden_C) - \
-                            np.einsum('iu,xji,jv,uv->x', s0_co0, ints_mo[:, :self.nc, :self.nc], s1_co0, iden_O)
-                # print(h_co0_co0)
-                # ov0-ov0 delta_uv*r_ab - delta_ab*r_uv
-                h_ov0_ov0 = np.einsum('ua,xba,vb,uv->x', s0_ov0, ints_mo[:, self.nc + self.no:, self.nc + self.no:], s1_ov0, iden_O) - \
-                            np.einsum('ua,xuv,vb,ab->x', s0_ov0, ints_mo[:, self.nc:self.nc + self.no, self.nc:self.nc + self.no], s1_ov0, iden_V)
-                # print(h_ov0_ov0)
-                # cv1-cv1 delta_ij*r_ab - delta_ab*r_ij
-                h_cv1_cv1 = np.einsum('ia,xba,jb,ij->x', s0_cv1, ints_mo[:, self.nc + self.no:, self.nc + self.no:], s1_cv1, iden_C) - \
-                            np.einsum('ia,xji,jb,ab->x', s0_cv1, ints_mo[:, :self.nc, :self.nc], s1_cv1, iden_V)
-                # print(h_cv1_cv1)
-
-                # off-diagonal
-                factor = np.sqrt((si + 1) / (2 * si))
-                # factor = 0.5
-                # cv0-co0 1/sqrt{2} * delta_ij*r_av
-                h_cv0_co0 = np.einsum('ia,xva,jv,ij->x', s0_cv0, ints_mo[:, self.nc:self.nc + self.no, self.nc + self.no:], s1_co0, iden_C) / np.sqrt(2)
-                # print(h_cv0_co0)
-                # cv0-ov0 -1/sqrt{2} * delta_ab*r_iv
-                h_cv0_ov0 = -np.einsum('ia,xvi,vb,ab->x', s0_cv0, ints_mo[:, self.nc:self.nc + self.no, :self.nc], s1_ov0, iden_V) / np.sqrt(2)
-                # print(h_cv0_ov0)
-
-                # co0 -cv0
-                h_co0_cv0 = np.einsum('iu,xbu,jb,ij->x', s0_co0, ints_mo[:, self.nc + self.no:, self.nc:self.nc + self.no], s1_cv0, iden_C) / np.sqrt(2)
-                # co0-cv1 -1/sqrt{2} * delta_ij*r_ub
-                h_co0_cv1 = -factor * np.einsum('iu,xbu,jb,ij->x', s0_co0, ints_mo[:, self.nc + self.no:, self.nc:self.nc + self.no], s1_cv1, iden_C)
-                # print(h_co0_cv1)
-
-                # ov0 - cv0
-                h_ov0_cv0 = -np.einsum('ua,xju,jb,ab->x', s0_ov0, ints_mo[:, :self.nc, self.nc:self.nc + self.no], s1_cv0, iden_V) / np.sqrt(2)
-                # ov0-cv1 -1/sqrt{2} * delta_ab*r_ju
-                h_ov0_cv1 = -factor * np.einsum('ua,xju,jb,ab->x', s0_ov0, ints_mo[:, :self.nc, self.nc:self.nc + self.no], s1_cv1, iden_V)
-                # print(h_ov0_cv1)
-
-                # cv1-co0
-                h_cv1_co0 = -factor * np.einsum('ia,xva,jv,ij->x', s0_cv1, ints_mo[:, self.nc:self.nc + self.no, self.nc + self.no:], s1_co0, iden_C)
-                # cv1-ov1
-                h_cv1_ov0 = -factor * np.einsum('ia,xvi,vb,ab->x', s0_cv1, ints_mo[:, self.nc:self.nc + self.no, :self.nc], s1_ov0, iden_V)
-
-                tdm = h_cv0_cv0 + h_co0_co0 + h_ov0_ov0 + h_cv1_cv1 + h_cv0_co0 + h_cv0_ov0 + h_co0_cv0 + h_co0_cv1 + h_ov0_cv0 + h_ov0_cv1 + h_cv1_co0 + h_cv1_ov0
-                # tdm=h_cv0_cv0+h_co0_co0+h_ov0_ov0+h_cv1_cv1+h_ov0_cv1
-                if i == j:
-                    tdm += gs
-                osc = (2 / 3) * (self.e[i] - self.e[j]) * (tdm[0] ** 2 + tdm[1] ** 2 + tdm[2] ** 2)
-                print(f'{i + 1:2d} {j + 1:2d} {tdm[0]:>8.4f} {tdm[1]:>8.4f} {tdm[2]:>8.4f} {osc:>8.4f}')
+                XL = [s0_cv0, s0_co0, s0_ov0, s0_cv1]
+                XR = [s1_cv0, s1_co0, s1_ov0, s1_cv1]
+                n = (self.nc, self.no, self.nv)
+                sl = (slice(0,self.nc,1), slice(self.nc,self.nc+self.no,1), slice(self.nc+self.no,self.nc+self.no+self.nv,1))
+                tdm = TDM_S(si,XL,XR,ints_mo,n,sl)
+                if i == j: tdm += gs
+                osc = (2/3)*(self.e[i]-self.e[j])*(tdm[0]**2 + tdm[1]**2 + tdm[2]**2)
+                # tdm *= unit.au2D
+                print(f' {i+1:2d}     {j+1:2d}    {tdm[0]:>8.4f} {tdm[1]:>8.4f} {tdm[2]:>8.4f}  {osc:>8.4f} ')
 
     def analyze(self):
         nc = self.nc
@@ -945,6 +962,7 @@ class X_TDA():
         dim1 = nc * nv
         dim2 = dim1 + nc * no
         dim3 = dim2 + no * nv
+        self.syms = []
         for i in range(len(self.e)):
             value = self.values[:, i]
             # print(lib.norm(value)) # 1
@@ -952,30 +970,189 @@ class X_TDA():
             x_co0 = value[dim1:dim2].reshape(nc, no)
             x_ov0 = value[dim2:dim3].reshape(no, nv)
             x_cv1 = value[dim3:].reshape(nc, nv)
-            Dp_ab = 0.
-            print(f'Excited state {i + 1} {self.e[i] * unit.ha2eV:12.5f} eV')
+            main_pos = np.argmax(value**2)
+            if nc*nv>main_pos>=0: # cv
+                orb1, orb2 = divmod(main_pos, nc)
+            elif nc*(nv+no)>main_pos>=nc*nv: # co
+                main_pos -= nc*nv
+                orb1, orb2 = divmod(main_pos, nc)
+            elif nc*(nv+no)+no*nv>main_pos>=nc*(nv+no): # ov
+                main_pos -= nc*nv + nc*no
+                orb1, orb2 = divmod(main_pos, no)
+            elif main_pos>=nc*(nv+no)+no*nv: # cv
+                main_pos -= nc*nv + nc*no + no*nv
+                orb1, orb2 = divmod(main_pos, nc)
 
-            for o, v in zip(*np.where(abs(x_cv0) > 0.1)):
-                # print(f'CV(0) {o+1}b -> {v+1+self.nc+self.no}b {x_cv_bb[o,v]:10.5f} {100*x_cv_bb[o,v]**2:2.2f}%')
-                print(
-                    f'CV(0) {o + 1}b -> {v + 1 + self.nc + self.no}b {x_cv0[o, v]:10.5f} {100 * x_cv0[o, v] ** 2:2.2f}%')
-            for o, v in zip(*np.where(abs(x_co0) > 0.1)):
-                print(f'CO(0) {o + 1}b -> {v + 1 + self.nc}b {x_co0[o, v]:10.5f} {100 * x_co0[o, v] ** 2:5.2f}%')
+            if self.mol.groupname != 'C1':
+                sym = self.calculate_irrep(orb1,orb2)
+            else:
+                sym = 'A'
+            self.syms.append(sym)
+
+            print(f'Excited state {i + 1} {self.e[i] * unit.ha2eV:12.5f} eV, symmetry={sym}')
+
+            for c, v in zip(*np.where(abs(x_cv0) > 0.1)):
+                print(f'CV(0) {c + 1}b -> {v + 1 + self.nc + self.no}b {x_cv0[c, v]:10.5f} {100 * x_cv0[c, v] ** 2:2.2f}%')
+            for c, o in zip(*np.where(abs(x_co0) > 0.1)):
+                print(f'CO(0) {c + 1}b -> {o + 1 + self.nc}b {x_co0[c, o]:10.5f} {100 * x_co0[c, o] ** 2:5.2f}%')
             for o, v in zip(*np.where(abs(x_ov0) > 0.1)):
-                print(
-                    f'OV(0) {o + self.nc + 1}a -> {v + 1 + self.nc + self.no}a {x_ov0[o, v]:10.5f} {100 * x_ov0[o, v] ** 2:5.2f}%')
-            for o, v in zip(*np.where(abs(x_cv1) > 0.1)):
-                # print(f'CV(1) {o+1}a -> {v+1+self.nc+self.no}a {x_cv_aa[o,v]:10.5f} {100*x_cv_aa[o,v]**2:5.2f}%')
-                print(
-                    f'CV(1) {o + 1}a -> {v + 1 + self.nc + self.no}a {x_cv1[o, v]:10.5f} {100 * x_cv1[o, v] ** 2:5.2f}%')
+                print(f'OV(0) {o + self.nc + 1}a -> {v + 1 + self.nc + self.no}a {x_ov0[o, v]:10.5f} {100 * x_ov0[o, v] ** 2:5.2f}%')
+            for c, v in zip(*np.where(abs(x_cv1) > 0.1)):
+                print(f'CV(1) {c + 1}a -> {v + 1 + self.nc + self.no}a {x_cv1[c, v]:10.5f} {100 * x_cv1[c, v] ** 2:5.2f}%')
             print(' ')
+        eo = self.e * unit.ha2eV
+        print('='*60)
+        print(f'XTDA |So⟩ Energy: cost time {self.times:.2f}s')
+        for i in range(0,self.nstates,1):
+            print(f"No.{i:3d}  Esf={eo[i]:>10.5f} eV,  En-E1={(eo[i]-eo[0]):>10.5f} eV,  symmetry={self.syms[i]}")
+        return self.syms
 
     def kernel(self, nstates=1):
+        time0 = time.time()
         e, v = scipy.linalg.eigh(self.A)
         self.e = e[:nstates]
         self.values = v[:, :nstates]
         self.nstates = nstates
+        time1 = time.time()
+        self.times = time1-time0
         return self.e * unit.ha2eV, self.values
+    
+    def calculate_irrep(self,orb1,orb2):
+        orb_sym = self.mf.get_orbsym(self.mf.mo_coeff)
+        ground_sym = self.mf.get_wfnsym()
+        print('ground_irrep ',ground_sym)
+        if self.type_u:
+            print('UKS')
+            orb1_sym = np.array([orb_sym[0][orb1]])
+            orb2_sym = np.array([orb_sym[1][orb2]])
+        else:
+            orb1_sym = np.array([orb_sym[orb1]])
+            orb2_sym = np.array([orb_sym[orb2]])
+        direct_s = direct_prod(orb1_sym,orb2_sym,self.mol.groupname)
+        direct_s = direct_prod(direct_s[0],np.array(ground_sym),self.mol.groupname)
+        if direct_s[0][0] >= len(self.mol.irrep_name):
+            return 'A'
+        else:
+            return self.mol.irrep_name[direct_s[0][0]]
+
+def TDM_GSGS(S,XL,XR,ints_mo,n,sl):
+    '''
+    TDM_GSGS: Calculate
+        ⟨ref.|O|ref.⟩ = \sum_pq r_{pq}^{l} ⟨ref.|E_{pq}|ref.⟩ == 0 Case(16)
+    Case(16)
+    '''
+    return np.zeros((3,))
+
+def TDM_GSS(S,XL,XR,ints_mo,n,sl):
+    '''
+    TDM_GSS: Calculate
+        XL⟨Psi_L|O|Psi_R⟩XR = \sum_pq r_{pq}^{l} (XL ⟨Psi_L|E_{pq}|Psi_R⟩ XR)
+    Case(17) -- Case(20)
+    here
+        XL⟨Psi_L|E_{pq}|Psi_R⟩XR is TDM1;
+        S: Spin projection Sz of |ref.⟩
+        XL: 1 of |ref.⟩
+        XR: CI coefficient of |Psi_R⟩
+        and here |ref.⟩ and |Psi_R⟩ spin SS
+        ints_mo: r_{pq}^{l} (Note that the other dimension (l) should be placed at the foremost index.)
+        n: nc,no,nv: number of spatial orbitals (core, open-shell, vitural)
+        sl: slc,slo,slv: slice of spatial orbitals (core, open-shell, vitural)
+    '''
+    slc,slo,slv=sl
+    assert np.allclose(XL,np.ones((1,)))
+    assert len(XR) == 4
+    assert len(XR[0].shape) == 2
+    tdm = np.zeros((3,))
+    # 0 Case(17) GS-CV0
+    tdm += np.sqrt(2)*einsum('xbj,jb->x', ints_mo[:,slv,slc], XR[0])
+    # 1 Case(18) GS-CO0
+    tdm += einsum('xjt,jt->x', ints_mo[:,slc,slo], XR[1])
+    # 2 Case(19) GS-OV0
+    tdm += einsum('xtb,tb->x', ints_mo[:,slo,slv], XR[2])
+    # 3 Case(20) GS-CV1 0
+    return tdm
+
+def TDM_SGS(S,XL,XR,ints_mo,n,sl):
+    '''
+    TDM_SGS: Calculate
+        XL⟨Psi_L|O|Psi_R⟩XR = \sum_pq r_{pq}^{l} (XL ⟨Psi_L|E_{pq}|Psi_R⟩ XR)
+    Case(17) -- Case(20)
+    here
+        XL⟨Psi_L|E_{pq}|Psi_R⟩XR is TDM1;
+        S: Spin projection Sz of |ref.⟩
+        XL: CI coefficient of |Psi_L⟩
+        XR: 1 of |ref.⟩
+        and here |Psi_L⟩ and |ref.⟩ spin SS
+        ints_mo: r_{pq}^{l} (Note that the other dimension (l) should be placed at the foremost index.)
+        n: nc,no,nv: number of spatial orbitals (core, open-shell, vitural)
+        sl: slc,slo,slv: slice of spatial orbitals (core, open-shell, vitural)
+    '''
+    return TDM_GSS(S,XR,XL,ints_mo,n,sl)
+
+def TDM_S(S,XL,XR,ints_mo,n,sl):
+    '''
+    TDM_S: Calculate
+        XL⟨Psi_L|O|Psi_R⟩XR = \sum_pq r_{pq}^{l} (XL ⟨Psi_L|E_{pq}|Psi_R⟩ XR)
+    Case(21) -- Case(30)
+    here
+        XL⟨Psi_L|E_{pq}|Psi_R⟩XR is TDM1;
+        S: Spin projection Sz of |ref.⟩
+        XL: CI coefficient of |Psi_L⟩
+        XR: CI coefficient of |Psi_R⟩
+        and here |Psi_L⟩ and |Psi_R⟩ spin SS
+        ints_mo: r_{pq}^{l} (Note that the other dimension (l) should be placed at the foremost index.)
+        n: nc,no,nv: number of spatial orbitals (core, open-shell, vitural)
+        sl: slc,slo,slv: slice of spatial orbitals (core, open-shell, vitural)
+    '''
+    nc,no,nv=n
+    slc,slo,slv=sl
+    delta_c = np.eye(nc)
+    delta_o = np.eye(no)
+    delta_v = np.eye(nv)
+    assert len(XL) == 4 and len(XR) == 4
+    assert len(XL[0].shape) == 2 and len(XR[0].shape) == 2
+    tdm = np.zeros((3,))
+
+    # Diagonal
+    # (0,0) Case(21) CV(0)-CV(0) r_ab*delta_ij - r_ij*delta_ab
+    tdm +=  einsum('ia,xba,ij,jb->x', XL[0], ints_mo[:,slv,slv], delta_c, XR[0])
+    tdm += -einsum('ia,xji,ab,jb->x', XL[0], ints_mo[:,slc,slc], delta_v, XR[0])
+    # (1,1) Case(25) CO(0)-CO(0) r_uv*delta_ij - r_ij*delta_uv
+    tdm +=  einsum('iu,xvu,ij,jv->x', XL[1], ints_mo[:,slo,slo], delta_c, XR[1])
+    tdm += -einsum('iu,xji,uv,jv->x', XL[1], ints_mo[:,slc,slc], delta_o, XR[1])
+    # (2,2) Case(28) OV(0)-OV(0) r_ab*delta_uv - r_uv*delta_ab
+    tdm +=  einsum('ua,xab,uv,vb->x', XL[2], ints_mo[:,slv,slv], delta_o, XR[2])
+    tdm += -einsum('ua,xuv,ab,vb->x', XL[2], ints_mo[:,slo,slo], delta_v, XR[2])
+    # (3,3) Case(30) CV(1)-CV(1) r_ab*delta_ij - r_ij*delta_ab
+    tdm +=  einsum('ia,xab,ij,jb->x', XL[3], ints_mo[:,slv,slv], delta_c, XR[3])
+    tdm += -einsum('ia,xji,ab,jb->x', XL[3], ints_mo[:,slc,slc], delta_v, XR[3])
+
+    # Off-diagonal
+    # (0,1) Case(22) CV(0)-CO(0) 1/sqrt{2} * r_at*delta_ij
+    factor = 1/np.sqrt(2)
+    tdm += factor*einsum('ia,xat,ij,jt->x', XL[0], ints_mo[:,slv,slo], delta_c, XR[1])
+    # (1,0) Case(22) CO(0)-CV(0) 1/sqrt{2} * r_at*delta_ij
+    tdm += factor*einsum('jt,xat,ij,ia->x', XL[1], ints_mo[:,slv,slo], delta_c, XR[0])
+    # (0,2) Case(23) CV(0)-OV(0) -1/sqrt{2} * r_ti*delta_ab
+    factor = -1/np.sqrt(2)
+    tdm += factor*einsum('ia,xti,ab,tb->x', XL[0], ints_mo[:,slo,slc], delta_v, XR[2])
+    # (2,0) Case(23) OV(0)-CV(0) -1/sqrt{2} * r_ti*delta_ab
+    tdm += factor*einsum('tb,xti,ab,ia->x', XL[2], ints_mo[:,slo,slc], delta_v, XR[0])
+    # (0,3) Case(24) CV(0)-CV(1) 0
+    # (3,0) Case(24) CV(1)-CV(0) 0
+    # (1,2) Case(24) CO(0)-OV(0) 0
+    # (2,1) Case(24) OV(0)-CO(0) 0
+    # (1,3) Case(24) CO(0)-CV(1) sqrt((1+S)/(2*S)) * (1+1/S)r_ub*delta_ij
+    factor = np.sqrt((1+S)/(2*S))
+    tdm += factor*einsum('iu,xub,ij,jb->x', XL[1], ints_mo[:,slo,slv], delta_c, XR[3])
+    # (3,1) Case(24) CO(0)-CV(1) sqrt(S/(2*(1+S))) * (1+1/S)r_ub*delta_ij
+    tdm += factor*einsum('jb,xub,ij,iu->x', XL[3], ints_mo[:,slo,slv], delta_c, XR[1])
+    # (2,3) Case(24) OV(0)-CV(1) sqrt((1+S)/(2*S)) * r_ju*delta_ab
+    factor = np.sqrt((1+S)/(2*S))
+    tdm += factor*einsum('ua,xju,ab,jb->x', XL[2], ints_mo[:,slc,slo], delta_v, XR[3])
+    # (3,2) Case(24) CV(1)-OV(0) sqrt((1+S)/(2*S)) * r_ju*delta_ab
+    tdm += factor*einsum('jb,xju,ab,ua->x', XL[3], ints_mo[:,slc,slo], delta_v, XR[2])
+    return tdm
 
 if __name__ == "__main__":
     mol = gto.M(

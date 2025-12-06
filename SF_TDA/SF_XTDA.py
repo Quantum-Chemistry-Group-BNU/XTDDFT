@@ -8,13 +8,14 @@ from pyscf.dft import numint
 import scipy
 from functools import reduce
 from pyscf.symm import direct_prod
+from opt_einsum import contract as einsum
 #import sys
 #sys.path.append('/home/lenovo2/usrs/zhw/TDDFT')
 
 #from line_profiler import profile
 
 from .SF_TDA import SF_TDA, mf_info,gen_response_sf,gen_response_sf_mc
-au2ev = 27.21138505
+au2ev = 27.21138505 # 27.2113834 in whb's untils
 
 def get_irrep_occupancy_directly(mol, mf):
     results = {}
@@ -113,6 +114,9 @@ class SA_SF_TDA():
         self.nc = self.nocc_b
         self.nv = self.nvir_a
         self.no = self.nocc_a-self.nocc_b
+        self.dim1 = self.nc*self.nv
+        self.dim2 = self.dim1+self.nc*self.no
+        self.dim3 = self.dim2+self.no*self.nv
         
         try: # dft
             xctype = self.mf.xc
@@ -280,167 +284,6 @@ class SA_SF_TDA():
         
         return A
     
-    def calculate_TDM(self):
-        if np.array(self.mf.mo_coeff).ndim==3:
-            self.calculate_TDM_U()
-        else:
-            self.calculate_TDM_R()
-            
-            
-    def calculate_TDM_U(self):
-        def _charge_center(mol):
-            charges = mol.atom_charges()
-            coords = mol.atom_coords()
-            return np.einsum('z,zr->r', charges, coords)/charges.sum()
-        with self.mol.with_common_orig(_charge_center(self.mol)):
-            ints = self.mol.intor_symmetric('int1e_r', comp=3) # (3,nao,nao)
-        ints_ab = np.einsum('xpq,pi,qj->xij',ints,self.mf.mo_coeff[0].conj(),self.mf.mo_coeff[1]) # a->b
-        ints_aa = np.einsum('xpq,pi,qj->xij',ints,self.mf.mo_coeff[0].conj(),self.mf.mo_coeff[0])
-        ints_bb = np.einsum('xpq,pi,qj->xij',ints,self.mf.mo_coeff[1].conj(),self.mf.mo_coeff[1])
-        dim1 = self.nc*self.nv
-        dim2 = dim1+self.nc*self.no
-        dim3 = dim2+self.no*self.nv
-            
-        print("Excited state to Excited state transition dipole moments(Au)")
-        print("State State    X     Y     Z     OSC.")
-        
-        si = self.mol.spin/2
-        iden_C = np.identity(self.nc)
-        iden_O = np.identity(self.no)
-        iden_V = np.identity(self.nv)
-        if self.SA == 0:
-            factor1 = 1
-            factor2 = 1
-            factor3 = 0
-        else:
-            factor1 = np.sqrt((2*si+1)/(2*si)) 
-            factor2 = np.sqrt((2*si)/(2*si-1))
-            factor3 = 1/np.sqrt(2*si*(2*si-1))
-            
-        for i in range(len(self.e)):
-            s0_cv1 = self.v[:,i][:dim1].reshape(self.nc,self.nv)
-            s0_co1 = self.v[:,i][dim1:dim2].reshape(self.nc,self.no)
-            s0_ov1 = self.v[:,i][dim2:dim3].reshape(self.no,self.nv)
-            if self.re:
-                s0_oo1 = (self.vects @ self.v[:,i][dim3:].reshape(-1,1)).reshape(self.no,self.no)
-            else:
-                s0_oo1 = self.v[:,i][dim3:].reshape(self.no,self.no)
-            for j in range(len(self.e)):
-                s1_cv1 = self.v[:,j][:dim1].reshape(self.nc,self.nv)
-                s1_co1 = self.v[:,j][dim1:dim2].reshape(self.nc,self.no)
-                s1_ov1 = self.v[:,j][dim2:dim3].reshape(self.no,self.nv)
-                if self.re:
-                    s1_oo1 = (self.vects @ self.v[:,j][dim3:].reshape(-1,1)).reshape(self.no,self.no)
-                else:
-                    s1_oo1 = self.v[:,j][dim3:].reshape(self.no,self.no)
-                # CV1-CV1
-                tdm = np.einsum('ia,xab,jb,ij->x',s0_cv1,ints_bb[:,self.nc+self.no:,self.nc+self.no:],s1_cv1,iden_C)-\
-                      np.einsum('ia,xij,jb,ab->x',s0_cv1,ints_aa[:,:self.nc,:self.nc],s1_cv1,iden_V)
-                # CV1-CO1
-                tdm += factor1*np.einsum('ia,xav,jv,ij->x',s0_cv1,ints_bb[:,self.nc+self.no:,self.nc:self.nc+self.no],s1_co1,iden_C)
-                tdm += factor1*np.einsum('iu,xbu,jb,ij->x',s0_co1,ints_bb[:,self.nc+self.no:,self.nc:self.nc+self.no],s1_cv1,iden_C)
-                # CV1-OV1
-                tdm += -factor1*np.einsum('ia,xiv,vb,ab->x',s0_cv1,ints_aa[:,:self.nc,self.nc:self.nc+self.no],s1_ov1,iden_V)
-                tdm += -factor1*np.einsum('ua,xju,jb,ab->x',s0_ov1,ints_aa[:,:self.nc,self.nc:self.nc+self.no],s1_cv1,iden_V)
-                # CO1-CO1
-                tdm += np.einsum('iu,xuv,jv,ij->x',s0_co1,ints_bb[:,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_co1,iden_C)-\
-                       np.einsum('iu,xij,jv,uv->x',s0_co1,ints_aa[:,:self.nc,:self.nc],s1_co1,iden_O)
-                # CO1-OO1
-                tdm += -factor2*np.einsum('iu,xiv,vw,uw->x',s0_co1,ints_aa[:,:self.nc,self.nc:self.nc+self.no],s1_oo1,iden_O)
-                tdm +=  factor3*np.einsum('iu,xiu,vw,vw->x',s0_co1,ints_ab[:,:self.nc,self.nc:self.nc+self.no],s1_oo1,iden_O)
-                tdm += -factor2*np.einsum('ut,xju,jv,tv->x',s0_oo1,ints_aa[:,:self.nc,self.nc:self.nc+self.no],s1_co1,iden_O)
-                tdm +=  factor3*np.einsum('ut,xjv,jv,ut->x',s0_oo1,ints_ab[:,:self.nc,self.nc:self.nc+self.no],s1_co1,iden_O)
-                # OV1-OV1
-                tdm += np.einsum('ua,xab,vb,uv->x',s0_ov1,ints_bb[:,self.nc+self.no:,self.nc+self.no:],s1_ov1,iden_O)-\
-                       np.einsum('ua,xuv,vb,ab->x',s0_ov1,ints_aa[:,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_ov1,iden_V)
-                # OV1-OO1
-                tdm +=  factor2*np.einsum('ua,xaw,vw,uv->x',s0_ov1,ints_bb[:,self.nc+self.no:,self.nc:self.nc+self.no],s1_oo1,iden_O)
-                tdm += -factor3*np.einsum('ua,xua,vw,vw->x',s0_ov1,ints_ab[:,self.nc:self.nc+self.no,self.nc+self.no:],s1_oo1,iden_O)
-                tdm +=  factor2*np.einsum('ut,xbt,vb,uv->x',s0_oo1,ints_bb[:,self.nc+self.no:,self.nc:self.nc+self.no],s1_ov1,iden_O)
-                tdm += -factor3*np.einsum('ut,xvb,vb,ut->x',s0_oo1,ints_ab[:,self.nc:self.nc+self.no,self.nc+self.no:],s1_ov1,iden_O)
-                # OO1-OO1
-                tdm += np.einsum('ut,xtv,wv,uw->x',s0_oo1,ints_bb[:,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_oo1,iden_O)-\
-                       np.einsum('ut,xuw,wv,tv->x',s0_oo1,ints_aa[:,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_oo1,iden_O)
-                osc = (2/3)*(self.e[i]-self.e[j])*(tdm[0]**2 + tdm[1]**2 + tdm[2]**2)
-                print(f'{i+1:2d} {j+1:2d} {tdm[0]:>8.4f} {tdm[1]:>8.4f} {tdm[2]:>8.4f}  {osc:>8.4f} ')
-                     
-    
-    def calculate_TDM_R(self):
-        def _charge_center(mol):
-            charges = mol.atom_charges()
-            coords = mol.atom_coords()
-            return np.einsum('z,zr->r', charges, coords)/charges.sum()
-        with self.mol.with_common_orig(_charge_center(self.mol)):
-            ints = self.mol.intor_symmetric('int1e_r', comp=3) # (3,nao,nao)
-        ints_mo = np.einsum('xpq,pi,qj->xij', ints, self.mf.mo_coeff, self.mf.mo_coeff)
-        dim1 = self.nc*self.nv
-        dim2 = dim1+self.nc*self.no
-        dim3 = dim2+self.no*self.nv
-            
-        print("Excited state to Excited state transition dipole moments(Au)")
-        print("State State    X     Y     Z     OSC.")
-        
-        si = self.mol.spin/2
-        iden_C = np.identity(self.nc)
-        iden_O = np.identity(self.no)
-        iden_V = np.identity(self.nv)
-        if self.SA == 0:
-            factor1 = 1
-            factor2 = 1
-            factor3 = 0
-        else:
-            factor1 = np.sqrt((2*si+1)/(2*si)) 
-            factor2 = np.sqrt((2*si)/(2*si-1))
-            factor3 = 1/np.sqrt(2*si*(2*si-1))
-        for i in range(len(self.e)):
-            s0_cv1 = self.v[:,i][:dim1].reshape(self.nc,self.nv)
-            s0_co1 = self.v[:,i][dim1:dim2].reshape(self.nc,self.no)
-            s0_ov1 = self.v[:,i][dim2:dim3].reshape(self.no,self.nv)
-            if self.re:
-                s0_oo1 = (self.vects @ self.v[:,i][dim3:].reshape(-1,1)).reshape(self.no,self.no)
-            else:
-                s0_oo1 = self.v[:,i][dim3:].reshape(self.no,self.no)
-            for j in range(len(self.e)):
-                s1_cv1 = self.v[:,j][:dim1].reshape(self.nc,self.nv)
-                s1_co1 = self.v[:,j][dim1:dim2].reshape(self.nc,self.no)
-                s1_ov1 = self.v[:,j][dim2:dim3].reshape(self.no,self.nv)
-                if self.re:
-                    s1_oo1 = (self.vects @ self.v[:,j][dim3:].reshape(-1,1)).reshape(self.no,self.no)
-                else:
-                    s1_oo1 = self.v[:,j][dim3:].reshape(self.no,self.no)
-
-                # CV1-CV1
-                tdm = np.einsum('ia,xab,jb,ij->x',s0_cv1,ints_mo[:,self.nc+self.no:,self.nc+self.no:],s1_cv1,iden_C)-\
-                      np.einsum('ia,xij,jb,ab->x',s0_cv1,ints_mo[:,:self.nc,:self.nc],s1_cv1,iden_V)
-                # CV1-CO1
-                tdm += factor1*np.einsum('ia,xav,jv,ij->x',s0_cv1,ints_mo[:,self.nc+self.no:,self.nc:self.nc+self.no],s1_co1,iden_C)
-                tdm += factor1*np.einsum('iu,xbu,jb,ij->x',s0_co1,ints_mo[:,self.nc+self.no:,self.nc:self.nc+self.no],s1_cv1,iden_C)
-                # CV1-OV1
-                tdm += -factor1*np.einsum('ia,xiv,vb,ab->x',s0_cv1,ints_mo[:,:self.nc,self.nc:self.nc+self.no],s1_ov1,iden_V)
-                tdm += -factor1*np.einsum('ua,xju,jb,ab->x',s0_ov1,ints_mo[:,:self.nc,self.nc:self.nc+self.no],s1_cv1,iden_V)
-                # CO1-CO1
-                tdm += np.einsum('iu,xuv,jv,ij->x',s0_co1,ints_mo[:,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_co1,iden_C)-\
-                       np.einsum('iu,xij,jv,uv->x',s0_co1,ints_mo[:,:self.nc,:self.nc],s1_co1,iden_O)
-                # CO1-OO1
-                tdm += -factor2*np.einsum('iu,xiv,vw,uw->x',s0_co1,ints_mo[:,:self.nc,self.nc:self.nc+self.no],s1_oo1,iden_O)
-                tdm +=  factor3*np.einsum('iu,xiu,vw,vw->x',s0_co1,ints_mo[:,:self.nc,self.nc:self.nc+self.no],s1_oo1,iden_O)
-                tdm += -factor2*np.einsum('ut,xju,jv,tv->x',s0_oo1,ints_mo[:,:self.nc,self.nc:self.nc+self.no],s1_co1,iden_O)
-                tdm +=  factor3*np.einsum('ut,xjv,jv,ut->x',s0_oo1,ints_mo[:,:self.nc,self.nc:self.nc+self.no],s1_co1,iden_O)
-                # OV1-OV1
-                tdm += np.einsum('ua,xab,vb,uv->x',s0_ov1,ints_mo[:,self.nc+self.no:,self.nc+self.no:],s1_ov1,iden_O)-\
-                       np.einsum('ua,xuv,vb,ab->x',s0_ov1,ints_mo[:,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_ov1,iden_V)
-                # OV1-OO1
-                tdm +=  factor2*np.einsum('ua,xaw,vw,uv->x',s0_ov1,ints_mo[:,self.nc+self.no:,self.nc:self.nc+self.no],s1_oo1,iden_O)
-                tdm += -factor3*np.einsum('ua,xua,vw,vw->x',s0_ov1,ints_mo[:,self.nc:self.nc+self.no,self.nc+self.no:],s1_oo1,iden_O)
-                tdm +=  factor2*np.einsum('ut,xbt,vb,uv->x',s0_oo1,ints_mo[:,self.nc+self.no:,self.nc:self.nc+self.no],s1_ov1,iden_O)
-                tdm += -factor3*np.einsum('ut,xvb,vb,ut->x',s0_oo1,ints_mo[:,self.nc:self.nc+self.no,self.nc+self.no:],s1_ov1,iden_O)
-                # OO1-OO1
-                tdm += np.einsum('ut,xtv,wv,uw->x',s0_oo1,ints_mo[:,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_oo1,iden_O)-\
-                       np.einsum('ut,xuw,wv,tv->x',s0_oo1,ints_mo[:,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_oo1,iden_O)
-                osc = (2/3)*(self.e[i]-self.e[j])*(tdm[0]**2 + tdm[1]**2 + tdm[2]**2)
-                print(f'{i+1:2d} {j+1:2d} {tdm[0]:>8.4f} {tdm[1]:>8.4f} {tdm[2]:>8.4f}  {osc:>8.4f} ')
-        
-    
     def calculate_irrep(self,orb1,orb2):
         orb_sym = self.mf.get_orbsym(self.mf.mo_coeff)
         ground_sym = self.mf.get_wfnsym()
@@ -562,7 +405,7 @@ class SA_SF_TDA():
         nv = self.nv
         no = self.no
         Ds = []
-        syms = []
+        self.syms = []
 
         for nstate in range(self.nstates):
             m_excited = 0.
@@ -589,7 +432,7 @@ class SA_SF_TDA():
                 if abs(x_co_ab[o,v]) > m_excited:
                     m_excited = abs(x_co_ab[o,v])
                     orb1 = o
-                    orb2 = v+self.nv
+                    orb2 = v+self.nc
                 print(f'{100*x_co_ab[o,v]**2:3.0f}% CO(ab) {o+1}a -> {v+1+self.nc}b {x_co_ab[o,v]:10.5f} ')
             for o,v in zip(* np.where(abs(x_ov_ab)>0.1)):
                 if abs(x_ov_ab[o,v]) > m_excited:
@@ -607,7 +450,7 @@ class SA_SF_TDA():
                 sym = self.calculate_irrep(orb1,orb2)
             else:
                 sym = 'A'
-            syms.append(sym)
+            self.syms.append(sym)
 
             if self.SA == 0 and not self.type_u:
                 Dp_ab = 0.
@@ -626,10 +469,13 @@ class SA_SF_TDA():
                 print(f'Excited state {nstate+1} {self.e[nstate]*27.21138505:10.5f} eV {self.e[nstate]+self.mf.e_tot:11.8f} Hartree D<S^2>={ds2:3.2f} {sym}')
             else:
                 print(f'Excited state {nstate+1} {self.e[nstate]*27.21138505:10.5f} eV {self.e[nstate]+self.mf.e_tot:11.8f} Hartree {sym}')
-
-
-            print('  ')
-        return Ds,syms
+            print('')
+        print('='*60)
+        print(f'SF(down)-TDA |S-⟩ Energy: cost time {self.times:.2f}s')
+        em = self.e * au2ev
+        for i in range(0,self.nstates,1):
+            print(f"No.{i:3d}  Esf={(em[i]):>10.5f} eV, En-E1={(em[i]-em[0]):>10.5f} eV,  symmetry={self.syms[i]}")
+        return Ds,self.syms
     
     def recoder(self): # pec for HF molecule in 6-31G
         print("Return first three excited vectors(CO(3->5 4->5) OO(6->5) or OO(5->5 6->6) configurations).")
@@ -1183,7 +1029,7 @@ class SA_SF_TDA():
         #print(f'init_guess times use {(end_t-start_t)/3600:6.4f} hours')
         #print('x0.shape ',x0.shape)
         converged, e, x1 = lib.davidson1(vind, x0, precond,
-                              tol=1e-8,
+                              tol=1e-16,
                               nroots=self.nstates,
                               max_cycle=300)
         end_time = time.time()
@@ -1215,6 +1061,7 @@ class SA_SF_TDA():
         return tmp_A
             
     def kernel(self, nstates=1,remove=False,frozen=None,foo=1.0,d_lda=0.3,fglobal=None):
+        time0 = time.time()
         self.re = remove
         nov = (self.nc+self.no) * (self.no+self.nv)
         self.nstates = min(nstates,nov)
@@ -1253,9 +1100,225 @@ class SA_SF_TDA():
                     e,v = scipy.sparse.linalg.eigsh(self.A,k=nroots,which='SA')
                 self.e = e[:nstates]
                 self.v = v[:,:nstates]
+        time1 = time.time()
+        self.times = time1-time0
         return self.e*27.21138505, self.v
+    
+    def trans_format_v(self,v):
+        cv1 = v[:self.dim1].reshape(self.nc,self.nv)
+        co1 = v[self.dim1:self.dim2].reshape(self.nc,self.no)
+        ov1 = v[self.dim2:self.dim3].reshape(self.no,self.nv)
+        if self.re:
+            oo1 = (self.vects @ v[self.dim3:].reshape(-1,1)).reshape(self.no,self.no)
+        else:
+            oo1 = v[self.dim3:].reshape(self.no,self.no)
+        return cv1, co1, ov1, oo1
+    
+    def calculate_TDM(self):
+        if np.array(self.mf.mo_coeff).ndim==3:
+            raise ValueError(f"The TDM calculation with UKS as reference is WRONG!!")
+            self.calculate_TDM_U()
+        else:
+            self.calculate_TDM_R()
+            
+    def calculate_TDM_U(self):
+        def _charge_center(mol):
+            charges = mol.atom_charges()
+            coords = mol.atom_coords()
+            return np.einsum('z,zr->r', charges, coords)/charges.sum()
+        with self.mol.with_common_orig(_charge_center(self.mol)):
+            ints = self.mol.intor_symmetric('int1e_r', comp=3) # (3,nao,nao)
+        ints_ab = np.einsum('xpq,pi,qj->xij',ints,self.mf.mo_coeff[0].conj(),self.mf.mo_coeff[1]) # a->b
+        ints_aa = np.einsum('xpq,pi,qj->xij',ints,self.mf.mo_coeff[0].conj(),self.mf.mo_coeff[0])
+        ints_bb = np.einsum('xpq,pi,qj->xij',ints,self.mf.mo_coeff[1].conj(),self.mf.mo_coeff[1])
+        dim1 = self.nc*self.nv
+        dim2 = dim1+self.nc*self.no
+        dim3 = dim2+self.no*self.nv
+
+        print("Excited state to Excited state transition dipole moments(Au)")
+        print("State State    X     Y     Z     OSC.")
+        
+        si = self.mol.spin/2
+        iden_C = np.identity(self.nc)
+        iden_O = np.identity(self.no)
+        iden_V = np.identity(self.nv)
+        if self.SA == 0:
+            factor1 = 1
+            factor2 = 1
+            factor3 = 0
+        else:
+            factor1 = np.sqrt((2*si+1)/(2*si)) 
+            factor2 = np.sqrt((2*si)/(2*si-1))
+            factor3 = 1/np.sqrt(2*si*(2*si-1))
+            
+        for i in range(len(self.e)):
+            s0_cv1 = self.v[:,i][:dim1].reshape(self.nc,self.nv)
+            s0_co1 = self.v[:,i][dim1:dim2].reshape(self.nc,self.no)
+            s0_ov1 = self.v[:,i][dim2:dim3].reshape(self.no,self.nv)
+            if self.re:
+                s0_oo1 = (self.vects @ self.v[:,i][dim3:].reshape(-1,1)).reshape(self.no,self.no)
+            else:
+                s0_oo1 = self.v[:,i][dim3:].reshape(self.no,self.no)
+            for j in range(len(self.e)):
+                s1_cv1 = self.v[:,j][:dim1].reshape(self.nc,self.nv)
+                s1_co1 = self.v[:,j][dim1:dim2].reshape(self.nc,self.no)
+                s1_ov1 = self.v[:,j][dim2:dim3].reshape(self.no,self.nv)
+                if self.re:
+                    s1_oo1 = (self.vects @ self.v[:,j][dim3:].reshape(-1,1)).reshape(self.no,self.no)
+                else:
+                    s1_oo1 = self.v[:,j][dim3:].reshape(self.no,self.no)
+                # CV1-CV1
+                tdm = np.einsum('ia,xab,jb,ij->x',s0_cv1,ints_bb[:,self.nc+self.no:,self.nc+self.no:],s1_cv1,iden_C)-\
+                      np.einsum('ia,xij,jb,ab->x',s0_cv1,ints_aa[:,:self.nc,:self.nc],s1_cv1,iden_V)
+                # CV1-CO1
+                tdm += factor1*np.einsum('ia,xav,jv,ij->x',s0_cv1,ints_bb[:,self.nc+self.no:,self.nc:self.nc+self.no],s1_co1,iden_C)
+                tdm += factor1*np.einsum('iu,xbu,jb,ij->x',s0_co1,ints_bb[:,self.nc+self.no:,self.nc:self.nc+self.no],s1_cv1,iden_C)
+                # CV1-OV1
+                tdm += -factor1*np.einsum('ia,xiv,vb,ab->x',s0_cv1,ints_aa[:,:self.nc,self.nc:self.nc+self.no],s1_ov1,iden_V)
+                tdm += -factor1*np.einsum('ua,xju,jb,ab->x',s0_ov1,ints_aa[:,:self.nc,self.nc:self.nc+self.no],s1_cv1,iden_V)
+                # CO1-CO1
+                tdm += np.einsum('iu,xuv,jv,ij->x',s0_co1,ints_bb[:,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_co1,iden_C)-\
+                       np.einsum('iu,xij,jv,uv->x',s0_co1,ints_aa[:,:self.nc,:self.nc],s1_co1,iden_O)
+                # CO1-OO1
+                tdm += -factor2*np.einsum('iu,xiv,vw,uw->x',s0_co1,ints_aa[:,:self.nc,self.nc:self.nc+self.no],s1_oo1,iden_O)
+                tdm +=  factor3*np.einsum('iu,xiu,vw,vw->x',s0_co1,ints_ab[:,:self.nc,self.nc:self.nc+self.no],s1_oo1,iden_O)
+                tdm += -factor2*np.einsum('ut,xju,jv,tv->x',s0_oo1,ints_aa[:,:self.nc,self.nc:self.nc+self.no],s1_co1,iden_O)
+                tdm +=  factor3*np.einsum('ut,xjv,jv,ut->x',s0_oo1,ints_ab[:,:self.nc,self.nc:self.nc+self.no],s1_co1,iden_O)
+                # OV1-OV1
+                tdm += np.einsum('ua,xab,vb,uv->x',s0_ov1,ints_bb[:,self.nc+self.no:,self.nc+self.no:],s1_ov1,iden_O)-\
+                       np.einsum('ua,xuv,vb,ab->x',s0_ov1,ints_aa[:,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_ov1,iden_V)
+                # OV1-OO1
+                tdm +=  factor2*np.einsum('ua,xaw,vw,uv->x',s0_ov1,ints_bb[:,self.nc+self.no:,self.nc:self.nc+self.no],s1_oo1,iden_O)
+                tdm += -factor3*np.einsum('ua,xua,vw,vw->x',s0_ov1,ints_ab[:,self.nc:self.nc+self.no,self.nc+self.no:],s1_oo1,iden_O)
+                tdm +=  factor2*np.einsum('ut,xbt,vb,uv->x',s0_oo1,ints_bb[:,self.nc+self.no:,self.nc:self.nc+self.no],s1_ov1,iden_O)
+                tdm += -factor3*np.einsum('ut,xvb,vb,ut->x',s0_oo1,ints_ab[:,self.nc:self.nc+self.no,self.nc+self.no:],s1_ov1,iden_O)
+                # OO1-OO1
+                tdm += np.einsum('ut,xtv,wv,uw->x',s0_oo1,ints_bb[:,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_oo1,iden_O)-\
+                       np.einsum('ut,xuw,wv,tv->x',s0_oo1,ints_aa[:,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_oo1,iden_O)
+                osc = (2/3)*(self.e[i]-self.e[j])*(tdm[0]**2 + tdm[1]**2 + tdm[2]**2)
+                print(f'{i+1:2d} {j+1:2d} {tdm[0]:>8.4f} {tdm[1]:>8.4f} {tdm[2]:>8.4f}  {osc:>8.4f} ')
+                     
+    
+    def calculate_TDM_R(self):
+        def _charge_center(mol):
+            charges = mol.atom_charges()
+            coords = mol.atom_coords()
+            return np.einsum('z,zr->r', charges, coords)/charges.sum()
+        with self.mol.with_common_orig(_charge_center(self.mol)):
+            ints = self.mol.intor_symmetric('int1e_r', comp=3) # (3,nao,nao)
+        ints_mo = np.einsum('xpq,pi,qj->xij', ints, self.mf.mo_coeff, self.mf.mo_coeff)
+
+        dip_elec = -self.mf.dip_moment(unit='au')
+        nuc_charges = self.mol.atom_charges()
+        nuc_coords = self.mol.atom_coords()
+        dip_nuc = np.einsum('i,ix->x', nuc_charges, nuc_coords)
+        gs = dip_elec + dip_nuc
+
+        print("\nExcited state to Excited state transition dipole moments(a.u.)")
+        print("StateL StateR      X        Y        Z      f(L<-R)")
+        
+        si = self.mol.spin/2
+        if self.SA == 0:
+            si = 1e20 # S->+\infty when SA=0
+        for i in range(len(self.e)):
+            s0_cv1, s0_co1, s0_ov1, s0_oo1 = self.trans_format_v(self.v[:,i])
+            for j in range(len(self.e)):
+                s1_cv1, s1_co1, s1_ov1, s1_oo1 = self.trans_format_v(self.v[:,j])
+
+                XL = [s0_cv1, s0_co1, s0_ov1, s0_oo1-np.diag(np.diag(s0_oo1)), np.diag(s0_oo1)]
+                XR = [s1_cv1, s1_co1, s1_ov1, s1_oo1-np.diag(np.diag(s1_oo1)), np.diag(s1_oo1)]
+                n = (self.nc, self.no, self.nv)
+                sl = (slice(0,self.nc,1), slice(self.nc,self.nc+self.no,1), slice(self.nc+self.no,self.nc+self.no+self.nv,1))
+                tdm = TDM_S_1(si,XL,XR,ints_mo,n,sl)
+                if i == j: tdm += gs
+                osc = (2/3)*(self.e[i]-self.e[j])*(tdm[0]**2 + tdm[1]**2 + tdm[2]**2)
+                # tdm *= unit.au2D
+                print(f' {i+1:2d}     {j+1:2d}    {tdm[0]:>8.4f} {tdm[1]:>8.4f} {tdm[2]:>8.4f}  {osc:>8.4f} ')
 
 
+def TDM_S_1(S,XL,XR,ints_mo,n,sl):
+    '''
+    TDM_S_1: Calculate
+        XL⟨Psi_L|O|Psi_R⟩XR = \sum_pq r_{pq}^{l} (XL ⟨Psi_L|E_{pq}|Psi_R⟩ XR)
+    Case(1) -- Case(15)
+    here
+        XL⟨Psi_L|E_{pq}|Psi_R⟩XR is TDM1;
+        S: Spin projection Sz of |ref.⟩
+        XL: CI coefficient of |Psi_L⟩
+        XR: CI coefficient of |Psi_R⟩
+        and here |Psi_L⟩ and |Psi_R⟩ spin (S-1)(S-1)
+        ints_mo: r_{pq}^{l} (Note that the other dimension (l) should be placed at the foremost index.)
+        n: nc,no,nv: number of spatial orbitals (core, open-shell, vitural)
+        sl: slc,slo,slv: slice of spatial orbitals (core, open-shell, vitural)
+    '''
+    nc,no,nv=n
+    slc,slo,slv=sl
+    delta_c = np.eye(nc)
+    delta_o = np.eye(no)
+    delta_v = np.eye(nv)
+    assert len(XL) == 5 and len(XR) == 5
+    assert len(XL[0].shape) == 2 and len(XR[0].shape) == 2
+    tdm = np.zeros((3,))
+
+    # 1. (0,0) Case(1) CV1
+    factor = 1.0
+    tdm +=  factor*einsum('ia,xab,ij,jb->x', XL[0], ints_mo[:,slv,slv], delta_c, XR[0])
+    tdm += -factor*einsum('ia,xji,ab,jb->x', XL[0], ints_mo[:,slc,slc], delta_v, XR[0])
+    # 2. (1,1) Case(6) CO1
+    tdm +=  factor*einsum('iu,xut,ij,jt->x', XL[1], ints_mo[:,slo,slo], delta_c, XR[1])
+    tdm += -factor*einsum('iu,xji,ut,jt->x', XL[1], ints_mo[:,slc,slc], delta_o, XR[1])
+    # 3. (2,2) Case(10) OV1
+    tdm +=  factor*einsum('ua,xab,ut,tb->x', XL[2], ints_mo[:,slv,slv], delta_o, XR[2])
+    tdm += -factor*einsum('ua,xtu,ab,tb->x', XL[2], ints_mo[:,slo,slo], delta_v, XR[2])
+    # 4. (3,3) Case(13) O1O2
+    tdm +=  factor*einsum('vu,xut,vw,wt->x', XL[3], ints_mo[:,slo,slo], delta_o, XR[3])
+    tdm += -factor*einsum('vu,xwv,ut,wt->x', XL[3], ints_mo[:,slo,slo], delta_o, XR[3])
+    # 5. (3,3) Case(15) O1O1 = 0
+
+    # 6. (0,1) Case(2) CV1-CO1
+    factor = np.sqrt((2*S+1)/(2*S))
+    tdm +=  factor*einsum('ia,xat,ij,jt->x', XL[0], ints_mo[:,slv,slo], delta_c, XR[1])
+    # 7. (1,0) Case(2) CO1-CV1
+    tdm +=  factor*einsum('jt,xat,ij,ia->x', XL[1], ints_mo[:,slv,slo], delta_c, XR[0])
+    # 8. (0,2) Case(3) CV1-OV1
+    factor = -np.sqrt((2*S+1)/(2*S))
+    tdm +=  factor*einsum('ia,xti,ab,tb->x', XL[0], ints_mo[:,slo,slc], delta_v, XR[2])
+    # 9. (2,0) Case(3) OV1-CV1
+    tdm +=  factor*einsum('tb,xti,ab,ia->x', XL[2], ints_mo[:,slo,slc], delta_v, XR[0])
+    # 10. (0,3) Case(4) CV1-O1O2 = 0
+    # 11. (3,0) Case(4) O1O2-CV1 = 0
+    # 12. (0,4) Case(5) CV1-O1O1 = 0
+    # 13. (4,0) Case(5) O1O1-CV1 = 0
+    # 14. (1,2) Case(7) CO1-OV1 = 0
+    # 15. (2,1) Case(7) CO1-OV1 = 0
+    # 16. (1,3) Case(8) CO1-O1O2
+    factor = -np.sqrt((2*S)/(2*S-1))
+    tdm +=  factor*einsum('iu,xwi,ut,wt->x', XL[1], ints_mo[:,slo,slc], delta_o, XR[3])
+    # 17. (3,1) Case(8) O1O2-CO1
+    tdm +=  factor*einsum('wt,xwi,ut,iu->x', XL[3], ints_mo[:,slo,slc], delta_o, XR[1])
+    # 18. (1,4) Case(8) CO1-O1O1
+    factor = 1/np.sqrt(2*S*(2*S-1))
+    tdm +=  factor*einsum('iu,xui,ut,t->x', XL[1], -2*S*ints_mo[:,slo,slc], delta_o, XR[4])
+    # 19. (4,1) Case(8) O1O1-CO1
+    tdm +=  factor*einsum('t,xui,ut,iu->x', XL[4], -2*S*ints_mo[:,slo,slc], delta_o, XR[1])
+    # 20. (2,3) Case(11) OV1-O1O2
+    factor = np.sqrt((2*S)/(2*S-1))
+    tdm +=  factor*einsum('ua,xat,uw,wt->x', XL[2], ints_mo[:,slv,slo], delta_o, XR[3])
+    # 21. (3,2) Case(11) O1O2-OV1
+    tdm +=  factor*einsum('wt,xat,uw,ua->x', XL[3], ints_mo[:,slv,slo], delta_o, XR[2])
+    # 22. (2,4) Case(12) OV1-O1O1
+    factor = -1/np.sqrt(2*S*(2*S-1))
+    tdm +=  factor*einsum('ua,xat,ut,t->x', XL[2], -2*S*ints_mo[:,slv,slo], delta_o, XR[4])
+    # 23. (4,2) Case(12) O1O1-OV1
+    tdm +=  factor*einsum('t,xat,ut,ua->x', XL[4], -2*S*ints_mo[:,slv,slo], delta_o, XR[2])
+    # 24. (3,4) Case(14) O1O2-O1O1
+    factor = 1.0
+    tdm +=  factor*einsum('vu,xut,vt,t->x', XL[3], ints_mo[:,slo,slo], delta_o, XR[4])
+    tdm += -factor*einsum('vu,xtv,ut,t->x', XL[3], ints_mo[:,slo,slo], delta_o, XR[4])
+    # 25. (4,3) Case(14) O1O1-O1O2
+    tdm +=  factor*einsum('t,xut,vt,vu->x', XL[4], ints_mo[:,slo,slo], delta_o, XR[3])
+    tdm += -factor*einsum('t,xtv,ut,vu->x', XL[4], ints_mo[:,slo,slo], delta_o, XR[3])
+    return tdm
 
 if __name__ == '__main__':
     mol = gto.M(
