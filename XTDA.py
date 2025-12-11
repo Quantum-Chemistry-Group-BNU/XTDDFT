@@ -592,6 +592,7 @@ class X_TDA():
         dm = mf.make_rdm1()
         vhf = mf.get_veff(mf.mol, dm)
         h1e = mf.get_hcore()
+        print("tensor basis XTDA not consider solvent effect")
         focka = mo_coeff[0].T @ (h1e + vhf[0]) @ mo_coeff[0]
         fockb = mo_coeff[1].T @ (h1e + vhf[1]) @ mo_coeff[1]
 
