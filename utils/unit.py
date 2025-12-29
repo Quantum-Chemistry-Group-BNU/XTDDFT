@@ -17,4 +17,8 @@ gauss2au = 4.2544 * 1e-10  # gauss unit to atom unit, magnetic field
 # gauss unit to atom unit, circular dichroism spectrum rotatory strength, same with gaussian multiply 1e-40
 # cgs2au = erg2ha * esu2au * cm2bohr / gauss2au * 1e-40
 
+# refer to BDF
+BDF_c = 137.0359895000
+au2D = 2.541765
+
 eV2cm_1 = 8065.545  # eV to cm^{-1}

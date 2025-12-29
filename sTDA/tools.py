@@ -35,19 +35,20 @@ def overlap(vec2, pscsf, vec1=None):
     return ol
 
 
-def order_pyscf2my(nc, no, nv):
-    # nc and nv is the value before selecting activate space
-    order = np.indices(((nc+no)*nv+nc*(no+nv), )).squeeze()
-    # # my order to pyscf order
-    # for oi in range(nc*no):
-    #     order = np.insert(order, (nc_old+no)*nv_old+oi*nv_old+nc_old*no, (nc_old+no)*nv_old+oi)
-    #     order = np.delete(order, (nc_old+no)*nv_old)
-    # # pyscf order to my order
-    for oi in range(nc):
-        for noi in range(no):
-            order = np.insert(order, (nc+no)*nv+no*oi+noi, (nc+no)*nv+oi*nv+noi)
-            order = np.delete(order, (nc+no)*nv+oi*nv+noi+1)
-    return order
+# # have error
+# def order_pyscf2my(nc, no, nv):
+#     # nc and nv is the value before selecting activate space
+#     order = np.indices(((nc+no)*nv+nc*(no+nv), )).squeeze()
+#     # # my order to pyscf order
+#     # for oi in range(nc*no):
+#     #     order = np.insert(order, (nc_old+no)*nv_old+oi*nv_old+nc_old*no, (nc_old+no)*nv_old+oi)
+#     #     order = np.delete(order, (nc_old+no)*nv_old)
+#     # # pyscf order to my order
+#     for oi in range(nc):
+#         for noi in range(no):
+#             order = np.insert(order, (nc+no)*nv+no*oi+noi, (nc+no)*nv+oi*nv+noi)
+#             order = np.delete(order, (nc+no)*nv+oi*nv+noi+1)
+#     return order
 
 
 def get_cov(mf):

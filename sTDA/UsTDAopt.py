@@ -15,7 +15,6 @@ from pyscf import dft, gto, scf, tddft, lo
 from pyscf.lib import logger
 from pyscf.tools import molden, cubegen
 
-import tools
 from eta import eta
 from utils import unit, atom, utils
 '''U and X opt file select same CSF in CVaa and CVbb'''
@@ -203,7 +202,7 @@ class UsTDA:
         logger.info(self.mf, 'natm is {}'.format(self.mol.natm))
         print('='*50)
         print('num.orb    mo_energy_a   mo_energy_b    mo_occ_a    mo_occ_b')
-        for me, o in zip(enumerate(mf.mo_energy.T), mf.mo_occ.T):
+        for me, o in zip(enumerate(self.mf.mo_energy.T), self.mf.mo_occ.T):
             ind, moei = me
             print(f'{ind + 1:5d}    {moei[0]:10.4f}    {moei[1]:10.4f}    {o[0]:8.3f}    {o[1]:8.3f}')
 
@@ -240,7 +239,7 @@ class UsTDA:
         mo_coeff = self.mf.mo_coeff
         mo_occ = self.mf.mo_occ
         assert mo_coeff[0].dtype == np.float64
-        mol = self.mf.mol
+        # mol = self.mf.mol
         occidx_a = np.where(mo_occ[0] == 1)[0]
         viridx_a = np.where(mo_occ[0] == 0)[0]
         occidx_b = np.where(mo_occ[1] == 1)[0]
@@ -255,7 +254,7 @@ class UsTDA:
 
         # check XC functional hybrid proportion
         ni = self.mf._numint
-        omega, alpha, hyb = ni.rsh_and_hybrid_coeff(self.mf.xc, mol.spin)
+        omega, alpha, hyb = ni.rsh_and_hybrid_coeff(self.mf.xc, self.mol.spin)
         print("=" * 50)
         print('omega is {}, alpha is {}, hyb is {}'.format(omega, alpha, hyb))
         # record full A matrix diagonal element, to calculate overlap
@@ -283,8 +282,8 @@ class UsTDA:
             nc_a = len(np.nonzero((mo_energy[0] > othr_a) & (mo_energy[0] < somo_low))[0])
             nc_b = len(np.nonzero((mo_energy[1] > othr_b) & (mo_energy[1] < sumo_low))[0])
             nc = max(nc_a, nc_b)
-            nv_a = len(np.nonzero((mo_energy[0]<vthr_a) & (mo_energy[0]>sumo_high))[0])
-            nv_b = len(np.nonzero((mo_energy[0]<vthr_b) & (mo_energy[0]>somo_high))[0])
+            nv_a = len(np.nonzero((mo_energy[0]<vthr_a) & (mo_energy[0]>somo_high))[0])
+            nv_b = len(np.nonzero((mo_energy[1]<vthr_b) & (mo_energy[1]>sumo_high))[0])
             nv = max(nv_a, nv_b)
             act_orb = (upeomo[0]-nc, upeomo[-1]+nv)  # activate space range, activate orbital
             mo_occ_a = mo_occ[0, act_orb[0]:act_orb[1]+1]
@@ -299,14 +298,22 @@ class UsTDA:
             nvir_b = len(viridx_b)
             mo_coeff_a = mo_coeff_a[:, act_orb[0]:act_orb[1]+1]
             mo_coeff_b = mo_coeff_b[:, act_orb[0]:act_orb[1]+1]
-            logger.info(self.mf, 'occ. MO cut-off (eV): {}'.format(mo_energy[0, act_orb[0]]*unit.ha2eV))
-            logger.info(self.mf, 'vir. MO cut-off (eV): {}'.format(mo_energy[1, act_orb[1]]*unit.ha2eV))
+            logger.info(self.mf, 'before additional selection')
+            logger.info(self.mf, 'occ. MO cut-off (eV) (alpha, beta): {} {}'.format(othr_a*unit.ha2eV, othr_b*unit.ha2eV))
+            logger.info(self.mf, 'vir. MO cut-off (eV) (alpha, beta): {} {}'.format(vthr_a*unit.ha2eV, vthr_b*unit.ha2eV))
+            logger.info(self.mf, 'occ. MOs in sUTDA (alpha, beta): {} {}'.format(nc_a+no, nc_b))
+            logger.info(self.mf, 'vir. MOs in sUTDA (alpha, beta): {} {}'.format(nv_a, nv_b+no))
+            logger.info(self.mf, 'The number of additional alpha orbitals selected: {}'.format(nv_b-nv_a))
+            logger.info(self.mf, 'The number of additional beta orbitals selected: {}'.format(nc_a-nc_b))
+            logger.info(self.mf, 'after additional selection')
+            logger.info(self.mf, 'occ. MO cut-off (eV) (alpha, beta): {} {}'.format(othr_a*unit.ha2eV, mo_energy[1, act_orb[0]]*unit.ha2eV))
+            logger.info(self.mf, 'vir. MO cut-off (eV) (alpha, beta): {} {}'.format(mo_energy[0, act_orb[1]]*unit.ha2eV, vthr_b*unit.ha2eV))
+            logger.info(self.mf, 'occ. MOs in sUTDA (alpha, beta): {} {}'.format(nocc_a, nocc_b))
+            logger.info(self.mf, 'vir. MOs in sUTDA (alpha, beta): {} {}'.format(nvir_a, nvir_b))
         if self.cas:
             self.frozen_nc = act_orb[0]
         else:
             self.frozen_nc = 0
-        logger.info(self.mf, 'occ. MOs in sUTDA (alpha, beta): {} {}'.format(nocc_a, nocc_b))
-        logger.info(self.mf, 'vir. MOs in sUTDA (alpha, beta): {} {}'.format(nvir_a, nvir_b))
 
         t0 = time.time()
         fock = self.mf.get_fock()
@@ -334,7 +341,7 @@ class UsTDA:
         qBj_bb = []
         for (shl0,shl1,p0,p1) in ao_slices:
             # exchange
-            qAk_aa.append(np.einsum('mi, ma->ia',C_prime_a[p0:p1, :nocc_a], C_prime_a[p0:p1, nocc_a:], optimize=True))
+            qAk_aa.append(np.einsum('mi, ma->ia', C_prime_a[p0:p1, :nocc_a], C_prime_a[p0:p1, nocc_a:], optimize=True))
             # coulomb
             qAj_aa.append(np.einsum('mi, mj->ij', C_prime_a[p0:p1, :nocc_a], C_prime_a[p0:p1, :nocc_a], optimize=True))
             # exchange
@@ -344,7 +351,7 @@ class UsTDA:
             # coulomb
             qBj_aa.append(np.einsum('ma, mb->ab', C_prime_a[p0:p1, nocc_a:], C_prime_a[p0:p1, nocc_a:], optimize=True))
             # coulomb
-            qBj_bb.append(np.einsum('ma, mb->ab',C_prime_b[p0:p1, nocc_b:], C_prime_b[p0:p1, nocc_b:], optimize=True))
+            qBj_bb.append(np.einsum('ma, mb->ab', C_prime_b[p0:p1, nocc_b:], C_prime_b[p0:p1, nocc_b:], optimize=True))
         qAk_aa = np.array(qAk_aa)
         qBk_aa = np.array(qAk_aa)  # for easy to understand and easy to compare with formula
         qAk_bb = np.array(qAk_bb)
@@ -456,6 +463,8 @@ class UsTDA:
             pcsfov_a, ncsfov_a = devide_csf_p_n(iaiaov_a, self.Emax)
             pcsfco_b, ncsfco_b = devide_csf_p_n(iaiaco_b, self.Emax)
             pcsfcv_b, ncsfcv_b = devide_csf_p_n(iaiacv_b, self.Emax)
+            print("before union, {} PCSFs in CV(aa)".format(len(pcsfcv_a[0])))
+            print("before union, {} PCSFs in CV(bb)".format(len(pcsfcv_b[0])))
             pcsfcv = union(nc, pcsfcv_a, pcsfcv_b)
             ncsfcv = intersec(nc, ncsfcv_a, ncsfcv_b)
             iajb = np.zeros(len(ncsfcv[0])+len(ncsfov_a[0])+len(ncsfco_b[0])+len(ncsfcv[0]))
@@ -600,6 +609,8 @@ class UsTDA:
             pscsfco_b_i, pscsfco_b_a, scsf = devide_csf_ps(pcsfco_b, ncsfco_b, scsf)
             # CV(bb)
             pscsfcv_b_i, pscsfcv_b_a, scsf = devide_csf_ps(pcsfcv, ncsfcv, scsf)
+            print("before union, {} SCSFs in CV(aa)".format(len(pscsfcv_a_i)-len(pcsfcv[0])))
+            print("before union, {} SCSFs in CV(bb)".format(len(pscsfcv_b_i)-len(pcsfcv[0])))
             pscsfcv_i, pscsfcv_a = union(nc, (pscsfcv_a_i, pscsfcv_a_a), (pscsfcv_b_i, pscsfcv_b_a))
             Adim = len(pscsfcv_i) + len(pscsfov_a_i) + len(pscsfco_b_i) + len(pscsfcv_i)
             pcsfdim = len(pcsfcv[0]) + len(pcsfov_a[0]) + len(pcsfco_b[0]) + len(pcsfcv[0])
@@ -637,8 +648,8 @@ class UsTDA:
         pscsf_fdiag_b[pscsfcv_i+pscsf_fdiag_b.shape[0]-nc, no+pscsfcv_a] = True
         # Note: pscsf_fdiag order is pyscf order, so if calculate overlap, adjust pyscf csf order to my order
         pscsf_fdiag = np.concatenate((pscsf_fdiag_a.reshape(-1), pscsf_fdiag_b.reshape(-1)))
-        nc_old, no_old, nv_old = tools.get_cov(self.mf)
-        order = tools.order_pyscf2my(nc_old, no_old, nv_old)
+        nc_old, no_old, nv_old = utils.get_cov(self.mf)
+        order = utils.order_pyscf2my(nc_old, no_old, nv_old)
         pscsf_fdiag = pscsf_fdiag[order]
 
         # Section: construct A
@@ -913,7 +924,7 @@ class UsTDA:
         t_os = t1 - t0
         # before calculate rot_str, check whether mol is chiral mol
         t0 = time.time()
-        if gto.mole.chiral_mol(mol):
+        if gto.mole.chiral_mol(self.mol):
             rs = self.rot_str()
         else:
             rs = np.zeros(self.nstates)
@@ -1168,11 +1179,11 @@ class UsTDA:
         # orbital = np.unique(np.array(orbital))  # only include excited orbital
         orbital = np.arange(np.min(orbital), np.max(orbital)+1, dtype=np.int64)
         for i in orbital:
-            cubegen.orbital(mol, out_filename+str(i + 1)+'alpha.cube', self.mf.mo_coeff[0, :, i])
-            cubegen.orbital(mol, out_filename+str(i + 1)+'beta.cube', self.mf.mo_coeff[1, :, i])
+            cubegen.orbital(self.mol, out_filename+str(i + 1)+'alpha.cube', self.mf.mo_coeff[0, :, i])
+            cubegen.orbital(self.mol, out_filename+str(i + 1)+'beta.cube', self.mf.mo_coeff[1, :, i])
         # export molden file
-        c_loc_orth = lo.orth.orth_ao(mol)
-        molden.from_mo(mol, out_filename+'.molden', c_loc_orth)
+        c_loc_orth = lo.orth.orth_ao(self.mol)
+        molden.from_mo(self.mol, out_filename+'.molden', c_loc_orth)
 
 
 if __name__ == "__main__":
@@ -1186,6 +1197,7 @@ if __name__ == "__main__":
         # atom=atom.mttm2_toluene,
         # atom=atom.hhcrqpp2,
         # atom=atom.ptm3ncz_cyclohexane,
+        # atom=atom.g3ttm_toluene,
         unit="A",
         # unit="B",  # https://doi.org/10.1016/j.comptc.2014.02.023 use bohr
         # basis='aug-cc-pvtz',
@@ -1204,18 +1216,18 @@ if __name__ == "__main__":
     # mol.basis = basis
     # mol.build()
 
-    # # add solvents
-    # t_dft0 = time.time()
-    # mf = dft.UKS(mol).SMD()
-    # # mf = dft.UKS(mol).PCM()
-    # # mf.with_solvent.method = 'COSMO'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
-    # # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
-    # # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
-    # mf.with_solvent.eps = 2.3741  # for toluene 甲苯
-    # # mf.with_solvent.eps = 35.688  # for Acetonitrile 乙腈
-
+    # add solvents
     t_dft0 = time.time()
-    mf = dft.UKS(mol)
+    mf = dft.UKS(mol).SMD()
+    # mf = dft.UKS(mol).PCM()
+    # mf.with_solvent.method = 'COSMO'  # C-PCM, SS(V)PE, COSMO, IEF-PCM
+    # in https://gaussian.com/scrf/ solvents entry, give different eps for different solvents
+    # mf.with_solvent.eps = 2.0165  # for Cyclohexane 环己烷
+    mf.with_solvent.eps = 2.3741  # for toluene 甲苯
+    # mf.with_solvent.eps = 35.688  # for Acetonitrile 乙腈
+
+    # t_dft0 = time.time()
+    # mf = dft.UKS(mol)
     mf.conv_tol = 1e-8  # same with orca tightscf criterion
     mf.conv_tol_grad = 1e-5  # same with orca tightscf criterion
     mf.max_cycle = 200
@@ -1223,15 +1235,15 @@ if __name__ == "__main__":
     # xc = 'blyp'
     # xc = 'b3lyp'
     # xc = 'wb97xd3'
-    # xc = 'pbe0'
+    xc = 'pbe0'
     # xc = 'pbe38'
-    xc = '0.50*HF + 0.50*B88 + GGA_C_LYP'  # BHHLYP
+    # xc = '0.50*HF + 0.50*B88 + GGA_C_LYP'  # BHHLYP
     # xc = 'hf'
     mf.xc = xc
-    xc = 'bhhlyp'
+    # xc = 'bhhlyp'
     # mf.grids.level = 9
     mf.conv_check = False
-    mf.level_shift = 0.6
+    # mf.level_shift = 0.6
     mf.kernel()
     # mo1, mo2 = mf.stability()  # stable test
     # mf.kernel(mo_coeff=mo1)  # if do not stable, use other wave function as initial guess
@@ -1243,7 +1255,7 @@ if __name__ == "__main__":
     # os.environ["OMP_NUM_THREADS"] = "1"  # test one core time-consuming
     ustda = UsTDA(mol, mf, nstates=10)
     ustda.info()
-    ustda.nstates = 20
+    ustda.nstates = 12
     ustda.Emax = 10.0
     ustda.cas = True
     ustda.paramtype = 'os'
