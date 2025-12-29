@@ -36,7 +36,7 @@ def mf_info(mf):
         mo_occ[1][np.where(mf.mo_occ>=2)[0]]=1
     return mo_energy,mo_occ,mo_coeff    
     
-def cache_xc_kernel_sf(mf, mo_coeff, mo_occ, spin=1,max_memory=2000,isf=-1): # for ALDA0
+def cache_xc_kernel_sf(mf, mo_coeff, mo_occ, spin=1,max_memory=2000,isf=-1,method=0): # for ALDA0 and noncollinear
     '''Compute the fxc_sf, which can be used in SF-TDDFT/TDA
     '''
     MGGA_DENSITY_LAPL = False
@@ -70,7 +70,7 @@ def cache_xc_kernel_sf(mf, mo_coeff, mo_occ, spin=1,max_memory=2000,isf=-1): # f
         rhob = make_rho(1, ao, mask, xctype)
         if xctype == 'LDA':
             rho = (rhoa,rhob)
-        else: # GGA
+        elif method==0: # GGA ALDA0
             rha = np.zeros_like(rhoa)
             rhb = np.zeros_like(rhob)
             rha[0] = rhoa[0]
@@ -78,6 +78,8 @@ def cache_xc_kernel_sf(mf, mo_coeff, mo_occ, spin=1,max_memory=2000,isf=-1): # f
             rho = (rha,rhb)
             rhoa = rhoa[0]
             rhob = rhob[0]
+        elif method==3:
+            rho = (rhoa,rhob)
         vxc= ni.eval_xc_eff(mf.xc, rho, deriv=1, xctype=xctype)[1] # 
         vxc_a = vxc[0,0]*weight
         vxc_b = vxc[1,0]*weight
@@ -216,22 +218,22 @@ def gen_tda_operation_sf(mf,isf,method):
         ndim = (noccb,nvira)
         orbov = (orbob,orbva)
     if method == 1:
-        vresp = gen_response_sf_mc(mf,hermi=0,collinear_samples=100)
-        #vresp = _gen_uhf_tda_response_sf(mf,hermi=0)
+        vresp = _gen_uhf_tda_response_sf(mf,hermi=0,collinear_samples=50)
     else:
-        vresp = gen_response_sf(mf,hermi=0)
+        vresp = gen_response_sf(mf,hermi=0,method=method)
 
     #@profile
+    #print('isf=',isf)
     def vind(zs0): # vector-matrix product for indexed operations
         ndim0,ndim1 = ndim # ndom0:numuber of occ orbitals, ndim1:number of vir orbitals
         orbo,orbv = orbov # mo_coeff for alpha and beta
         zs = np.asarray(zs0).reshape(-1,ndim0,ndim1)
         #print('zs.shape ',zs.shape)
         #print(zs)
-        #vs = np.zeros_like(zs)
+        vs = np.zeros_like(zs)
         dmov = lib.einsum('xov,qv,po->xpq', zs,orbv.conj(), orbo) # (x,nmo,nmo)
         v1ao = vresp(np.asarray(dmov))   # with density and get response function
-        vs = lib.einsum('xpq,po,qv->xov', v1ao, orbo.conj(), orbv) # (-1,nocca,nvirb)
+        vs += lib.einsum('xpq,po,qv->xov', v1ao, orbo.conj(), orbv) # (-1,nocca,nvirb)
         if isf == -1: # spin down
             vs += np.einsum('ab,xib->xia',fockB[noccb:,noccb:],zs,optimize=True)-\
                    np.einsum('ij,xja->xia',fockA[:nocca,:nocca],zs,optimize=True)
@@ -256,7 +258,7 @@ def gen_response_sf(mf,hermi=0,max_memory=None,method=0):
             mem_now = lib.current_memory()[0]
             max_memory = max(2000, mf.max_memory*.8-mem_now)
         if method == 0:
-            vxc = cache_xc_kernel_sf(mf, mo_coeff, mo_occ,1,max_memory,isf=-1) # XC kerkel 
+            vxc = cache_xc_kernel_sf(mf, mo_coeff, mo_occ,1,max_memory,isf=-1,method=method) # XC kerkel 
         dm0 = None
 
         def vind(dm1):
@@ -391,7 +393,7 @@ def davidson_process(mf,nstates,method,isf=-1):
     #print(f'init_guess times use {(end_t-start_t)/3600:6.4f} hours')
     #print('x0.shape ',x0.shape)
     converged, e, x1 = lib.davidson1(vind, x0, precond,
-                          tol=1e-7,lindep=1e-10,
+                          tol=1e-7,lindep=1e-14,
                           nroots=nstates,
                           max_cycle=3000)
     #end_time = time.time()
@@ -400,8 +402,9 @@ def davidson_process(mf,nstates,method,isf=-1):
     #print(self.v.shape)
     if isf == -1:
         v = deal_v_davidson(mf,nstates,v)
-    elif isf == 1:
-        v = deal_v_davidson2(mf,nstates,v)
+    #elif isf == 1:
+    #    pass
+        #v = deal_v_davidson2(mf,nstates,v)
     print('Converged ',converged)
     return e,v
 
@@ -425,6 +428,7 @@ class SF_TDA_up():
         self.nao = mol.nao_nr()
         self.method = method
         self.davidson = davidson
+        self.collinear=False
         occidx_a = np.where(self.mo_occ[0]==1)[0]
         viridx_a = np.where(self.mo_occ[0]==0)[0]
         occidx_b = np.where(self.mo_occ[1]==1)[0]
@@ -559,8 +563,9 @@ class SF_TDA_up():
                   -np.einsum('ij,ab->iajb',fockB[:self.nc,:self.nc],delta_ab[self.no:,self.no:])).reshape((self.nc*self.nv,self.nc*self.nv))
         
     def kernel(self,nstates=1):
-        if nstates==None:
-            nstates=self.nstates
+        #if nstates==None:
+        #    nstates=self.nstates
+        self.nstates = nstates
         if self.davidson:
             self.e,self.v = davidson_process(self.mf,nstates,self.method,isf=1)
         else:
@@ -819,7 +824,7 @@ class SF_TDA_down():
                 for j in range(no):
                     Dp_ab += x_oo_ab[i,i]*x_oo_ab[j,j]
                     
-            print(f'Excited state {nstate+1} {self.e[nstate]*unit.ha2eV:10.5f} eV D<S^2>={-no+1+Dp_ab:5.2f}')
+            print(f'Excited state {nstate+1} {self.e[nstate]*ha2eV:10.5f} eV D<S^2>={-no+1+Dp_ab:5.2f}')
             for o,v in zip(* np.where(abs(x_cv_ab)>0.1)):
                 print(f'{100*x_cv_ab[o,v]**2:3.0f}% CV(ab) {o+1}a -> {v+1+self.nc+self.no}b {x_cv_ab[o,v]:10.5f}')
             for o,v in zip(* np.where(abs(x_co_ab)>0.1)):
@@ -849,6 +854,128 @@ class SF_TDA_down():
     
     
 # code from pyscf-forge to construct multicollinear functional
+def _gen_uhf_tda_response_sf(mf, mo_coeff=None, mo_occ=None, hermi=0, collinear_samples=50, max_memory=None):
+    '''Generate a function to compute the product of Spin Flip UKS response function
+    and UKS density matrices.
+    '''
+    mo_energy,mo_occ,mo_coeff = mf_info(mf)
+    #assert isinstance(mf, (uhf.UHF))
+    #if mo_coeff is None: mo_coeff = mf.mo_coeff
+    #if mo_occ is None: mo_occ = mf.mo_occ
+    mol = mf.mol
+
+    ni = numint2c.NumInt2C()
+    ni.collinear = 'mcol'
+    ni.collinear_samples = collinear_samples
+    ni.libxc.test_deriv_order(mf.xc, 2, raise_error=True)
+    if mf.nlc or ni.libxc.is_nlc(mf.xc):
+        logger.warn(mf, 'NLC functional found in DFT object.  Its second '
+                    'deriviative is not available. Its contribution is '
+                    'not included in the response function.')
+    omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, mol.spin)
+    hybrid = ni.libxc.is_hybrid_xc(mf.xc)
+
+    # mf can be pbc.dft.UKS object with multigrid
+    if (not hybrid and
+        'MultiGridFFTDF' == getattr(mf, 'with_df', None).__class__.__name__):
+        raise NotImplementedError("Spin Flip TDDFT doesn't support pbc calculations.")
+
+
+    fxc = cache_xc_kernel_sf_mc(ni,mol, mf.grids, mf.xc, mo_coeff, mo_occ, 1)[2]
+    #print('fxs')
+    #print(fxc)
+    dm0 = None
+
+    if max_memory is None:
+        mem_now = lib.current_memory()[0]
+        max_memory = max(2000, mf.max_memory*.8-mem_now)
+
+    def vind(dm1):
+        in2 = numint.NumInt()
+        v1 = nr_uks_fxc_sf_tda_mc(in2,mol, mf.grids, mf.xc, dm0, dm1, 0, hermi,
+                               None, None, fxc, max_memory=max_memory)
+        if not hybrid:
+            # No with_j because = 0 in spin flip part.
+            pass
+        else:
+            vk = mf.get_k(mol, dm1, hermi=hermi)
+            vk *= hyb
+            if omega > 1e-10:  # For range separated Coulomb
+                vk += mf.get_k(mol, dm1, hermi, omega) * (alpha-hyb)
+            v1 -= vk
+        return v1
+    return vind
+
+
+def __mcfun_fn_eval_xc(ni, xc_code, xctype, rho, deriv):
+    evfk = ni.eval_xc_eff(xc_code, rho, deriv=deriv, xctype=xctype)
+    for order in range(1, deriv+1):
+        if evfk[order] is not None:
+            evfk[order] = xc_deriv.ud2ts(evfk[order])
+    return evfk
+
+# This function can be merged with pyscf.dft.numint2c.mcfun_eval_xc_adapter()
+# This function should be a class function in the Numint2c class.
+def mcfun_eval_xc_adapter_sf(ni, xc_code):
+    '''Wrapper to generate the eval_xc function required by mcfun
+
+    Kwargs:
+        dim: int
+            eval_xc_eff_sf is for mc collinear sf tddft/ tda case.add().
+    '''
+
+    try:
+        import mcfun
+    except ImportError:
+        raise ImportError('This feature requires mcfun library.\n'
+                          'Try install mcfun with `pip install mcfun`')
+
+    xctype = ni._xc_type(xc_code)
+    fn_eval_xc = functools.partial(__mcfun_fn_eval_xc, ni, xc_code, xctype)
+    nproc = lib.num_threads()
+
+    def eval_xc_eff(xc_code, rho, deriv=1, omega=None, xctype=None,
+                verbose=None):
+        return mcfun.eval_xc_eff_sf(
+            fn_eval_xc, rho, deriv,
+            collinear_samples=ni.collinear_samples, workers=nproc)
+    return eval_xc_eff
+
+# This function should be a class function in the Numint2c class.
+def cache_xc_kernel_sf_mc(self, mol, grids, xc_code, mo_coeff, mo_occ, spin=1,max_memory=2000):
+    '''Compute the fxc_sf, which can be used in SF-TDDFT/TDA
+    '''
+    MGGA_DENSITY_LAPL = False
+    xctype = self._xc_type(xc_code)
+    if xctype == 'GGA':
+        ao_deriv = 1
+    elif xctype == 'MGGA':
+        ao_deriv = 2 if MGGA_DENSITY_LAPL else 1
+    else:
+        ao_deriv = 0
+    with_lapl = MGGA_DENSITY_LAPL
+
+    assert mo_coeff[0].ndim == 2
+    assert spin == 1
+
+    nao = mo_coeff[0].shape[0]
+    rhoa = []
+    rhob = []
+
+    ni = numint.NumInt()
+    for ao, mask, weight, coords \
+            in self.block_loop(mol, grids, nao, ao_deriv, max_memory=max_memory):
+        rhoa.append(ni.eval_rho2(mol, ao, mo_coeff[0], mo_occ[0], mask, xctype, with_lapl))
+        rhob.append(ni.eval_rho2(mol, ao, mo_coeff[1], mo_occ[1], mask, xctype, with_lapl))
+    rho_ab = (np.hstack(rhoa), np.hstack(rhob))
+    rho_ab = np.asarray(rho_ab)
+    rho_tmz = np.zeros_like(rho_ab)+1e-9
+    rho_tmz[0] += rho_ab[0]+rho_ab[1]
+    rho_tmz[1] += rho_ab[0]-rho_ab[1]
+    eval_xc = mcfun_eval_xc_adapter_sf(self,xc_code)
+    fxc_sf = eval_xc(xc_code, rho_tmz, deriv=2, xctype=xctype)
+    return fxc_sf
+
 def nr_uks_fxc_sf_tda_mc(ni, mol, grids, xc_code, dm0, dms, relativity=0, hermi=0,rho0=None,
                       vxc=None, fxc=None, extype=0, max_memory=2000, verbose=None):
     if isinstance(dms, np.ndarray):
@@ -922,122 +1049,6 @@ def nr_uks_fxc_sf_tda_mc(ni, mol, grids, xc_code, dm0, dms, relativity=0, hermi=
         vmat = np.asarray(vmat, dtype=dtype)
     return vmat
 
-# This function is copied from pyscf.dft.numint2c.py
-def __mcfun_fn_eval_xc(ni, xc_code, xctype, rho, deriv):
-    evfk = ni.eval_xc_eff(xc_code, rho, deriv=deriv, xctype=xctype)
-    for order in range(1, deriv+1):
-        if evfk[order] is not None:
-            evfk[order] = xc_deriv.ud2ts(evfk[order])
-    return evfk
-
-# This function can be merged with pyscf.dft.numint2c.mcfun_eval_xc_adapter()
-# This function should be a class function in the Numint2c class.
-def mcfun_eval_xc_adapter_sf(ni, xc_code):
-    '''Wrapper to generate the eval_xc function required by mcfun
-
-    Kwargs:
-        dim: int
-            eval_xc_eff_sf is for mc collinear sf tddft/ tda case.add().
-    '''
-
-    try:
-        import mcfun
-    except ImportError:
-        raise ImportError('This feature requires mcfun library.\n'
-                          'Try install mcfun with `pip install mcfun`')
-
-    xctype = ni._xc_type(xc_code)
-    fn_eval_xc = functools.partial(__mcfun_fn_eval_xc, ni, xc_code, xctype)
-    nproc = lib.num_threads()
-
-    def eval_xc_eff(xc_code, rho, deriv=1, omega=None, xctype=None,
-                verbose=None):
-        return mcfun.eval_xc_eff_sf(
-            fn_eval_xc, rho, deriv,
-            collinear_samples=ni.collinear_samples, workers=nproc)
-    return eval_xc_eff
-
-# This function should be a class function in the Numint2c class.
-def cache_xc_kernel_sf_mc(self,mol, grids, xc_code, mo_coeff, mo_occ, spin=1,max_memory=2000):
-    '''Compute the fxc_sf, which can be used in SF-TDDFT/TDA
-    '''
-    MGGA_DENSITY_LAPL = False
-    xctype = self._xc_type(xc_code)
-    if xctype == 'GGA':
-        ao_deriv = 1
-    elif xctype == 'MGGA':
-        ao_deriv = 2 if MGGA_DENSITY_LAPL else 1
-    else:
-        ao_deriv = 0
-    with_lapl = MGGA_DENSITY_LAPL
-
-    assert mo_coeff[0].ndim == 2
-    assert spin == 1
-
-    nao = mo_coeff[0].shape[0]
-    rhoa = []
-    rhob = []
-
-    ni = numint.NumInt()
-    for ao, mask, weight, coords \
-            in self.block_loop(mol, grids, nao, ao_deriv, max_memory=max_memory):
-        rhoa.append(ni.eval_rho2(mol, ao, mo_coeff[0], mo_occ[0], mask, xctype, with_lapl))
-        rhob.append(ni.eval_rho2(mol, ao, mo_coeff[1], mo_occ[1], mask, xctype, with_lapl))
-    rho_ab = (np.hstack(rhoa), np.hstack(rhob))
-    rho_ab = np.asarray(rho_ab)
-    rho_tmz = np.zeros_like(rho_ab)
-    rho_tmz[0] += rho_ab[0]+rho_ab[1]
-    rho_tmz[1] += rho_ab[0]-rho_ab[1]
-    eval_xc = mcfun_eval_xc_adapter_sf(self,xc_code)
-    fxc_sf = eval_xc(xc_code, rho_tmz, deriv=2, xctype=xctype)
-    return fxc_sf
-
-def gen_response_sf_mc(mf, mo_coeff=None, mo_occ=None, hermi=0, collinear_samples=100, max_memory=None):
-    '''Generate a function to compute the product of Spin Flip UKS response function
-    and UKS density matrices.
-    '''
-    mo_energy,mo_occ,mo_coeff = mf_info(mf)
-    mol = mf.mol
-
-    ni = numint2c.NumInt2C()
-    ni.collinear = 'mcol'
-    ni.collinear_samples = collinear_samples
-    ni.libxc.test_deriv_order(mf.xc, 2, raise_error=True)
-    if mf.nlc or ni.libxc.is_nlc(mf.xc):
-        logger.warn(mf, 'NLC functional found in DFT object.  Its second '
-                    'deriviative is not available. Its contribution is '
-                    'not included in the response function.')
-    omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, mol.spin)
-    hybrid = ni.libxc.is_hybrid_xc(mf.xc)
-
-    # mf can be pbc.dft.UKS object with multigrid
-    if (not hybrid and
-        'MultiGridFFTDF' == getattr(mf, 'with_df', None).__class__.__name__):
-        raise NotImplementedError("Spin Flip TDDFT doesn't support pbc calculations.")
-
-
-    fxc = cache_xc_kernel_sf_mc(ni,mol, mf.grids, mf.xc, mo_coeff, mo_occ, 1)[2]
-    dm0 = None
-
-    if max_memory is None:
-        mem_now = lib.current_memory()[0]
-        max_memory = max(2000, mf.max_memory*.8-mem_now)
-
-    def vind(dm1):
-        in2 = numint.NumInt()
-        v1 = nr_uks_fxc_sf_tda_mc(in2,mol, mf.grids, mf.xc, dm0, dm1, 0, hermi,
-                               None, None, fxc,max_memory=max_memory)
-        if not hybrid:
-            # No with_j because = 0 in spin flip part.
-            pass
-        else:
-            vk = mf.get_k(mol, dm1, hermi=hermi)
-            vk *= hyb
-            if omega > 1e-10:  # For range separated Coulomb
-                vk += mf.get_k(mol, dm1, hermi, omega) * (alpha-hyb)
-            v1 -= vk
-        return v1
-    return vind
 
 #construct full A matrix for mulitcollinear function
 def get_ab_sf(mf, mo_energy=None, mo_coeff=None, mo_occ=None, collinear_samples=50):

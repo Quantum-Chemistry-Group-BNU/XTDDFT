@@ -251,7 +251,7 @@ def si2driver(mf,S,Vso,gs=1,nstates=[None,None],analyze=0):
         print(f"The ground state is included in SI calculation")
 
     print(f"{'='*15} State interaction setting {'='*15}")
-    print(f"GS {gs}, state-({S:.2f}) {nstates[0]}, state-({S+1:.2f}) {nstates[1]} are selected")
+    # print(f"GS {gs}, state-({S:.2f}) {nstates[0]}, state-({S+1:.2f}) {nstates[1]} are selected")
     print(f"GS {gs}, state-|Si> {nstates[0]}, state-|Si+1> {nstates[1]} are selected")
 
     from XTDA import XTDA
@@ -261,21 +261,22 @@ def si2driver(mf,S,Vso,gs=1,nstates=[None,None],analyze=0):
     xtda.kernel()
     ed = xtda.e
     xd = xtda.v # CV(0), CO(0), OV(0), CV(1) by X_TDA
-
+    # breakpoint()
     # use whb's XTDA
     # xtda1= XTDA(mol,mf,so2st=1)
     # xtda1.nstates = nstates[0]
     # xtda1.kernel()
     # xtda1.analyze() # this should be performed trans. so2st basis
+    # ed = xtda1.e
     # xd1 = xd1_ = xtda1.v # CV(0), OV(0), CO(0), CV(1) by XTDA
-    # transform to CV(0), CO(0), OV(0), CV(1)
+    # # transform to CV(0), CO(0), OV(0), CV(1)
     # xd1[nc*nv:nc*(nv+no)] = xd1_[nc*nv+no*nv:nc*nv+no*nv+nc*no]
     # xd1[nc*(nv+no):nc*(nv+no)+no*nv] = xd1_[nc*nv:nc*nv+no*nv]
     # xd = xd1
 
     from SF_TDA.SF_TDA import SF_TDA
     print(f"{'='*15} Perform SF-up-TDA calculation {'='*15}")
-    sf_tda = SF_TDA(mf,isf=1)
+    sf_tda = SF_TDA(mf,isf=1,davidson=0)
     sf_tda.nstates = nstates[1]
     eq, xq = sf_tda.kernel()
     sf_tda.analyse()
@@ -337,19 +338,19 @@ def si2driver(mf,S,Vso,gs=1,nstates=[None,None],analyze=0):
         hmDD[m][slS_CV0,slS_OV0] = numpy.einsum('aibj->iajb',hm[map_hm['S_CV(0)']['S_OV(0)']][m]).reshape(dimCV,dimOV)
         hmDD[m][slS_CV0,slS_CV1] = numpy.einsum('aibj->iajb',hm[map_hm['S_CV(0)']['S_CV(1)']][m]).reshape(dimCV,dimCV)
 
-        hmDD[m][slS_CO0,slS_CV0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_CV(0)']['S_CO(0)']][-m]).reshape(dimCO,dimCV).conjugate()
+        hmDD[m][slS_CO0,slS_CV0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_CV(0)']['S_CO(0)']][m]).reshape(dimCO,dimCV)
         hmDD[m][slS_CO0,slS_CO0] = numpy.einsum('aibj->iajb',hm[map_hm['S_CO(0)']['S_CO(0)']][m]).reshape(dimCO,dimCO)
         hmDD[m][slS_CO0,slS_OV0] = numpy.einsum('aibj->iajb',hm[map_hm['S_CO(0)']['S_OV(0)']][m]).reshape(dimCO,dimOV)
         hmDD[m][slS_CO0,slS_CV1] = numpy.einsum('aibj->iajb',hm[map_hm['S_CO(0)']['S_CV(1)']][m]).reshape(dimCO,dimCV)
 
-        hmDD[m][slS_OV0,slS_CV0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_CV(0)']['S_OV(0)']][-m]).reshape(dimOV,dimCV).conjugate()
-        hmDD[m][slS_OV0,slS_CO0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_CO(0)']['S_OV(0)']][-m]).reshape(dimOV,dimCO).conjugate()
+        hmDD[m][slS_OV0,slS_CV0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_CV(0)']['S_OV(0)']][m]).reshape(dimOV,dimCV)
+        hmDD[m][slS_OV0,slS_CO0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_CO(0)']['S_OV(0)']][m]).reshape(dimOV,dimCO)
         hmDD[m][slS_OV0,slS_OV0] = numpy.einsum('aibj->iajb',hm[map_hm['S_OV(0)']['S_OV(0)']][m]).reshape(dimOV,dimOV)
         hmDD[m][slS_OV0,slS_CV1] = numpy.einsum('aibj->iajb',hm[map_hm['S_OV(0)']['S_CV(1)']][m]).reshape(dimOV,dimCV)
 
-        hmDD[m][slS_CV1,slS_CV0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_CV(0)']['S_CV(1)']][-m]).reshape(dimCV,dimCV).conjugate()
-        hmDD[m][slS_CV1,slS_CO0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_CO(0)']['S_CV(1)']][-m]).reshape(dimCV,dimCO).conjugate()
-        hmDD[m][slS_CV1,slS_OV0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_OV(0)']['S_CV(1)']][-m]).reshape(dimCV,dimOV).conjugate()
+        hmDD[m][slS_CV1,slS_CV0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_CV(0)']['S_CV(1)']][m]).reshape(dimCV,dimCV)
+        hmDD[m][slS_CV1,slS_CO0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_CO(0)']['S_CV(1)']][m]).reshape(dimCV,dimCO)
+        hmDD[m][slS_CV1,slS_OV0] = -numpy.einsum('bjai->iajb',hm[map_hm['S_OV(0)']['S_CV(1)']][m]).reshape(dimCV,dimOV)
         hmDD[m][slS_CV1,slS_CV1] = numpy.einsum('aibj->iajb',hm[map_hm['S_CV(1)']['S_CV(1)']][m]).reshape(dimCV,dimCV)
         # D-Q
         hmDQ[m] = numpy.zeros(((nc+no)*nv + nc*(nv+no),nc*nv),dtype=numpy.complex128)
@@ -425,6 +426,8 @@ def si2driver(mf,S,Vso,gs=1,nstates=[None,None],analyze=0):
     print(numpy.sort(numpy.diag(Omega))[:20] * unit.ha2eV)
     print(f"The E_soc (in eV) --")
     print(eso[:20] * unit.ha2eV)
+    print(f"The E_soc (in cm-1) --")
+    print(eso[:20] * unit.ha2eV * unit.eV2cm_1)
     hso_cm_1 = hso*unit.ha2eV*unit.eV2cm_1
     return hso, eso
 

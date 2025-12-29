@@ -13,10 +13,10 @@ from pyscf.symm import direct_prod
 
 #from line_profiler import profile
 
-from SF_TDA import SF_TDA,SF_TDA_down, mf_info,gen_response_sf,gen_response_sf_mc
+from SF_TDA import SF_TDA,SF_TDA_down, mf_info,gen_response_sf,_gen_uhf_tda_response_sf
 #import sys
 #sys.path.append('/home/lenovo2/usrs/zhw/software/test_git_file')
-#from scf_genrep_sftd import _gen_uhf_tda_response_sf
+#from mc_file import _gen_uhf_tda_response_sf
 au2ev = 27.21138505
 
 def get_irrep_occupancy_directly(mol, mf):
@@ -300,6 +300,7 @@ class SA_SF_TDA():
         ints_ab = np.einsum('xpq,pi,qj->xij',ints,self.mf.mo_coeff[0].conj(),self.mf.mo_coeff[1]) # a->b
         ints_aa = np.einsum('xpq,pi,qj->xij',ints,self.mf.mo_coeff[0].conj(),self.mf.mo_coeff[0])
         ints_bb = np.einsum('xpq,pi,qj->xij',ints,self.mf.mo_coeff[1].conj(),self.mf.mo_coeff[1])
+        ints_ab = ints_aa.copy()
         dim1 = self.nc*self.nv
         dim2 = dim1+self.nc*self.no
         dim3 = dim2+self.no*self.nv
@@ -836,8 +837,7 @@ class SA_SF_TDA():
             hdiag = e_ia.ravel()
 
         if self.method == 1:
-            vresp = gen_response_sf_mc(self.mf,hermi=0)
-            #vresp = _gen_uhf_tda_response_sf(self.mf)
+            vresp = _gen_uhf_tda_response_sf(self.mf,hermi=0,collinear_samples=50)
         else:
             vresp = gen_response_sf(self.mf,hermi=0,method=self.method)
 
@@ -858,7 +858,7 @@ class SA_SF_TDA():
         def vind(zs0): # vector-matrix product for indexed operations
             ndim0,ndim1 = ndim # ndom0:numuber of alpha orbitals, ndim1:number of beta orbitals
             orbo,orbv = orbov # mo_coeff for alpha and beta
-            start_t = time.time()
+            #start_t = time.time()
 
             if self.re:
                 oo = np.zeros((np.array(zs0).shape[0],no*no-1)) # get oo from zs0, which is no*no-1
@@ -888,10 +888,10 @@ class SA_SF_TDA():
             #np.save('v1_t.npy',v1[:,nc:,no:])
             #vs += np.einsum('ij,ab,xjb->xia',delta_ij,fockB[noccb:,noccb:],zs)-\
             #       np.einsum('ab,ij,xjb->xia',delta_ab,fockA[:nocca,:nocca],zs)
-            vs += np.einsum('ab,xib->xia',fockB[noccb:,noccb:],zs)-\
+            vs += np.einsum('ab,xib->xia',fockB[noccb:,noccb:],zs,optimize=True)-\
                    np.einsum('ij,xja->xia',fockA[:nocca,:nocca],zs,optimize=True)
             vs_dA = np.zeros_like(vs)
-            end_t = time.time()
+            #end_t = time.time()
             #print(f'USF times use {(end_t-start_t)/3600} hours')
 
             if self.SA > 0:
@@ -1195,9 +1195,9 @@ class SA_SF_TDA():
         #print(f'init_guess times use {(end_t-start_t)/3600:6.4f} hours')
         #print('x0.shape ',x0.shape)
         converged, e, x1 = lib.davidson1(vind, x0, precond,
-                              tol=1e-7,lindep=1e-10,
+                              tol=1e-8,lindep=1e-10,
                               nroots=self.nstates,
-                              max_cycle=300)
+                              max_cycle=1000)
         end_time = time.time()
         #print(f'davidson time use {(end_time-end_t)/3600} hours')
         self.converged = converged
@@ -1232,6 +1232,8 @@ class SA_SF_TDA():
         self.nstates = min(nstates,nov)
         if fglobal is None:
             fglobal = (1-d_lda)*self.hyb + d_lda
+            if self.method == 1:
+                fglobal = fglobal*4*(self.hyb-0.5)**2
         if remove:
             #print('fglobal',fglobal)
             if self.davidson:

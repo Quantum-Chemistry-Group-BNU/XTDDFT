@@ -5,13 +5,14 @@ import matplotlib.pyplot as plt
 from utils import unit
 from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 
-functional = 'pbe0-st/'
+# functional = 'pbe0-st/'
+functional = 'tpssh-st-10eV/'
 # mol = 'ttm/'
 # mol = 'bispytm/'
 # mol = 'ttm3ncz/'
 # mol = 'ptm3ncz/'
-mol = 'mttm2/'
-# mol = 'hhcrqpp2/'
+# mol = 'mttm2/'
+mol = 'hhcrqpp2/'
 file = '../result/'
 
 # ==== parameter ====
@@ -19,8 +20,8 @@ img_dir = file+mol+functional+'cubeneed/'+'VCUBE/'
 # method = 'sUTDA-'
 method = 'sXTDA-'
 # solvent = 'cyclohexane-'
-solvent = 'toluene-'
-# solvent = 'acetonitrile-'
+# solvent = 'toluene-'
+solvent = 'acetonitrile-'
 prefix = solvent + method[1]+method[0]+method[2:] + mol[:-1]
 
 # ==== frontier orbitals ====
@@ -29,8 +30,8 @@ prefix = solvent + method[1]+method[0]+method[2:] + mol[:-1]
 # excit = ['D1', 'D8', 'D96']
 
 # # ttm sXTDA
-# forb = [['136', '137'], ['137', '139'], ['135', '139'], ['135', '140'], ['136', '138']]
-# excit = ['D1', 'D8', 'D60_1', 'D60_2', 'D60_3']
+# forb = [['136', '137'], ['137', '138'], ['135', '139'], ['135', '140'], ['136', '138']]
+# excit = ['D1', 'D7', 'D60_1', 'D60_2', 'D60_3']
 
 # # bispytm sUTDA
 # forb = [['120beta', '121beta'], ['121alpha', '123alpha'],
@@ -48,9 +49,10 @@ prefix = solvent + method[1]+method[0]+method[2:] + mol[:-1]
 # excit = ['D1', 'D9', 'D37_1', 'D37_2', 'D37_3']
 
 # # ttm3ncz sXTDA
-# forb = [['204', '205'], ['205', '206'], ['205', '207'], ['204', '207'],
-#         ['203', '206'], ['189', '205'], ['190', '205']]
-# excit = ['D1', 'D10_1', 'D10_2', 'D10_3', 'D47_1', 'D47_2', 'D47_3']
+# forb = [['204', '205'],
+#         ['205', '206'], ['205', '207'], ['204', '207'],]
+#         # ['203', '206'], ['189', '205'], ['190', '205']]
+# excit = ['204-205', '205-206', '205-207', '204-207']
 
 # # mttm2 sUTDA
 # forb = [['274beta', '276beta'], ['275beta', '277beta'],
@@ -58,10 +60,11 @@ prefix = solvent + method[1]+method[0]+method[2:] + mol[:-1]
 #         ['274alpha', '278alpha'], ['275alpha', '279alpha']]
 # excit = ['D1_1', 'D1_2', 'D13_1', 'D13_2', 'D87_1', 'D87_2']
 
-# mttm2 sXTDA
-forb = [['274', '277'], ['275', '276'], ['276', '278'], ['277', '279'],
-        ['275', '278']]
-excit = ['D1_1', 'D1_2', 'D13_1', 'D13_2', 'D98']
+# # mttm2 sXTDA
+# forb = [['274', '277'], ['275', '276'],
+#         ['276', '278'], ['277', '279'],]
+#         # ['275', '278']]
+# excit = ['274-277', '275-276', '276-278', '277-279']
 
 # # hhcrqpp2 sUTDA
 # forb = [['173beta', '174beta'],
@@ -69,11 +72,17 @@ excit = ['D1_1', 'D1_2', 'D13_1', 'D13_2', 'D98']
 #         ['158beta', '175beta'], ['160beta', '175beta']]
 # excit = ['D1', 'D21_1', 'D21_2', 'D257_1', 'D257_2']
 
-# # hhcrqpp2 sXTDA
-# forb = [['172', '176'], ['171', '177'], ['172', '177'],
+# # hhcrqpp2 sXTDA pbe0-st-10eV
+# forb = [['171', '177'], ['172', '177'],
+#         ['172', '174'], ['172', '180'], ['173', '177'],
 #         ['172', '178'], ['172', '179'],
-#         ['169', '189'], ['169', '189']]
-# excit = ['D1_1', 'D1_2', 'D1_3', 'D18_1', 'D18_2', 'D265_1', 'D265_2']
+#         ['172', '183']]
+# excit = ['171-177', '172-177', '172-174', '172-180', '173-177', '172-178', '172-179', '172-183']
+# hhcrqpp2 sXTDA tpssh-st-10eV
+forb = [['173', '177'], ['170', '175'], # ['173', '177'], have been exported, CV(1)
+        ['172', '178'], ['173', '185'], # ['173', '177'], have been exported
+        ['173', '181'],]
+excit = ['173-177', '170-175', '172-178', '173-185', '173-181']
 
 # # ptm3ncz sUTDA
 # forb = [['252beta', '253beta'], ['250alpha', '255alpha'], ['250beta', '255beta'], ['250alpha', '258alpha'],]

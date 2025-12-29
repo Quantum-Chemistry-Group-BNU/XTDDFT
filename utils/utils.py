@@ -48,8 +48,8 @@ def order_pyscf2my(nc, no, nv):
     # # pyscf order to my order
     for oi in range(nc):
         for noi in range(no):
-            order = np.insert(order, (nc+no)*nv+no*oi+noi, (nc+no)*nv+oi*nv+noi)
-            order = np.delete(order, (nc+no)*nv+oi*nv+noi+1)
+            order = np.insert(order, (nc+no)*nv+no*oi+noi, (nc+no)*nv+oi*(no+nv)+noi)
+            order = np.delete(order, (nc+no)*nv+oi*(no+nv)+noi+1)
     return order
 
 

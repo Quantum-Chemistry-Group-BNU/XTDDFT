@@ -89,8 +89,12 @@ class XTDA:
         # # use self.mf.mol general two-electron repulsion integral
         # eri = ao2mo.general(self.mf.mol, [mo_a, mo_a, mo_a, mo_a], compact=False)
         # eri = eri.reshape(nmo_a, nmo_a, nmo_a, nmo_a)
-        eri = ao2mo.general(self.mol, [orbo_a, mo_a, mo_a, mo_a], compact=False)
-        eri = eri.reshape(nocc_a, nmo_a, nmo_a, nmo_a)
+        # # pyscf construct eri
+        # eri = ao2mo.general(self.mol, [orbo_a, mo_a, mo_a, mo_a], compact=False)
+        # eri = eri.reshape(nocc_a, nmo_a, nmo_a, nmo_a)
+        # # use less memory construct eri
+        eri = ao2mo.general(self.mol, [orbo_a, mo_a, orbv_b, mo_a], compact=False)
+        eri = eri.reshape(nocc_a, nmo_a, nvir_b, nmo_a)
 
         # # use this code can compare with test/test_RO_UTDA.py and remember remove Fock matrix in A matrix
         # e_ia_a = (mo_energy[viridx_a, None] - mo_energy[occidx_a]).T
@@ -101,13 +105,23 @@ class XTDA:
         ab = np.zeros((nocc_a, nvir_a, nocc_b, nvir_b))
         bb = np.zeros((nocc_b, nvir_b, nocc_b, nvir_b))
 
-        aa += np.einsum('iabj->iajb', eri[:nocc_a, nocc_a:, nocc_a:, :nocc_a])
-        aa -= np.einsum('ijba->iajb', eri[:nocc_a, :nocc_a, nocc_a:, nocc_a:]) * hyb
+        # # pyscf construct
+        # aa += np.einsum('iabj->iajb', eri[:nocc_a, nocc_a:, nocc_a:, :nocc_a])
+        # aa -= np.einsum('ijba->iajb', eri[:nocc_a, :nocc_a, nocc_a:, nocc_a:]) * hyb
+        #
+        # bb += np.einsum('iabj->iajb', eri[:nocc_b, nocc_b:, nocc_b:, :nocc_b])
+        # bb -= np.einsum('ijba->iajb', eri[:nocc_b, :nocc_b, nocc_b:, nocc_b:]) * hyb
+        #
+        # ab += np.einsum('iabj->iajb', eri[:nocc_a, nocc_a:, nocc_b:, :nocc_b])
 
-        bb += np.einsum('iabj->iajb', eri[:nocc_b, nocc_b:, nocc_b:, :nocc_b])
-        bb -= np.einsum('ijba->iajb', eri[:nocc_b, :nocc_b, nocc_b:, nocc_b:]) * hyb
+        # # use less memory construct
+        aa += np.einsum('iabj->iajb', eri[:nocc_a, nocc_a:, nocc_a - nocc_b:, :nocc_a])
+        aa -= np.einsum('ijba->iajb', eri[:nocc_a, :nocc_a, nocc_a - nocc_b:, nocc_a:]) * hyb
 
-        ab += np.einsum('iabj->iajb', eri[:nocc_a, nocc_a:, nocc_b:, :nocc_b])
+        bb += np.einsum('iabj->iajb', eri[:nocc_b, nocc_b:, 0:, :nocc_b])
+        bb -= np.einsum('ijba->iajb', eri[:nocc_b, :nocc_b, 0:, nocc_b:]) * hyb
+
+        ab += np.einsum('iabj->iajb', eri[:nocc_a, nocc_a:, 0:, :nocc_b])
         del dm, eri, focka, fockb, h1e
         if omega != 0:  # For RSH
             with self.mol.with_range_coulomb(omega):
@@ -367,11 +381,12 @@ class XTDA:
         self.nc = nc
         self.nv = nv
         self.no = no
-        # transform pyscf order to my order
-        order = np.indices(((nc+no)*nv+nc*(no+nv),)).squeeze()
-        for oi in range(nc * no):
-            order = np.insert(order, (nc+no)*nv+oi, (nc+no)*nv+oi*nv+oi)
-            order = np.delete(order, (nc+no)*nv+oi*nv+oi+1)
+        # # transform pyscf order to my order
+        # order = np.indices(((nc+no)*nv+nc*(no+nv),)).squeeze()
+        # for oi in range(nc * no):
+        #     order = np.insert(order, (nc+no)*nv+oi, (nc+no)*nv+oi*nv+oi)
+        #     order = np.delete(order, (nc+no)*nv+oi*nv+oi+1)
+        order = utils.order_pyscf2my(nc, no, nv)
         self.order = order
 
         print(f'Dimension of A matrix = {A.shape}, order of excitation is CV(0), OV(0), CO(0), CV(1)')
@@ -603,10 +618,11 @@ class X_TDA():
             print('omega alpha hyb', omega, alpha, hyb)
 
             xctype = ni._xc_type(mf.xc)
-            dm0 = mf.make_rdm1(mf.mo_coeff, mo_occ)
+            dm0 = mf.make_rdm1()
             # dm0 = mf.make_rdm1(mo_coeff0, mo_occ)
             if np.array(mf.mo_coeff).ndim == 2:
                 dm0.mo_coeff = (mf.mo_coeff, mf.mo_coeff)
+                dm0.mo_occ = mo_occ
                 # dm0.mo_coeff = (mo_coeff0, mo_coeff0)
             make_rho = ni._gen_rho_evaluator(mf.mol, dm0, hermi=1, with_lapl=False)[0]
             mem_now = lib.current_memory()[0]
@@ -1009,17 +1025,19 @@ if __name__ == "__main__":
     # xc = 'hf'
     mf.xc = xc
     # xc = 'bhhlyp'
-    mf.conv_tol = 1e-11
-    mf.conv_tol_grad = 1e-8
+    mf.conv_tol = 1e-8
+    mf.conv_tol_grad = 1e-5
     mf.max_cycle = 200
+    # mf.level_shift = 0.6
+    mf.conv_check = False
     mf.kernel()
     xtda = XTDA(mol, mf)
     xtda.nstates = 20
-    xtda.basis = 'tensor'
+    xtda.basis = 'orbital'
     # tddft.TDA(mf) have no refer meaning
     xtda.so2st = False
     xtda.kernel()
-    xtda.analyze()
+    # xtda.analyze()
 
     # import pandas as pd
     # pd.DataFrame(e_eV).to_csv(xc + 'xTDA.csv')
