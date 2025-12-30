@@ -4,6 +4,7 @@ from pyscf import gto, dft, scf, ao2mo, lib, tddft
 from pyscf.dft import numint, numint2c, xc_deriv
 from functools import reduce
 import functools
+from pyscf.lib import logger
 from pyscf.dft.gen_grid import NBINS
 from pyscf.dft.numint import _dot_ao_ao_sparse, _scale_ao_sparse, _tau_dot_sparse
 
@@ -144,7 +145,7 @@ def nr_uks_fxc_sf_tda(ni, mol, grids, xc_code, dm0, dms, relativity=0, hermi=0, 
         vmat = lib.hermi_sum(vmat.reshape(-1, nao, nao), axes=(0, 2, 1)).reshape(nset, nao, nao)
 
     elif xctype == 'MGGA':
-        assert not MGGA_DENSITY_LAPL
+        # assert not MGGA_DENSITY_LAPL
         ao_deriv = 1
         v1 = np.zeros_like(vmat)
         for i, ao, mask, wv in block_loop(ao_deriv):
@@ -343,7 +344,7 @@ def deal_v_davidson(mf, nstates, v, remove=False):
         if remove:
             for i in range(no - 1):
                 oo[state, i * no:(i + 1) * no] += tmp_data[passed + i * nvir:passed + i * nvir + no]
-                ov[state, i, :] += tmp_data[passed + i * nvir + self.no:passed + i * nvir + no + nv]
+                ov[state, i, :] += tmp_data[passed + i * nvir + no:passed + i * nvir + no + nv]
             oo[state, (no - 1) * no:] += tmp_data[passed + (no - 1) * nvir:passed + (no - 1) * nvir + no - 1]
             ov[state, no - 1, :] += tmp_data[passed + (no - 1) * nvir + no - 1:]
         else:
@@ -468,8 +469,8 @@ class SF_TDA_up():
             h1e = mf.get_hcore()
             focka = h1e + vhf
             fockb = h1e + vhf
-            fockA = mo_coeff[0].T @ focka @ mo_coeff[0]
-            fockB = mo_coeff[1].T @ fockb @ mo_coeff[1]
+            fockA = self.mo_coeff[0].T @ focka @ self.mo_coeff[0]
+            fockB = self.mo_coeff[1].T @ fockb @ self.mo_coeff[1]
         else:
             dm = mf.make_rdm1()
             vhf = mf.get_veff(mf.mol, dm)
@@ -583,7 +584,7 @@ class SF_TDA_up():
             self.e, self.v = davidson_process(self.mf, nstates, self.method, isf=1)
         else:
             if self.method == 1:  # multicollinear
-                self.A = get_ab_sf(sef.mf)[0]
+                self.A = get_ab_sf(self.mf)[0]
             else:
                 self.get_Amat()
             self.e, self.v = scipy.linalg.eigh(self.A)
@@ -1053,7 +1054,7 @@ def nr_uks_fxc_sf_tda_mc(ni, mol, grids, xc_code, dm0, dms, relativity=0, hermi=
         vmat = lib.hermi_sum(vmat.reshape(-1, nao, nao), axes=(0, 2, 1)).reshape(nset, nao, nao)
 
     elif xctype == 'MGGA':
-        assert not MGGA_DENSITY_LAPL
+        # assert not MGGA_DENSITY_LAPL
         ao_deriv = 1
         v1 = np.zeros_like(vmat)
         for i, ao, mask, wv in block_loop(ao_deriv):
@@ -1274,3 +1275,28 @@ def get_ab_sf(mf, mo_energy=None, mo_coeff=None, mo_occ=None, collinear_samples=
 
     return a
 
+
+if __name__ == '__main__':
+    mol = gto.M(
+        atom="""O 0 0 2.07; O 0 0 0""",
+        basis='6-31G',
+        unit='B',
+        # basis='sto3g',
+        charge=0,
+        spin=2,
+        verbose=4,
+        # cart=True,
+        # symmetry='C2v'
+    )
+    mf = dft.UKS(mol)
+    # mf = scf.RHF(mol)
+    mf.xc = 'b3lyp'
+    mf.kernel()
+
+    sf_tda = SF_TDA(mf, isf=1, method=1)
+    e, v = sf_tda.kernel(nstates=10)
+    print(e)
+
+    sf_tda = SF_TDA(mf, isf=-1, method=1)
+    e, v = sf_tda.kernel(nstates=10)
+    print(e)

@@ -20,20 +20,20 @@ plt.rcParams['mathtext.sf'] = 'STIXGeneral'
 plt.rcParams['lines.linewidth'] = 1
 plt.rcParams['axes.linewidth'] = 1
 
-# functional = 'pbe0-st/'
-functional = 'tpssh-st-10eV/'
+functional = 'pbe0-st/'
+# functional = 'tpssh-st-10eV/'
 # mol = 'ttm/'
 # mol = 'bispytm/'
 # mol = 'ttm3ncz/'
-# mol = 'ptm3ncz/'
+mol = 'ptm3ncz/'
 # mol = 'mttm2/'
-mol = 'hhcrqpp2/'
+# mol = 'hhcrqpp2/'
 file = '../result/'
 
 # ==== 参数 ====
 # solvent = 'cyclohexane-'
-# solvent = 'toluene-'
-solvent = 'acetonitrile-'
+solvent = 'toluene-'
+# solvent = 'acetonitrile-'
 csv_file = solvent+"XsTDAgsol-orb.csv"
 # img_dir = os.path.expanduser("~/master/xtddft/sTDA/result/bispytm/pbe0-st/cubeneed/VCUBE")
 img_dir = file+mol+functional+'cubeneed/'+'VCUBE/'

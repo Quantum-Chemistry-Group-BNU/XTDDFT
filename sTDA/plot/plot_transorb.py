@@ -5,23 +5,25 @@ import matplotlib.pyplot as plt
 from utils import unit
 from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 
-# functional = 'pbe0-st/'
-functional = 'tpssh-st-10eV/'
+functional = 'pbe0-st/'
+# functional = 'tpssh-st-10eV/'
 # mol = 'ttm/'
 # mol = 'bispytm/'
 # mol = 'ttm3ncz/'
 # mol = 'ptm3ncz/'
 # mol = 'mttm2/'
-mol = 'hhcrqpp2/'
+# mol = 'hhcrqpp2/'
+mol = 'g3ttm/'
 file = '../result/'
 
 # ==== parameter ====
+functional = 'pbe0-st-10eV-noFock-noDA/'  # G3TTM
 img_dir = file+mol+functional+'cubeneed/'+'VCUBE/'
 # method = 'sUTDA-'
 method = 'sXTDA-'
 # solvent = 'cyclohexane-'
-# solvent = 'toluene-'
-solvent = 'acetonitrile-'
+solvent = 'toluene-'
+# solvent = 'acetonitrile-'
 prefix = solvent + method[1]+method[0]+method[2:] + mol[:-1]
 
 # ==== frontier orbitals ====
@@ -43,22 +45,21 @@ prefix = solvent + method[1]+method[0]+method[2:] + mol[:-1]
 #         ['119', '126'], ['119', '130'], ['120', '129']]
 # excit = ['D1', 'D10', 'D91_1', 'D91_2', 'D91_3', 'D91_4', 'D91_5']
 
-# # ttm3ncz sUTDA
-# forb = [['204beta', '205beta'], ['205alpha', '206alpha'],
-#         ['204alpha', '210alpha'], ['205alpha', '214alpha'], ['203beta', '207beta']]
-# excit = ['D1', 'D9', 'D37_1', 'D37_2', 'D37_3']
+# # # ttm3ncz sUTDA
+# forb = [['204beta', '205beta'],
+#         ['205alpha', '206alpha'],
+#         ['204alpha', '206alpha'], ['205alpha', '207alpha'], ['204beta', '207beta']]
 
 # # ttm3ncz sXTDA
 # forb = [['204', '205'],
-#         ['205', '206'], ['205', '207'], ['204', '207'],]
+#         ['205', '206'], ['204', '206'],]
 #         # ['203', '206'], ['189', '205'], ['190', '205']]
-# excit = ['204-205', '205-206', '205-207', '204-207']
+# excit = ['204-205', '205-206', '204-206']
 
 # # mttm2 sUTDA
 # forb = [['274beta', '276beta'], ['275beta', '277beta'],
-#         ['276alpha', '278alpha'], ['277alpha', '279alpha'],
-#         ['274alpha', '278alpha'], ['275alpha', '279alpha']]
-# excit = ['D1_1', 'D1_2', 'D13_1', 'D13_2', 'D87_1', 'D87_2']
+#         ['276alpha', '278alpha'], ['277alpha', '279alpha'],]
+# excit = ['274b-276b', '275b-277b', '276a-278a', '277a-279a']
 
 # # mttm2 sXTDA
 # forb = [['274', '277'], ['275', '276'],
@@ -68,21 +69,20 @@ prefix = solvent + method[1]+method[0]+method[2:] + mol[:-1]
 
 # # hhcrqpp2 sUTDA
 # forb = [['173beta', '174beta'],
-#         ['174alpha', '178alpha'], ['175alpha', '179alpha'],
-#         ['158beta', '175beta'], ['160beta', '175beta']]
-# excit = ['D1', 'D21_1', 'D21_2', 'D257_1', 'D257_2']
+#         ['173beta', '176beta'],
+#         ['173alpha', '177alpha'],['173beta', '177beta'],]
+# excit = ['173b-174b', '173b-176b', '173a-177a', '173b-177b']
 
 # # hhcrqpp2 sXTDA pbe0-st-10eV
-# forb = [['171', '177'], ['172', '177'],
-#         ['172', '174'], ['172', '180'], ['173', '177'],
-#         ['172', '178'], ['172', '179'],
-#         ['172', '183']]
-# excit = ['171-177', '172-177', '172-174', '172-180', '173-177', '172-178', '172-179', '172-183']
-# hhcrqpp2 sXTDA tpssh-st-10eV
-forb = [['173', '177'], ['170', '175'], # ['173', '177'], have been exported, CV(1)
-        ['172', '178'], ['173', '185'], # ['173', '177'], have been exported
-        ['173', '181'],]
-excit = ['173-177', '170-175', '172-178', '173-185', '173-181']
+# forb = [['173', '177'],
+#         ['173', '175'], ['173', '176'], ['173', '182'],
+#         ['172', '178'],]
+# excit = ['173-177', '173-175', '173-176', '173-182', '172-178']
+# # hhcrqpp2 sXTDA tpssh-st-10eV
+# forb = [['173', '177'], ['170', '175'], # ['173', '177'], have been exported, CV(1)
+#         ['172', '178'], ['173', '185'], # ['173', '177'], have been exported
+#         ['173', '181'],]
+# excit = ['173-177', '170-175', '172-178', '173-185', '173-181']
 
 # # ptm3ncz sUTDA
 # forb = [['252beta', '253beta'], ['250alpha', '255alpha'], ['250beta', '255beta'], ['250alpha', '258alpha'],]
@@ -91,6 +91,14 @@ excit = ['173-177', '170-175', '172-178', '173-185', '173-181']
 # # ptm3ncz sXTDA
 # forb = [['252', '253'], ['253', '255'], ['250', '258'],]
 # excit = ['D1', 'D18', 'D85']
+
+# # g3ttm sUTDA
+# forb = [['415alpha', '421alpha'], ['415beta', '421beta']]
+# excit = ['415a-421a', '415b-421b']
+
+# g3ttm sXTDA
+forb = [['406', '419']]
+excit = ['406-419']
 
 
 # for i, t, info, j in zip(forb, title, information, range(len(title))):
