@@ -8,9 +8,9 @@ Spin-adapted TD-DFT for open-shell systems
 ## Methods
 
 1. Spin-adapted TD-DFT for open-shell systems
-  - SF-TDA for spin-fip-up excitations ($S_f=S_i+1$ for $S_i>=0$)
+  - SF-TDA for spin-flip-up excitations ($S_f=S_i+1$ for $S_i>=0$)
   - X-TDA for spin-conserving excitations ($S_f=S_i$ for $S_i>=1/2$)
-  - XSF-TDA for spin-flip excitations ($S_f=S_i-1$ for $S_i>=1$)
+  - XSF-TDA for spin-flip-down excitations ($S_f=S_i-1$ for $S_i>=1$)
 
 2. Simplified approximation for X-TDA
 
