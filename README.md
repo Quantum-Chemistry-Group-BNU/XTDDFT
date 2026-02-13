@@ -2,10 +2,10 @@
   <img src="./docs/logo-xtddft.jpg" height="80px"/>
 </div>
 
-Spin-adapted TD-DFT for open-shell systems
+Spin-adapted time-dependent density functional theory for open-shell systems
 -----------------------------------------------
 
-## Methods
+## Available methods
 
 1. Spin-adapted TD-DFT for open-shell systems
   - SF-TDA for spin-flip-up excitations ($S_f=S_i+1$ for $S_i>=0$)
