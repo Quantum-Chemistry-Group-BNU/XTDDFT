@@ -14,7 +14,7 @@ Spin-adapted time-dependent density functional theory for open-shell systems
 
 2. Simplified approximation for X-TDA
 
-3. State interaction for treating spin-orbit couplings
+3. State interaction for treating spin-orbit couplings (to be optimized)
  
 ## Under developments
 
