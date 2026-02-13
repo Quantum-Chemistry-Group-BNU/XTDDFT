@@ -7,13 +7,14 @@ Spin-adapted TD-DFT for open-shell systems
 
 ## Methods
 
-1. TDA for closed-shell systems (singlet and triplet states)
+1. Spin-adapted TD-DFT for open-shell systems
+  - SF-TDA for spin-fip-up excitations ($S_f=S_i+1$ for $S_i>=0$)
+  - X-TDA for spin-conserving excitations ($S_f=S_i$ for $S_i>=1/2$)
+  - XSF-TDA for spin-flip excitations ($S_f=S_i-1$ for $S_i>=1$)
 
-2. X-TDA for open-shell systems ($S_f=S_i+1,S_i,S_i-1$)
+2. Simplified approximation for X-TDA
 
-3. Simplified approximation for X-TDA
-
-4. State interaction for treating spin-orbit couplings
+3. State interaction for treating spin-orbit couplings
  
 ## Under developments
 
