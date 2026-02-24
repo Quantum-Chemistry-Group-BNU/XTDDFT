@@ -1,4 +1,9 @@
+import os
+import time
 import numpy as np
+from threading import Thread
+
+from psutil import Process
 
 def get_cov(mf):
     # get nc, nv, no(if open shell)
@@ -109,3 +114,64 @@ def st2so(eigvec, nc=None, no=None, nv=None, lcva=None, lova=None, lcob=None, lc
         raise ValueError("please input nc no nv or lcva lova lcob lcvb")
     eigvec_so = np.concatenate((cva, ova, cob, cvb), axis=0)
     return eigvec_so
+
+
+# copy from joblib website
+class MemoryMonitor(Thread):
+    """Monitor the memory usage in MB in a separate thread.
+
+    Note that this class is good enough to highlight the memory profile of
+    Parallel in this example, but is not a general purpose profiler fit for
+    all cases.
+
+    Usage:
+        monitor = MemoryMonitor()
+
+        ......  # some code
+
+        # Report memory usage
+        monitor.join()
+        peak = max(monitor.memory_buffer) / 1e6
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.stop = False
+        self.memory_buffer = []
+        self.start()
+
+    def get_memory(self):
+        "Get memory of a process and its children."
+        p = Process()
+        memory = p.memory_info().rss
+        for c in p.children():
+            memory += c.memory_info().rss
+        return memory
+
+    def run(self):
+        memory_start = self.get_memory()
+        while not self.stop:
+            self.memory_buffer.append(self.get_memory() - memory_start)
+            time.sleep(0.01)
+
+    def join(self):
+        self.stop = True
+        super().join()
+
+
+# copy from pyscf code
+#Fixme, the standard resource module gives wrong number when objects are released
+# http://fa.bianp.net/blog/2013/different-ways-to-get-memory-consumption-or-lessons-learned-from-memory_profiler/#fn:1
+#or use slow functions as memory_profiler._get_memory did
+CLOCK_TICKS = os.sysconf("SC_CLK_TCK")
+PAGESIZE = os.sysconf("SC_PAGE_SIZE")
+def current_memory():
+    '''Return the size of used memory and allocated virtual memory (in MB)'''
+    #import resource
+    #return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1000
+    if sys.platform.startswith('linux'):
+        with open("/proc/%s/statm" % os.getpid()) as f:
+            vms, rss = [int(x)*PAGESIZE for x in f.readline().split()[:2]]
+            return rss/1e6, vms/1e6
+    else:
+        return 0, 0
