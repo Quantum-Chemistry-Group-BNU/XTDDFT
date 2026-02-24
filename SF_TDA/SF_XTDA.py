@@ -4,6 +4,7 @@ from pyscf.dft.numint import _dot_ao_ao_sparse,_scale_ao_sparse,_tau_dot_sparse
 from pyscf.dft.gen_grid import NBINS
 import numpy as np
 import time
+import math
 from pyscf.dft import numint
 import scipy
 from functools import reduce
@@ -13,7 +14,7 @@ from pyscf.symm import direct_prod
 
 #from line_profiler import profile
 
-from SF_TDA import SF_TDA,SF_TDA_down, mf_info,gen_response_sf,_gen_uhf_tda_response_sf
+from SF_TDA import SF_TDA,SF_TDA_down, mf_info,gen_response_sf,_gen_uhf_tda_response_sf,get_ab_sf
 #import sys
 #sys.path.append('/home/lenovo2/usrs/zhw/software/test_git_file')
 #from mc_file import _gen_uhf_tda_response_sf
@@ -70,7 +71,7 @@ def _charge_center(mol):
     
 
 class SA_SF_TDA():
-    def __init__(self,mf,SA=3,davidson=True,method=0):
+    def __init__(self,mf,SA=3,davidson=True,method=0,collinear_samples=60):
         """SA=0: SF-TDA
            SA=1: only add diagonal block for dA
            SA=2: add all dA except for OO block
@@ -95,6 +96,7 @@ class SA_SF_TDA():
         self.mol = mf.mol
         self.nao = self.mol.nao_nr()
         self.mf = mf
+        self.collinear_samples=collinear_samples
         self.davidson=davidson
         self.method = method
         _,dsp1 = mf.spin_square()
@@ -120,7 +122,8 @@ class SA_SF_TDA():
         try: # dft
             xctype = self.mf.xc
             ni = self.mf._numint
-            _, _, self.hyb = ni.rsh_and_hybrid_coeff(self.mf.xc, self.mol.spin)
+            self.omega, self.alpha, self.hyb = ni.rsh_and_hybrid_coeff(self.mf.xc, self.mol.spin)
+            print('Omega, alpha, hyb',self.omega, self.alpha, self.hyb)
         except: # HF
             xctype = None
             self.hyb = 1.0
@@ -158,10 +161,12 @@ class SA_SF_TDA():
         fockB_V = fockB[nc+no:,nc+no:]
         dim = (nc+no)*(nv+no)
         Amat = np.zeros((dim,dim))
-        sf_tda = SF_TDA_down(mf,method=self.method)
-        sf_tda_A = sf_tda.get_Amat() 
+        if self.method == 0:
+            sf_tda = SF_TDA_down(mf,method=self.method)
+            sf_tda_A = sf_tda.get_Amat() 
+        elif self.method == 1:
+            sf_tda_A = get_ab_sf(mf).reshape(((nc+no)*(no+nv),(nc+no)*(no+nv)))
         Amat = np.zeros_like(sf_tda_A)
-        
         dim1 = nc*nv
         dim2 = dim1+nc*no
         dim3 = dim2+no*nv
@@ -174,8 +179,11 @@ class SA_SF_TDA():
         # \Delta A only for ROHF/ROKS
         if np.array(mf.mo_coeff).ndim==3: # UHF/UKS
             return sf_tda.A
-        
-        hf = scf.ROHF(mf.mol)
+        x2c_active = (hasattr(mf, 'with_x2c') and mf.with_x2c is not None)
+        if x2c_active: 
+            hf = scf.ROHF(mf.mol).x2c()
+        else:
+            hf = scf.ROHF(mf.mol)
         dm = mf.make_rdm1()
         vhf = hf.get_veff(hf.mol, dm)
         h1e = hf.get_hcore()
@@ -290,7 +298,7 @@ class SA_SF_TDA():
             self.calculate_TDM_R()
             
             
-    def calculate_TDM_U(self):
+    def calculate_TDM_U0(self):
         def _charge_center(mol):
             charges = mol.atom_charges()
             coords = mol.atom_coords()
@@ -300,7 +308,6 @@ class SA_SF_TDA():
         ints_ab = np.einsum('xpq,pi,qj->xij',ints,self.mf.mo_coeff[0].conj(),self.mf.mo_coeff[1]) # a->b
         ints_aa = np.einsum('xpq,pi,qj->xij',ints,self.mf.mo_coeff[0].conj(),self.mf.mo_coeff[0])
         ints_bb = np.einsum('xpq,pi,qj->xij',ints,self.mf.mo_coeff[1].conj(),self.mf.mo_coeff[1])
-        ints_ab = ints_aa.copy()
         dim1 = self.nc*self.nv
         dim2 = dim1+self.nc*self.no
         dim3 = dim2+self.no*self.nv
@@ -369,7 +376,7 @@ class SA_SF_TDA():
                 print(f'{i+1:2d} {j+1:2d} {tdm[0]:>8.4f} {tdm[1]:>8.4f} {tdm[2]:>8.4f}  {osc:>8.4f} ')
                      
     
-    def calculate_TDM_R(self):
+    def calculate_TDM_R0(self):
         def _charge_center(mol):
             charges = mol.atom_charges()
             coords = mol.atom_coords()
@@ -414,34 +421,193 @@ class SA_SF_TDA():
                     s1_oo1 = self.v[:,j][dim3:].reshape(self.no,self.no)
 
                 # CV1-CV1
-                tdm = np.einsum('ia,xab,jb,ij->x',s0_cv1,ints_mo[:,self.nc+self.no:,self.nc+self.no:],s1_cv1,iden_C)-\
-                      np.einsum('ia,xij,jb,ab->x',s0_cv1,ints_mo[:,:self.nc,:self.nc],s1_cv1,iden_V)
+                tdm = np.einsum('ia,xab,ib->x',s0_cv1,ints_mo[:,self.nc+self.no:,self.nc+self.no:],s1_cv1,optimize=True)-\
+                      np.einsum('ia,xij,ja->x',s0_cv1,ints_mo[:,:self.nc,:self.nc],s1_cv1,optimize=True)
                 # CV1-CO1
-                tdm += factor1*np.einsum('ia,xav,jv,ij->x',s0_cv1,ints_mo[:,self.nc+self.no:,self.nc:self.nc+self.no],s1_co1,iden_C)
-                tdm += factor1*np.einsum('iu,xbu,jb,ij->x',s0_co1,ints_mo[:,self.nc+self.no:,self.nc:self.nc+self.no],s1_cv1,iden_C)
+                tdm += factor1*np.einsum('ia,xav,iv->x',s0_cv1,ints_mo[:,self.nc+self.no:,self.nc:self.nc+self.no],s1_co1,optimize=True)
+                tdm += factor1*np.einsum('iu,xbu,ib->x',s0_co1,ints_mo[:,self.nc+self.no:,self.nc:self.nc+self.no],s1_cv1,optimize=True)
                 # CV1-OV1
-                tdm += -factor1*np.einsum('ia,xiv,vb,ab->x',s0_cv1,ints_mo[:,:self.nc,self.nc:self.nc+self.no],s1_ov1,iden_V)
-                tdm += -factor1*np.einsum('ua,xju,jb,ab->x',s0_ov1,ints_mo[:,:self.nc,self.nc:self.nc+self.no],s1_cv1,iden_V)
+                tdm += -factor1*np.einsum('ia,xiv,va->x',s0_cv1,ints_mo[:,:self.nc,self.nc:self.nc+self.no],s1_ov1,optimize=True)
+                tdm += -factor1*np.einsum('ua,xju,ja->x',s0_ov1,ints_mo[:,:self.nc,self.nc:self.nc+self.no],s1_cv1,optimize=True)
                 # CO1-CO1
-                tdm += np.einsum('iu,xuv,jv,ij->x',s0_co1,ints_mo[:,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_co1,iden_C)-\
-                       np.einsum('iu,xij,jv,uv->x',s0_co1,ints_mo[:,:self.nc,:self.nc],s1_co1,iden_O)
+                tdm += np.einsum('iu,xuv,iv->x',s0_co1,ints_mo[:,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_co1,optimize=True)-\
+                       np.einsum('iu,xij,ju->x',s0_co1,ints_mo[:,:self.nc,:self.nc],s1_co1,optimize=True)
                 # CO1-OO1
-                tdm += -factor2*np.einsum('iu,xiv,vw,uw->x',s0_co1,ints_mo[:,:self.nc,self.nc:self.nc+self.no],s1_oo1,iden_O)
-                tdm +=  factor3*np.einsum('iu,xiu,vw,vw->x',s0_co1,ints_mo[:,:self.nc,self.nc:self.nc+self.no],s1_oo1,iden_O)
-                tdm += -factor2*np.einsum('ut,xju,jv,tv->x',s0_oo1,ints_mo[:,:self.nc,self.nc:self.nc+self.no],s1_co1,iden_O)
-                tdm +=  factor3*np.einsum('ut,xjv,jv,ut->x',s0_oo1,ints_mo[:,:self.nc,self.nc:self.nc+self.no],s1_co1,iden_O)
+                tdm += -factor2*np.einsum('iu,xiv,vu->x',s0_co1,ints_mo[:,:self.nc,self.nc:self.nc+self.no],s1_oo1,optimize=True)
+                tdm +=  factor3*np.einsum('iu,xiu,vv->x',s0_co1,ints_mo[:,:self.nc,self.nc:self.nc+self.no],s1_oo1,optimize=True)
+                tdm += -factor2*np.einsum('ut,xju,jt->x',s0_oo1,ints_mo[:,:self.nc,self.nc:self.nc+self.no],s1_co1,optimize=True)
+                tdm +=  factor3*np.einsum('uu,xjv,jv->x',s0_oo1,ints_mo[:,:self.nc,self.nc:self.nc+self.no],s1_co1,optimize=True)
                 # OV1-OV1
-                tdm += np.einsum('ua,xab,vb,uv->x',s0_ov1,ints_mo[:,self.nc+self.no:,self.nc+self.no:],s1_ov1,iden_O)-\
-                       np.einsum('ua,xuv,vb,ab->x',s0_ov1,ints_mo[:,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_ov1,iden_V)
+                tdm += np.einsum('ua,xab,ub->x',s0_ov1,ints_mo[:,self.nc+self.no:,self.nc+self.no:],s1_ov1,optimize=True)-\
+                       np.einsum('ua,xuv,va->x',s0_ov1,ints_mo[:,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_ov1,optimize=True)
                 # OV1-OO1
-                tdm +=  factor2*np.einsum('ua,xaw,vw,uv->x',s0_ov1,ints_mo[:,self.nc+self.no:,self.nc:self.nc+self.no],s1_oo1,iden_O)
-                tdm += -factor3*np.einsum('ua,xua,vw,vw->x',s0_ov1,ints_mo[:,self.nc:self.nc+self.no,self.nc+self.no:],s1_oo1,iden_O)
-                tdm +=  factor2*np.einsum('ut,xbt,vb,uv->x',s0_oo1,ints_mo[:,self.nc+self.no:,self.nc:self.nc+self.no],s1_ov1,iden_O)
-                tdm += -factor3*np.einsum('ut,xvb,vb,ut->x',s0_oo1,ints_mo[:,self.nc:self.nc+self.no,self.nc+self.no:],s1_ov1,iden_O)
+                tdm +=  factor2*np.einsum('ua,xaw,uw->x',s0_ov1,ints_mo[:,self.nc+self.no:,self.nc:self.nc+self.no],s1_oo1,optimize=True)
+                tdm += -factor3*np.einsum('ua,xua,vv->x',s0_ov1,ints_mo[:,self.nc:self.nc+self.no,self.nc+self.no:],s1_oo1,optimize=True)
+                tdm +=  factor2*np.einsum('ut,xbt,ub->x',s0_oo1,ints_mo[:,self.nc+self.no:,self.nc:self.nc+self.no],s1_ov1,optimize=True)
+                tdm += -factor3*np.einsum('uu,xvb,vb->x',s0_oo1,ints_mo[:,self.nc:self.nc+self.no,self.nc+self.no:],s1_ov1,optimize=True)
                 # OO1-OO1
-                tdm += np.einsum('ut,xtv,wv,uw->x',s0_oo1,ints_mo[:,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_oo1,iden_O)-\
-                       np.einsum('ut,xuw,wv,tv->x',s0_oo1,ints_mo[:,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_oo1,iden_O)
+                tdm += np.einsum('ut,xtv,uv->x',s0_oo1,ints_mo[:,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_oo1,optimize=True)-\
+                       np.einsum('ut,xuw,wt->x',s0_oo1,ints_mo[:,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_oo1,optimize=True)
                 osc = (2/3)*(self.e[i]-self.e[j])*(tdm[0]**2 + tdm[1]**2 + tdm[2]**2)
+                print(f'{i+1:2d} {j+1:2d} {tdm[0]:>8.4f} {tdm[1]:>8.4f} {tdm[2]:>8.4f}  {osc:>8.4f} ')
+                
+    def calculate_TDM_U(self):
+        assert self.mf.mo_coeff.ndim == 3, "Must be UHF/UKS reference !!!"
+        dim1 = self.nc*self.nv
+        dim2 = dim1+self.nc*self.no
+        dim3 = dim2+self.no*self.nv
+        def _charge_center(mol):
+            charges = mol.atom_charges()
+            coords = mol.atom_coords()
+            return np.einsum('z,zr->r', charges, coords)/charges.sum()
+        with self.mol.with_common_orig(_charge_center(self.mol)):
+            ints = self.mol.intor_symmetric('int1e_r', comp=3) # (3,nao,nao)
+
+        #ints_mo = np.einsum('xpq,pi,qj->xij',ints,self.mf.mo_coeff[0].conj(),mf.mo_coeff[1]) # a->b
+        ints_aa = np.einsum('xpq,pi,qj->xij',ints,self.mf.mo_coeff[0].conj(),self.mf.mo_coeff[0])
+        ints_bb = np.einsum('xpq,pi,qj->xij',ints,self.mf.mo_coeff[1].conj(),self.mf.mo_coeff[1])
+
+        for i in range(self.nstates):
+            s0_cv1 = self.v[:,i][:dim1].reshape(self.nc,self.nv)
+            s0_co1 = self.v[:,i][dim1:dim2].reshape(self.nc,self.no)
+            s0_ov1 = self.v[:,i][dim2:dim3].reshape(self.no,self.nv)
+            s0_oo1 = self.v[:,i][dim3:].reshape(self.no,self.no)
+            c0 = np.zeros((self.nc+self.no,self.no+self.nv)) # (9,41)
+            c0[:self.nc,self.no:] += s0_cv1
+            c0[:self.nc,:self.no] += s0_co1
+            c0[self.nc:,self.no:] += s0_ov1
+            c0[self.nc:,:self.no] += s0_oo1
+
+            for j in range(self.nstates):
+                s1_cv1 = self.v[:,j][:dim1].reshape(self.nc,self.nv)
+                s1_co1 = self.v[:,j][dim1:dim2].reshape(self.nc,self.no)
+                s1_ov1 = self.v[:,j][dim2:dim3].reshape(self.no,self.nv)
+                s1_oo1 = self.v[:,j][dim3:].reshape(self.no,self.no)
+                c1 = np.zeros((self.nc+self.no,self.no+self.nv))
+                c1[:self.nc,self.no:] += s1_cv1
+                c1[:self.nc,:self.no] += s1_co1
+                c1[self.nc:,self.no:] += s1_ov1
+                c1[self.nc:,:self.no] += s1_oo1
+                #tdm = np.einsum('ia,xab,ib->x',c0,ints_bb[:,nc:,nc:],c1)-\
+                 #     np.einsum('ia,xij,ja->x',c0,ints_aa[:,:nc+no,:nc+no],c1)
+                tdm = []
+                for x in range(3):
+                    tdm.append(np.trace(c0@ints_bb[x,self.nc:,self.nc:]@c1.T)-np.trace(c0.T@ints_aa[x,:self.nc+self.no,:self.nc+self.no]@c1))
+                osc = (2/3)*(abs(self.e[i]-self.e[j]))*(tdm[0]**2 + tdm[1]**2 + tdm[2]**2)
+                print(f'{i+1:2d} {j+1:2d} {tdm[0]:>8.4f} {tdm[1]:>8.4f} {tdm[2]:>8.4f}  {osc:>8.4f} ')
+                
+                
+    def calculate_TDM_R(self):
+        def _charge_center(mol):
+            charges = mol.atom_charges()
+            coords = mol.atom_coords()
+            return np.einsum('z,zr->r', charges, coords)/charges.sum()
+        with self.mol.with_common_orig(_charge_center(self.mol)):
+            ints = self.mol.intor_symmetric('int1e_r', comp=3) # (3,nao,nao)
+        ints_mo = np.einsum('xpq,pi,qj->xij', ints, self.mf.mo_coeff, self.mf.mo_coeff)
+        dim1 = self.nc*self.nv
+        dim2 = dim1+self.nc*self.no
+        dim3 = dim2+self.no*self.nv
+            
+        print("Excited state to Excited state transition dipole moments(Au)")
+        print("State State    X     Y     Z     OSC.")
+        
+        si = self.mol.spin/2
+        iden_C = np.identity(self.nc)
+        iden_O = np.identity(self.no)
+        iden_V = np.identity(self.nv)
+        if self.SA == 0:
+            factor1 = 1
+            factor2 = 1
+            factor3 = 0
+        else:
+            factor1 = np.sqrt((2*si+1)/(2*si)) 
+            factor2 = np.sqrt((2*si)/(2*si-1))
+            factor3 = 1/np.sqrt(2*si*(2*si-1))
+        for i in range(len(self.e)):
+            s0_cv1 = self.v[:,i][:dim1].reshape(self.nc,self.nv)
+            s0_co1 = self.v[:,i][dim1:dim2].reshape(self.nc,self.no)
+            s0_ov1 = self.v[:,i][dim2:dim3].reshape(self.no,self.nv)
+            if self.re:
+                s0_oo1 = (self.vects @ self.v[:,i][dim3:].reshape(-1,1)).reshape(self.no,self.no)
+            else:
+                s0_oo1 = self.v[:,i][dim3:].reshape(self.no,self.no)
+            for j in range(len(self.e)):
+                s1_cv1 = self.v[:,j][:dim1].reshape(self.nc,self.nv)
+                s1_co1 = self.v[:,j][dim1:dim2].reshape(self.nc,self.no)
+                s1_ov1 = self.v[:,j][dim2:dim3].reshape(self.no,self.nv)
+                if self.re:
+                    s1_oo1 = (self.vects @ self.v[:,j][dim3:].reshape(-1,1)).reshape(self.no,self.no)
+                else:
+                    s1_oo1 = self.v[:,j][dim3:].reshape(self.no,self.no)
+                tdm = np.zeros(3)# x y z
+                for x in range(3):
+                # CV1-CV1
+                    #print('s0_cv1.shape ',s0_cv1.shape, 's1_cv1.shape',s1_cv1.shape,ints_mo[x,:self.nc,:self.nc].shape)
+                    tdm[x] += np.trace(s0_cv1@ints_mo[x,self.nc+self.no:,self.nc+self.no:]@s1_cv1.T) - \
+                           np.trace(s0_cv1.T@ints_mo[x,:self.nc,:self.nc]@s1_cv1)
+                    #tmp = np.einsum('ia,ab,ib->',s0_cv1,ints_mo[x,self.nc+self.no:,self.nc+self.no:],s1_cv1,optimize=True)-\
+                      #np.einsum('ia,ij,ja->',s0_cv1,ints_mo[x,:self.nc,:self.nc],s1_cv1,optimize=True)
+                    #print('1 ',np.allclose(tmp,tmp0))
+                # CV1-CO1
+                    tdm[x] += factor1*np.trace(s0_cv1@ints_mo[x,self.nc+self.no:,self.nc:self.nc+self.no]@s1_co1.T)
+                    #tmp = factor1*np.einsum('ia,av,iv->',s0_cv1,ints_mo[x,self.nc+self.no:,self.nc:self.nc+self.no],s1_co1,optimize=True)
+                    #print('2 ',np.allclose(tmp,tmp0))
+                    tdm[x] += factor1*np.trace(s0_co1@ints_mo[x,self.nc+self.no:,self.nc:self.nc+self.no].T@s1_cv1.T)
+                    #tmp = factor1*np.einsum('iu,bu,ib->',s0_co1,ints_mo[x,self.nc+self.no:,self.nc:self.nc+self.no],s1_cv1,optimize=True)
+                    #print('3 ',np.allclose(tmp,tmp0))
+                # CV1-OV1
+                    tdm[x] += -factor1*np.trace(s0_cv1.T@ints_mo[x,:self.nc,self.nc:self.nc+self.no]@s1_ov1)
+                    #tmp = -factor1*np.einsum('ia,iv,va->',s0_cv1,ints_mo[x,:self.nc,self.nc:self.nc+self.no],s1_ov1,optimize=True)
+                    #print('4 ',np.allclose(tmp0,tmp))
+                    tdm[x] += -factor1*np.trace(s0_ov1.T@ints_mo[x,:self.nc,self.nc:self.nc+self.no].T@s1_cv1)
+                    #tmp = -factor1*np.einsum('ua,ju,ja->',s0_ov1,ints_mo[x,:self.nc,self.nc:self.nc+self.no],s1_cv1,optimize=True)
+                    #print('5 ',np.allclose(tmp0,tmp))
+                # CO1-CO1
+                    tdm[x] += np.trace(s0_co1@ints_mo[x,self.nc:self.nc+self.no,self.nc:self.nc+self.no]@s1_co1.T)-\
+                         np.trace(s0_co1.T@ints_mo[x,:self.nc,:self.nc]@s1_co1)
+                    #tmp= np.einsum('iu,uv,iv->',s0_co1,ints_mo[x,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_co1,optimize=True)-\
+                       #np.einsum('iu,ij,ju->',s0_co1,ints_mo[x,:self.nc,:self.nc],s1_co1,optimize=True)
+                    #print('6 ',np.allclose(tmp0,tmp))
+                # CO1-OO1
+                    tdm[x] += -factor2*np.trace(s0_co1.T@ints_mo[x,:self.nc,self.nc:self.nc+self.no]@s1_oo1)
+                    #tmp= -factor2*np.einsum('iu,iv,vu->',s0_co1,ints_mo[x,:self.nc,self.nc:self.nc+self.no],s1_oo1,optimize=True)
+                    #print('7 ',np.allclose(tmp0,tmp))
+                    tdm[x] += factor3*np.sum(s0_co1 * ints_mo[x,:self.nc,self.nc:self.nc+self.no]) * np.trace(s1_oo1)
+                    #tmp = factor3*np.einsum('iu,iu,vv->',s0_co1,ints_mo[x,:self.nc,self.nc:self.nc+self.no],s1_oo1,optimize=True)
+                    #print('8 ',np.allclose(tmp0,tmp))
+                    tdm[x] += -factor2*np.trace(s0_oo1.T@ints_mo[x,:self.nc,self.nc:self.nc+self.no].T@s1_co1)
+                    #tmp= -factor2*np.einsum('ut,ju,jt->',s0_oo1,ints_mo[x,:self.nc,self.nc:self.nc+self.no],s1_co1,optimize=True)
+                    #print('9 ',np.allclose(tmp0,tmp))
+                    tdm[x] += factor3*np.trace(s0_oo1)*np.sum(ints_mo[x,:self.nc,self.nc:self.nc+self.no]*s1_co1)
+                    #tmp=  factor3*np.einsum('uu,jv,jv->',s0_oo1,ints_mo[x,:self.nc,self.nc:self.nc+self.no],s1_co1,optimize=True)
+                    #print('10 ',np.allclose(tmp0,tmp))
+                # OV1-OV1
+                    tdm[x] += np.trace(s0_ov1@ints_mo[x,self.nc+self.no:,self.nc+self.no:]@s1_ov1.T)-\
+                         np.trace(s0_ov1.T@ints_mo[x,self.nc:self.nc+self.no,self.nc:self.nc+self.no]@s1_ov1)
+                    #tmp= np.einsum('ua,ab,ub->',s0_ov1,ints_mo[x,self.nc+self.no:,self.nc+self.no:],s1_ov1,optimize=True)-\
+                       #np.einsum('ua,uv,va->',s0_ov1,ints_mo[x,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_ov1,optimize=True)
+                    #print('11 ',np.allclose(tmp0,tmp))
+                # OV1-OO1
+                    tdm[x] += factor2*np.trace(s0_ov1@ints_mo[x,self.nc+self.no:,self.nc:self.nc+self.no]@s1_oo1.T)
+                    #tmp =  factor2*np.einsum('ua,aw,uw->',s0_ov1,ints_mo[x,self.nc+self.no:,self.nc:self.nc+self.no],s1_oo1,optimize=True)
+                    #print('12 ',np.allclose(tmp0,tmp))
+                    tdm[x] +=-factor3*np.sum(s0_ov1*ints_mo[x,self.nc:self.nc+self.no,self.nc+self.no:]) *np.trace(s1_oo1)   
+                    #tmp = -factor3*np.einsum('ua,ua,vv->',s0_ov1,ints_mo[x,self.nc:self.nc+self.no,self.nc+self.no:],s1_oo1,optimize=True)
+                    #print('13 ',np.allclose(tmp0,tmp))
+                    tdm[x] += factor2*np.trace(s0_oo1@ints_mo[x,self.nc+self.no:,self.nc:self.nc+self.no].T@s1_ov1.T)
+                    #tmp =  factor2*np.einsum('ut,bt,ub->',s0_oo1,ints_mo[x,self.nc+self.no:,self.nc:self.nc+self.no],s1_ov1,optimize=True)
+                    #print('14 ',np.allclose(tmp0,tmp))
+                    tdm[x] += -factor3*np.trace(s0_oo1)*np.sum(ints_mo[x,self.nc:self.nc+self.no,self.nc+self.no:]*s1_ov1)
+                    #tmp= -factor3*np.einsum('uu,vb,vb->',s0_oo1,ints_mo[x,self.nc:self.nc+self.no,self.nc+self.no:],s1_ov1,optimize=True)
+                    #print('15 ',np.allclose(tmp0,tmp))
+                # OO1-OO1
+                    tdm[x] += np.trace(s0_oo1@ints_mo[x,self.nc:self.nc+self.no,self.nc:self.nc+self.no]@s1_oo1.T) -\
+                         np.trace(s0_oo1.T@ints_mo[x,self.nc:self.nc+self.no,self.nc:self.nc+self.no]@s1_oo1)
+                    #tmp = np.einsum('ut,tv,uv->',s0_oo1,ints_mo[x,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_oo1,optimize=True)-\
+                       #np.einsum('ut,uw,wt->',s0_oo1,ints_mo[x,self.nc:self.nc+self.no,self.nc:self.nc+self.no],s1_oo1,optimize=True)
+                    #print('16 ',np.allclose(tmp0,tmp))
+                osc = (2/3)*(abs(self.e[i]-self.e[j]))*(tdm[0]**2 + tdm[1]**2 + tdm[2]**2)
                 print(f'{i+1:2d} {j+1:2d} {tdm[0]:>8.4f} {tdm[1]:>8.4f} {tdm[2]:>8.4f}  {osc:>8.4f} ')
         
     
@@ -837,13 +1003,17 @@ class SA_SF_TDA():
             hdiag = e_ia.ravel()
 
         if self.method == 1:
-            vresp = _gen_uhf_tda_response_sf(self.mf,hermi=0,collinear_samples=50)
+            vresp = _gen_uhf_tda_response_sf(self.mf,hermi=0,collinear_samples=self.collinear_samples)
         else:
             vresp = gen_response_sf(self.mf,hermi=0,method=self.method)
 
         if self.SA > 0:
             vresp_hf = self.gen_response_sf_delta_A(hermi=0)# to calculate \Delta A
-            hf = scf.ROHF(mf.mol)
+            x2c_active = (hasattr(mf, 'with_x2c') and mf.with_x2c is not None)
+            if x2c_active:
+                hf = scf.ROHF(mf.mol).x2c()
+            else:
+                hf = scf.ROHF(mf.mol)
             dm = mf.make_rdm1()
             vhf = hf.get_veff(hf.mol, dm)
             h1e = hf.get_hcore()
@@ -858,7 +1028,7 @@ class SA_SF_TDA():
         def vind(zs0): # vector-matrix product for indexed operations
             ndim0,ndim1 = ndim # ndom0:numuber of alpha orbitals, ndim1:number of beta orbitals
             orbo,orbv = orbov # mo_coeff for alpha and beta
-            #start_t = time.time()
+            start_t = time.time()
 
             if self.re:
                 oo = np.zeros((np.array(zs0).shape[0],no*no-1)) # get oo from zs0, which is no*no-1
@@ -891,7 +1061,7 @@ class SA_SF_TDA():
             vs += np.einsum('ab,xib->xia',fockB[noccb:,noccb:],zs,optimize=True)-\
                    np.einsum('ij,xja->xia',fockA[:nocca,:nocca],zs,optimize=True)
             vs_dA = np.zeros_like(vs)
-            #end_t = time.time()
+            end_t = time.time()
             #print(f'USF times use {(end_t-start_t)/3600} hours')
 
             if self.SA > 0:
@@ -1195,7 +1365,7 @@ class SA_SF_TDA():
         #print(f'init_guess times use {(end_t-start_t)/3600:6.4f} hours')
         #print('x0.shape ',x0.shape)
         converged, e, x1 = lib.davidson1(vind, x0, precond,
-                              tol=1e-8,lindep=1e-10,
+                              tol=1e-8,lindep=1e-9,
                               nroots=self.nstates,
                               max_cycle=1000)
         end_time = time.time()
@@ -1231,11 +1401,15 @@ class SA_SF_TDA():
         nov = (self.nc+self.no) * (self.no+self.nv)
         self.nstates = min(nstates,nov)
         if fglobal is None:
-            fglobal = (1-d_lda)*self.hyb + d_lda
+            if self.omega == 0:
+                cx = self.hyb
+            else:
+                cx = self.hyb + (self.alpha-self.hyb)*math.erf(self.omega) 
+            fglobal = (1-d_lda)*cx + d_lda
             if self.method == 1:
-                fglobal = fglobal*4*(self.hyb-0.5)**2
+                fglobal = fglobal*4*(cx-0.5)**2
         if remove:
-            #print('fglobal',fglobal)
+            print('fglobal',fglobal)
             if self.davidson:
                 self.vects = self.get_vect()
                 self.davidson_process(foo=foo,fglobal=fglobal)
@@ -1256,7 +1430,9 @@ class SA_SF_TDA():
             if self.davidson:
                 self.davidson_process(foo=foo,fglobal=fglobal)
             else:
+           
                 self.A = self.get_Amat(foo=foo,fglobal=fglobal)
+
                 if frozen is not None:
                     self.A = self.frozen_A(frozen)
                 if self.A.shape[0] < 1000:
