@@ -1465,7 +1465,7 @@ if __name__ == '__main__':
     mf.xc = 'bhandhlyp'
     mf.kernel()
     sf_tda = XSF_TDA(mf)
-    e0, values = sf_tda.kernel(nstates=10,remove=True)
+    e0, values = sf_tda.kernel(nstates=10)
     print('excited energy ',e0)
     print('Reference energy: -2.58159612  1.94501967  2.0441558   2.04415705  3.55556409  4.0395836 4.07260624  4.07260634  4.09542032  4.09542242')
 
