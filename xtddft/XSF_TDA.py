@@ -10,7 +10,7 @@ from pyscf.symm import direct_prod
 
 #from line_profiler import profile
 
-from xtddft.SF_TDA import SF_TDA_down, mf_info,gen_response_sf,_gen_uhf_tda_response_sf,get_ab_sf
+from SF_TDA import SF_TDA_down, mf_info,gen_response_sf,_gen_uhf_tda_response_sf,get_ab_sf
 #import sys
 #sys.path.append('/home/lenovo2/usrs/zhw/software/test_git_file')
 #from mc_file import _gen_uhf_tda_response_sf
@@ -66,8 +66,8 @@ def _charge_center(mol):
     return np.einsum('z,zr->r', charges, coords)/charges.sum()
     
 
-class SA_SF_TDA():
-    def __init__(self,mf,SA=3,davidson=True,method=0,collinear_samples=60):
+class XSF_TDA():
+    def __init__(self,mf,SA=None,davidson=True,method=0,collinear_samples=60):
         """SA=0: SF-TDA
            SA=1: only add diagonal block for dA
            SA=2: add all dA except for OO block
@@ -79,7 +79,8 @@ class SA_SF_TDA():
             self.mo_coeff = mf.mo_coeff
             self.mo_occ = mf.mo_occ
             self.type_u = True
-            self.SA = 0
+            if SA is None:
+                self.SA = 0
         else: # ROKS
             self.mo_energy = np.array([mf.mo_energy, mf.mo_energy])
             self.mo_coeff = np.array([mf.mo_coeff, mf.mo_coeff])
@@ -87,7 +88,8 @@ class SA_SF_TDA():
             self.mo_occ[0][np.where(mf.mo_occ>=1)[0]]=1
             self.mo_occ[1][np.where(mf.mo_occ>=2)[0]]=1
             self.type_u = False
-            self.SA = SA
+            if SA is None:
+                self.SA = 3
 
         self.mol = mf.mol
         self.nao = self.mol.nao_nr()
@@ -1392,8 +1394,14 @@ class SA_SF_TDA():
         tmp_A = tmp_A[:, kept]
         return tmp_A
             
-    def kernel(self, nstates=1,remove=False,frozen=None,foo=1.0,d_lda=0.3,fglobal=None):
-        self.re = remove
+    def kernel(self, nstates=1,remove=None,frozen=None,foo=1.0,d_lda=0.3,fglobal=None):
+        if remove is None:
+            if np.array(self.mf.mo_coeff).ndim==3: # UKS
+                self.re = False
+            else:
+                self.re = True
+        else:
+            self.re = remove
         nov = (self.nc+self.no) * (self.no+self.nv)
         self.nstates = min(nstates,nov)
         if fglobal is None:
@@ -1404,7 +1412,7 @@ class SA_SF_TDA():
             fglobal = (1-d_lda)*cx + d_lda
             if self.method == 1:
                 fglobal = fglobal*4*(cx-0.5)**2
-        if remove:
+        if self.re:
             print('fglobal',fglobal)
             if self.davidson:
                 self.vects = self.get_vect()
@@ -1456,7 +1464,7 @@ if __name__ == '__main__':
     mf = dft.ROKS(mol)
     mf.xc = 'bhandhlyp'
     mf.kernel()
-    sf_tda = SA_SF_TDA(mf)
+    sf_tda = XSF_TDA(mf)
     e0, values = sf_tda.kernel(nstates=10,remove=True)
     print('excited energy ',e0)
     print('Reference energy: -2.58159612  1.94501967  2.0441558   2.04415705  3.55556409  4.0395836 4.07260624  4.07260634  4.09542032  4.09542242')
