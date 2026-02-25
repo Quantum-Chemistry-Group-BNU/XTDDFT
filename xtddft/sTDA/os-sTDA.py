@@ -3,8 +3,8 @@ import os
 import sys
 
 os.environ["OMP_NUM_THREADS"] = "16"
-sys.path.append('../')
 sys.path.append('../../')
+sys.path.append('../../../')
 import time
 import scipy
 import numpy as np
@@ -433,26 +433,6 @@ class OSsTDA:
         gk = (1. / (R ** alpha + eta_ele ** (-alpha))) ** (1. / alpha)
         return gj, gk
 
-    # def wrapper_iajb_cva(self, i, a):
-    #     return iajb_f(i, a, self.qAk_aa, self.qAj_aa, self.qBk_aa, self.qBj_aa, self.qBk_bb,
-    #                 self.ncsfcv_a0, self.ncsfcv_a1, self.ncsfov_a0, self.ncsfov_a1, self.ncsfco_b0, self.ncsfco_b1, self.ncsfcv_b0, self.ncsfcv_b1,
-    #                 self.iaia_ncsf, self.iaiacv_a, self.gamma_k, self.gamma_j, self.cva, self.zero, self.zero,)
-    #
-    # def wrapper_iajb_ova(self, i, a):
-    #     return iajb_f(i, a, self.qAk_aa, self.qAj_aa, self.qBk_aa, self.qBj_aa, self.qBk_bb,
-    #                 self.ncsfcv_a0, self.ncsfcv_a1, self.ncsfov_a0, self.ncsfov_a1, self.ncsfco_b0, self.ncsfco_b1, self.ncsfcv_b0, self.ncsfcv_b1,
-    #                 self.iaia_ncsf, self.iaiaov_a, self.gamma_k, self.gamma_j, self.ova, self.nc, self.zero,)
-    #
-    # def wrapper_iajb_cob(self, i, a):
-    #     return iajb_f(i, a, self.qAk_bb, self.qAj_bb, self.qBk_bb, self.qBj_bb, self.qBk_aa,
-    #                 self.ncsfco_b0, self.ncsfco_b1, self.ncsfcv_b0, self.ncsfcv_b1, self.ncsfcv_a0, self.ncsfcv_a1, self.ncsfov_a0, self.ncsfov_a1,
-    #                 self.iaia_ncsf, self.iaiaco_b, self.gamma_k, self.gamma_j, self.cob, self.zero, self.zero,)
-    #
-    # def wrapper_iajb_cvb(self, i, a):
-    #     return iajb_f(i, a, self.qAk_bb, self.qAj_bb, self.qBk_bb, self.qBj_bb, self.qBk_aa,
-    #                 self.ncsfco_b0, self.ncsfco_b1, self.ncsfcv_b0, self.ncsfcv_b1, self.ncsfcv_a0, self.ncsfcv_a1, self.ncsfov_a0, self.ncsfov_a1,
-    #                 self.iaia_ncsf, self.iaiacv_b, self.gamma_k, self.gamma_j, self.cva, self.zero, self.no,)
-
     def kernel(self, mo_occ=None, mo_coeff=None, mo_energy=None, h1e=None, dm=None, vhf=None, hyb=None):
         # Section: prepare for compute
         t_all_0 = time.time()  # record kernel begin time
@@ -784,63 +764,6 @@ class OSsTDA:
             iajb = np.zeros(len(ncsfcv_a[0]) + len(ncsfov_a[0]) + len(ncsfco_b[0]) + len(ncsfcv_b[0]))
             iaia_ncsf = np.concatenate((iaiacv_a[ncsfcv_a[0], ncsfcv_a[1]], iaiaov_a[ncsfov_a[0], ncsfov_a[1]],
                                         iaiaco_b[ncsfco_b[0], ncsfco_b[1]], iaiacv_b[ncsfcv_b[0], ncsfcv_b[1]]), axis=0)
-            # # do not add fock and delta A
-            # # monitor = utils.MemoryMonitor()
-            # self.qAk_aa = qAk_aa
-            # self.qAj_aa = qAj_aa
-            # self.qAk_bb = qAk_bb
-            # self.qAj_bb = qAj_bb
-            # self.qBk_aa = qBk_aa
-            # self.qBj_aa = qBj_aa
-            # self.qBk_bb = qBk_bb
-            # self.qBj_bb = qBj_bb
-            # self.ncsfcv_a0 = ncsfcv_a[0]
-            # self.ncsfcv_a1 = ncsfcv_a[1]
-            # self.ncsfov_a0 = nc + ncsfov_a[0]
-            # self.ncsfov_a1 = ncsfov_a[1]
-            # self.ncsfco_b0 = ncsfco_b[0]
-            # self.ncsfco_b1 = ncsfco_b[1]
-            # self.ncsfcv_b0 = ncsfcv_b[0]
-            # self.ncsfcv_b1 = no + ncsfcv_b[1]
-            # self.iaia_ncsf = iaia_ncsf
-            # self.iaiacv_a = iaiacv_a
-            # self.iaiaov_a = iaiaov_a
-            # self.iaiaco_b = iaiaco_b
-            # self.iaiacv_b = iaiacv_b
-            # self.gamma_k = gamma_k
-            # self.gamma_j = gamma_j
-            # self.cva = 'cva'
-            # self.ova = 'ova'
-            # self.cob = 'cob'
-            # self.cvb = 'cvb'
-            # self.zero = 0
-            # self.nc = nc
-            # self.no = no
-            # iajb_sjob = Parallel(n_jobs=self.njob, return_as="generator")(
-            #     delayed(self.wrapper_iajb_cva)(i, a) for i, a in zip(pcsfcv_a[0], pcsfcv_a[1])
-            # )
-            # iajb += accumulator_sum(iajb_sjob)
-            # iajb_sjob = Parallel(n_jobs=self.njob, return_as="generator")(
-            #     delayed(self.wrapper_iajb_ova)(i, a) for i, a in zip(pcsfov_a[0], pcsfov_a[1])
-            # )
-            # iajb += accumulator_sum(iajb_sjob)
-            # iajb_sjob = Parallel(n_jobs=self.njob, return_as="generator")(
-            #     delayed(self.wrapper_iajb_cob)(i, a) for i, a in zip(pcsfco_b[0], pcsfco_b[1])
-            # )
-            # iajb += accumulator_sum(iajb_sjob)
-            # iajb_sjob = Parallel(n_jobs=self.njob, return_as="generator")(
-            #     delayed(self.wrapper_iajb_cvb)(i, a) for i, a in zip(pcsfcv_b[0], pcsfcv_b[1])
-            # )
-            # iajb += accumulator_sum(iajb_sjob)
-            # # time.sleep(0.2)
-            # # monitor.join()
-            # # peak = max(monitor.memory_buffer) / 1e6
-            # # print(f"Peak memory usage: {peak:.2f}MB")
-            # del self.qAk_aa, self.qAj_aa, self.qAk_bb, self.qAj_bb, self.qBk_aa, self.qBj_aa, self.qBk_bb, self.qBj_bb, \
-            #     self.ncsfcv_a0, self.ncsfcv_a1, self.ncsfov_a0, self.ncsfov_a1, \
-            #     self.ncsfco_b0, self.ncsfco_b1, self.ncsfcv_b0, self.ncsfcv_b1, self.iaia_ncsf, \
-            #     self.iaiacv_a, self.iaiaov_a, self.iaiaco_b, self.iaiacv_b, self.gamma_k, self.gamma_j, \
-            #     self.cva, self.ova, self.cob, self.cvb, self.zero, self.nc, self.no
 
             iajb_path = np.einsum_path(
                 'nm, nmi, nm->i',
@@ -1920,7 +1843,7 @@ if __name__ == "__main__":
         t_fock1 = time.time()
         print("contract Fock matrix use          {:8.4f} s".format(t_fock1 - t_fock0))
         scf_dic = {'h1e': h1e, 'dm':dm, 'vhf':vhf}
-        np.save('scf.npy', scf_dic)
+        np.save('../../sTDA/scf.npy', scf_dic)
     print("dft use {} s".format(t_dft1 - t_dft0))
     print('=' * 50)
 
@@ -1932,7 +1855,7 @@ if __name__ == "__main__":
         mo_occ = mf['mo_occ']
         mo_coeff = mf['mo_coeff']
         mo_energy = mf['mo_energy']
-        scf_info = np.load('scf.npy', allow_pickle=True).item()
+        scf_info = np.load('../../sTDA/scf.npy', allow_pickle=True).item()
         h1e = scf_info['h1e']
         dm = scf_info['dm']
         vhf = scf_info['vhf']

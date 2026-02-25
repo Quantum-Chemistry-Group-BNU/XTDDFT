@@ -2,7 +2,7 @@
 import os, sys, time
 os.environ["OMP_NUM_THREADS"] = "4"
 sys.path.append('/')
-sys.path.append('./../')
+sys.path.append('../../')
 import scipy
 import numpy as np
 import pandas as pd

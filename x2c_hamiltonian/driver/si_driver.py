@@ -13,9 +13,9 @@ from pyscf import scf, dft
 from opt_einsum import contract as einsum
 
 from utils import unit
-from XTDA import TDM_GSS, TDM_S
-from SF_TDA.SF_TDA import TDM_S1
-from SF_TDA.SF_XTDA import TDM_S_1
+from xtddft.XTDA import TDM_GSS, TDM_S
+from xtddft.SF_TDA import TDM_S1
+from xtddft.XSF_TDA import TDM_S_1
 
 def progress_bar(current, total, start_time, bar_length=30):
     fraction = current / total

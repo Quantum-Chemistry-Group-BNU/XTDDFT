@@ -1,11 +1,7 @@
-from pyscf import gto, dft, scf, ao2mo, lib, tddft,symm
-from pyscf.scf.uhf import spin_square
-from pyscf.dft.numint import _dot_ao_ao_sparse,_scale_ao_sparse,_tau_dot_sparse
-from pyscf.dft.gen_grid import NBINS
+from pyscf import gto, dft, scf, ao2mo, lib, symm
 import numpy as np
 import time
 import math
-from pyscf.dft import numint
 import scipy
 from functools import reduce
 from pyscf.symm import direct_prod
@@ -14,7 +10,7 @@ from pyscf.symm import direct_prod
 
 #from line_profiler import profile
 
-from SF_TDA import SF_TDA,SF_TDA_down, mf_info,gen_response_sf,_gen_uhf_tda_response_sf,get_ab_sf
+from xtddft.SF_TDA import SF_TDA_down, mf_info,gen_response_sf,_gen_uhf_tda_response_sf,get_ab_sf
 #import sys
 #sys.path.append('/home/lenovo2/usrs/zhw/software/test_git_file')
 #from mc_file import _gen_uhf_tda_response_sf

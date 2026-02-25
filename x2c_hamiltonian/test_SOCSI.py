@@ -40,7 +40,7 @@ def soc_mf(mf):
     state_dict['|S->'] = []
 
     # |S->
-    from SF_TDA.SF_XTDA import SA_SF_TDA
+    from xtddft.XSF_TDA import SA_SF_TDA
     print(f"{'='*15} Perform SF-down-TDA calculation {'='*15}")
     xsf_tda = SA_SF_TDA(mf,davidson=1)
     xsf_tda.nstates = 20
@@ -70,7 +70,7 @@ def soc_mf(mf):
         state_dict['|S->'].append((em[i], xm[:,i]))
 
     # |So>
-    from XTDA import XTDA
+    from xtddft.XTDA import XTDA
     print(f"{'='*15} Perform XTDA calculation {'='*15}")
     xtda= XTDA(mol,mf,basis='tensor')
     xtda.nstates = 40
@@ -86,7 +86,7 @@ def soc_mf(mf):
         state_dict['|So>'].append((eo[i], xo[:,i]))
 
     # |S+>
-    from SF_TDA.SF_TDA import SF_TDA
+    from xtddft.SF_TDA import SF_TDA
     print(f"{'='*15} Perform SF-up-TDA calculation {'='*15}")
     sf_tda = SF_TDA(mf,isf=1,davidson=0)
     sf_tda.nstates = 20

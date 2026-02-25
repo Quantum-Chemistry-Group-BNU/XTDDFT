@@ -166,7 +166,7 @@ def si1driver(mf,S,Vso,gs=1,nstates=None,analyze=0):
         nstates = (ns,ns)
     else:
         assert len(nstates) == 2
-    from TDA import TDA
+    from xtddft.TDA import TDA
 
     tda_s = TDA(mol, mf, singlet=1, nstates=nstates[0])
     e_s, _, _, xs = tda_s.kernel()
@@ -254,7 +254,7 @@ def si2driver(mf,S,Vso,gs=1,nstates=[None,None],analyze=0):
     # print(f"GS {gs}, state-({S:.2f}) {nstates[0]}, state-({S+1:.2f}) {nstates[1]} are selected")
     print(f"GS {gs}, state-|Si> {nstates[0]}, state-|Si+1> {nstates[1]} are selected")
 
-    from XTDA import XTDA
+    from xtddft.XTDA import XTDA
     print(f"{'='*15} Perform XTDA calculation {'='*15}")
     xtda= XTDA(mol,mf,basis='tensor')
     xtda.nstates = nstates[0]
@@ -274,7 +274,7 @@ def si2driver(mf,S,Vso,gs=1,nstates=[None,None],analyze=0):
     # xd1[nc*(nv+no):nc*(nv+no)+no*nv] = xd1_[nc*nv:nc*nv+no*nv]
     # xd = xd1
 
-    from SF_TDA.SF_TDA import SF_TDA
+    from xtddft.SF_TDA import SF_TDA
     print(f"{'='*15} Perform SF-up-TDA calculation {'='*15}")
     sf_tda = SF_TDA(mf,isf=1,davidson=0)
     sf_tda.nstates = nstates[1]

@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import numpy as np
 from threading import Thread
@@ -44,6 +45,7 @@ def get_cov(mf):
 
 
 def order_pyscf2my(nc, no, nv):
+    # Note: only for open shell sTDA
     # nc and nv is the value before selecting activate space
     order = np.indices(((nc+no)*nv+nc*(no+nv), )).squeeze()
     # # my order to pyscf order
