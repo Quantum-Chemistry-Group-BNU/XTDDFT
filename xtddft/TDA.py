@@ -5,10 +5,9 @@ import time
 import scipy
 import numpy as np
 import pandas as pd
-import basis_set_exchange as bse
-from pyscf import dft, gto, scf, tddft, ao2mo, lib
+from pyscf import dft, gto, tddft, ao2mo, lib
 from pyscf.lib import logger
-from utils import atom, unit
+from xtddft.utils import atom, unit
 '''
 most code refer to pyscf code
 '''

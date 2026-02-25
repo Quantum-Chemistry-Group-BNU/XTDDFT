@@ -20,7 +20,7 @@ from gpu4pyscf.dft.numint import eval_rho2
 from pyscf.dft import numint as pyscf_numint
 from gpu4pyscf.tdscf._uhf_resp_sf import mcfun_eval_xc_adapter_sf
 
-import Davidson
+from xtddft.utils import Davidson
 """this file invoke USF-TDA and try optimize to reduce time costing"""
 
 
@@ -170,7 +170,7 @@ def gen_uhf_response_sf(mf, mo_coeff=None, mo_occ=None, hermi=0,
         return vind
 
 
-class SA_SF_TDA():
+class XSF_TDA_GPU():
     def __init__(self, mf, SA=3, davidson=True, collinear='mcol'):
         """SA=0: SF-TDA
            SA=1: only add diagonal block for dA
@@ -851,7 +851,7 @@ if __name__ == '__main__':
     mf.kernel()
     tscf1 = time.time()
     tsfd0 = time.time()
-    sf_tda = SA_SF_TDA(mf, davidson=True, collinear='mcol')
+    sf_tda = XSF_TDA_GPU(mf, davidson=True, collinear='mcol')
     e0, values = sf_tda.kernel(nstates=10, gpu_davidson=False)
     tsfd1 = time.time()
     print('scf use      {:8.4f} s'.format(tscf1 - tscf0))

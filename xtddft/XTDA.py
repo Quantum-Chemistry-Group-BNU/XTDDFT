@@ -9,7 +9,7 @@ import pandas as pd
 from pyscf import dft, gto, scf, lib, ao2mo, tddft
 from pyscf.lib import logger
 from pyscf.symm import direct_prod
-from utils import unit, atom, utils
+from xtddft.utils import unit, atom, utils
 from opt_einsum import contract as einsum
 
 

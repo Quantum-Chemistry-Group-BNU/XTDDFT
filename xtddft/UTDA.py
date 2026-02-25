@@ -10,8 +10,7 @@ import pandas as pd
 from pyscf import dft, gto, scf, tddft, lib, ao2mo
 from pyscf.lib import logger
 
-from sTDA import tools
-from utils import atom, unit
+from xtddft.utils import atom, unit, utils
 
 
 class UTDA:
@@ -41,8 +40,8 @@ class UTDA:
         os = td.oscillator_strength(gauge="length")
         # logger.info(self.mf, "oscillator strength \n{}".format(os))
         # # transform v in pyscf order to my order
-        nc, no, nv = tools.get_cov(self.mf)
-        order = tools.order_pyscf2my(nc, no, nv)
+        nc, no, nv = utils.get_cov(self.mf)
+        order = utils.order_pyscf2my(nc, no, nv)
         v = v[order, :]
         print('pyscf UTDA result is')
         print(f'{"num":>4} {"energy":>8} {"osc_str":>8}')

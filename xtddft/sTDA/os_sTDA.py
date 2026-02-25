@@ -16,8 +16,8 @@ from pyscf import dft, gto, scf, tddft, lo
 from pyscf.lib import logger
 from pyscf.tools import molden, cubegen
 
-from eta import eta
-from utils import unit, atom, utils
+from xtddft.sTDA.eta import eta
+from xtddft.utils import atom, unit, utils
 
 '''U and X opt file select same CSF in CVaa and CVbb'''
 
@@ -352,7 +352,7 @@ def constractA(pscsfcv_a_i, pscsfcv_a_a, pscsfcv_b_i, pscsfcv_b_a, nc, no, nv, g
 
 class OSsTDA:
     def __init__(self, mol, mf, spinadapt=True, Emax=10.0, tp=1e-4, cas=True, nstates=10, union=True, correct=False,
-                 paramtype='os', savedata=False, readinfo=False):
+                 paramtype='os', readinfo=False):
         self.mol = mol
         self.mf = mf
         self.nstates = nstates
@@ -363,7 +363,6 @@ class OSsTDA:
         self.union = union
         self.correct = correct
         self.paramtype = paramtype
-        self.savedata = savedata
         self.readinfo = readinfo
         self.njob = int(os.environ.get("OMP_NUM_THREADS"))
         # self.njob = 1
@@ -475,17 +474,6 @@ class OSsTDA:
 
         # Section: compute Fock matrix
         t2 = time.time()
-        # if self.readinfo:
-        #     assert h1e is not None
-        #     assert dm is not None
-        #     assert vhf is not None
-        #     assert hyb is not None
-        # else:
-        #     h1e = self.mf.get_hcore()
-        #     dm = self.mf.make_rdm1()
-        #     vhf = self.mf.get_veff(self.mol, dm)
-        #     if getattr(self.mf, 'with_solvent', None) is not None:
-        #         vhf += vhf.v_solvent
         focka = h1e + vhf[0]
         fockb = h1e + vhf[1]
         fock_a = mo_coeff_a.T @ focka @ mo_coeff_a
@@ -1325,11 +1313,6 @@ class OSsTDA:
         print(f'{"num":>4} {"energy":>8} {"wav_len":>8} {"osc_str":>8} {"rot_str":>8} {"deltaS2":>8}')
         for ni, ei, wli, osi, rsi, ds2i in zip(range(self.nstates), self.e_eV, unit.eVxnm / self.e_eV, self.os, rs, self.dS2):
             print(f'{ni + 1:4d} {ei:8.4f} {wli:8.4f} {osi:8.4f} {rsi:8.4f} {ds2i:8.4f}')
-        if self.savedata:
-            pd.DataFrame(
-                np.concatenate((unit.eVxnm / np.expand_dims(self.e_eV, axis=1), np.expand_dims(self.os, axis=1)),
-                               axis=1)
-            ).to_csv('uvspec_data.csv', index=False, header=None)
         # np.save("energy_xstda.npy", self.e)
         t_all_1 = time.time()  # record kernel end time
         t_all = t_all_1 - t_all_0
@@ -1805,8 +1788,8 @@ if __name__ == "__main__":
     # # mf.with_solvent.eps = 35.688  # for Acetonitrile 乙腈
     
     t_dft0 = time.time()
-    mf = dft.ROKS(mol)
-    # mf = dft.UKS(mol)
+    # mf = dft.ROKS(mol)
+    mf = dft.UKS(mol)
     mf.conv_tol = 1e-8  # same with orca tightscf criterion
     mf.conv_tol_grad = 1e-5  # same with orca tightscf criterion
     mf.max_cycle = 200
@@ -1866,7 +1849,7 @@ if __name__ == "__main__":
     # else:
     #     osstda.spinadapt = False
     #     print('spinadapt is False')
-    osstda.spinadapt = True
+    osstda.spinadapt = False
     osstda.nstates = 12
     osstda.cas = True
     osstda.Emax = 10.0
