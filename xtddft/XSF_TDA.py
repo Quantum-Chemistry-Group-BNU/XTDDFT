@@ -81,6 +81,8 @@ class XSF_TDA():
             self.type_u = True
             if SA is None:
                 self.SA = 0
+            else:
+                self.SA = SA
         else: # ROKS
             self.mo_energy = np.array([mf.mo_energy, mf.mo_energy])
             self.mo_coeff = np.array([mf.mo_coeff, mf.mo_coeff])
@@ -90,6 +92,8 @@ class XSF_TDA():
             self.type_u = False
             if SA is None:
                 self.SA = 3
+            else:
+                self.SA = SA
 
         self.mol = mf.mol
         self.nao = self.mol.nao_nr()
