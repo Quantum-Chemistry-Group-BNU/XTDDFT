@@ -16,6 +16,34 @@ from SF_TDA import SF_TDA_down, mf_info,gen_response_sf,_gen_uhf_tda_response_sf
 #from mc_file import _gen_uhf_tda_response_sf
 au2ev = 27.21138505
 
+def find_top10_abs_numpy(matrix):
+    """
+    使用NumPy找到矩阵中绝对值最大的10个元素及其坐标
+    
+    参数:
+    matrix: numpy数组，形状为(n, m)
+    
+    返回:
+    包含(值, 行索引, 列索引)的列表，按绝对值从大到小排序
+    """
+    # 计算绝对值矩阵
+    abs_matrix = abs(matrix)
+    
+    # 在绝对值矩阵中找最大的10个元素的索引
+    flat_indices = np.argpartition(abs_matrix, -10, axis=None)[-10:]
+    #print(flat_indices)
+    
+    # 按绝对值大小排序这些索引
+    flat_indices = flat_indices[np.argsort(-abs_matrix.ravel()[flat_indices])]
+    
+    # 转换为一维索引为二维坐标
+    rows, cols = np.unravel_index(flat_indices, matrix.shape)
+    
+    # 创建结果列表（使用原始值，不是绝对值）
+    results = [(matrix[r, c], r, c) for r, c in zip(rows, cols)]
+    
+    return results
+
 def get_irrep_occupancy_directly(mol, mf):
     results = {}
     
@@ -67,7 +95,7 @@ def _charge_center(mol):
     
 
 class XSF_TDA():
-    def __init__(self,mf,SA=None,davidson=True,method=0,collinear_samples=60):
+    def __init__(self,mf,SA=None,davidson=True,method=0,collinear_samples=60,calculate_sp=False):
         """SA=0: SF-TDA
            SA=1: only add diagonal block for dA
            SA=2: add all dA except for OO block
@@ -128,7 +156,60 @@ class XSF_TDA():
             print('Omega, alpha, hyb',self.omega, self.alpha, self.hyb)
         except: # HF
             xctype = None
+            self.omega = 0
             self.hyb = 1.0
+        self.calculate_sp = calculate_sp
+        if calculate_sp: # # J. Chem. Theory Comput.2023,19,7606−7616
+            self.get_sp()
+            
+    def get_sp(self): # calculate spin polarization( J. Chem. Theory Comput.2023,19,7606−7616)
+        
+        if self.method == 1:
+            vresp = _gen_uhf_tda_response_sf(self.mf,hermi=0,collinear_samples=self.collinear_samples)
+        else:
+            vresp = gen_response_sf(self.mf,hermi=0,method=self.method)
+        h = self.mf.mo_coeff[:,self.nc:self.nc+1]# triplet reference
+        dm1 = h @ h.T
+        h_ao = vresp(np.array(dm1).reshape((1,dm1.shape[0],dm1.shape[1])))
+        h_mo = np.array(self.mf.mo_coeff.T @ h_ao @ self.mf.mo_coeff).reshape((dm1.shape[0],dm1.shape[1]))
+        lhhl = h_mo[self.nc+self.no,self.nc+self.no]
+        # <iH|Ha> for triplet reference
+        #homo = ao2mo.general(self.mol, [self.mf.mo_coeff[:,:self.nc],self.mf.mo_coeff[:,self.nc:self.nc+1],self.mf.mo_coeff[:,self.nc:self.nc+1],self.mf.mo_coeff[:,self.nc+self.no:]], compact=False) 
+        k_ao = self.mf.get_k(self.mf.mol, dm1)
+        k_mo = self.mf.mo_coeff.T @ k_ao @ self.mf.mo_coeff
+        homo = np.array(k_mo[:self.nc,self.nc+self.no:]).reshape((self.nc,self.nv))
+        # <iL|La>
+        #lumo = ao2mo.general(self.mol, [self.mf.mo_coeff[:,:self.nc],self.mf.mo_coeff[:,self.nc+1:self.nc+2],self.mf.mo_coeff[:,self.nc+1:self.nc+2],self.mf.mo_coeff[:,self.nc+self.no:]], compact=False)
+        l = self.mf.mo_coeff[:,self.nc+1:self.nc+2] # triplet reference
+        dm1 = l @ l.T
+        l_ao = self.mf.get_k(self.mf.mol, dm1)
+        l_mo = self.mf.mo_coeff.T @ l_ao @ self.mf.mo_coeff
+        lumo = np.array(l_mo[:self.nc,self.nc+self.no:]).reshape((self.nc,self.nv))
+        #lhhl = ao2mo.general(self.mol, [self.mf.mo_coeff[:,self.nc+1:self.nc+2],self.mf.mo_coeff[:,self.nc:self.nc+1],self.mf.mo_coeff[:,self.nc:self.nc+1],self.mf.mo_coeff[:,self.nc+1:self.nc+2]], compact=False)
+        homo_res = find_top10_abs_numpy(homo) # find top10 value as (values,ind_i,ind_a)
+        lumo_res = find_top10_abs_numpy(lumo)
+        print('=================================================')
+        print(f'<LH|HL> is {lhhl:9.6f}')
+        print('Top 10 value in <iH|Ha>:')
+        for i in range(10):
+            print(f'{i+1}  {homo_res[i][0]:9.6f}, CV is {homo_res[i][1]+1,homo_res[i][2]+self.nc+self.no+1}')
+        print('Top 10 value in <iL|La>:')
+        for i in range(10):
+            print(f'{i+1} {lumo_res[i][0]:9.6f}, CV is {lumo_res[i][1]+1,lumo_res[i][2]+self.nc+self.no+1}')
+        homo_lumo = homo - lumo
+        homo_lumo_res = find_top10_abs_numpy(homo_lumo)
+        print('Top 10 value in <iH|Ha>-<iL|La>:')
+        for i in range(10):
+            print(f'{i+1} {homo_lumo_res[i][0]:9.6f}, CV is {homo_lumo_res[i][1]+1,homo_lumo_res[i][2]+self.nc+self.no+1}, <iH|Ha> is {homo[homo_lumo_res[i][1],homo_lumo_res[i][2]]:9.6f}, <iL|La> is {lumo[homo_lumo_res[i][1],homo_lumo_res[i][2]]:9.6f}, <iH|Ha>*<iL|La> is {homo[homo_lumo_res[i][1],homo_lumo_res[i][2]] * lumo[homo_lumo_res[i][1],homo_lumo_res[i][2]]:9.6f}')
+        homo_lumo = homo*lumo
+        homo_lumo_res = find_top10_abs_numpy(homo_lumo)
+        print('Top 10 value in <iH|Ha>*<iL|La>:')
+        for i in range(10):
+            print(f'{i+1} {homo_lumo_res[i][0]:9.6f}, CV is {homo_lumo_res[i][1]+1,homo_lumo_res[i][2]+self.nc+self.no+1}, <iH|Ha> is {homo[homo_lumo_res[i][1],homo_lumo_res[i][2]]:9.6f}, <iL|La> is {lumo[homo_lumo_res[i][1],homo_lumo_res[i][2]]:9.6f}, <iH|Ha>*<iL|La> is {homo[homo_lumo_res[i][1],homo_lumo_res[i][2]] * lumo[homo_lumo_res[i][1],homo_lumo_res[i][2]]:9.6f}')
+        #print(f'Sum of <iH|Ha>-<iL|La> is: {np.sum(homo_lumo):9.6f}')
+        #print(f'Sum of |<iH|Ha>-<iL|La>| is: {np.sum(abs(homo_lumo)):9.6f}')
+        #print(f'Sum of (<iH|Ha>-<iL|La>)**2 is: {np.sum(homo_lumo**2):9.6f}')
+        print('=================================================')
         
         
     def get_Amat(self,SA=None,foo=1.0,fglobal=1.0):
@@ -727,7 +808,6 @@ class XSF_TDA():
               +np.einsum('ai,bj,jb,ai->',x_oo_ab,x_ov_ab,Scvab[self.nc:,self.no:],Svcba[:self.no,self.nc:]))# 
         return P_ab
 
-
     def analyse(self):
         nc = self.nc
         nv = self.nv
@@ -761,30 +841,30 @@ class XSF_TDA():
             #print('norm v',np.linalg.norm(tmp_v))
             
 
-            for o,v in zip(* np.where(abs(x_cv_ab)>0.1)):
+            for o,v in zip(* np.where(abs(x_cv_ab)>0.05)):
                 if abs(x_cv_ab[o,v]) > m_excited:
                     m_excited = abs(x_cv_ab[o,v])
                     orb1 = o
                     orb2 = v+self.nc+self.no
-                print(f'{100*x_cv_ab[o,v]**2:3.0f}% CV(ab) {o+1}a -> {v+1+self.nc+self.no}b {x_cv_ab[o,v]:10.5f} ')
-            for o,v in zip(* np.where(abs(x_co_ab)>0.1)):
+                print(f'{100*x_cv_ab[o,v]**2:5.2f}% CV(ab) {o+1}a -> {v+1+self.nc+self.no}b {x_cv_ab[o,v]:10.5f} ')
+            for o,v in zip(* np.where(abs(x_co_ab)>0.05)):
                 if abs(x_co_ab[o,v]) > m_excited:
                     m_excited = abs(x_co_ab[o,v])
                     orb1 = o
                     orb2 = v+self.nc
-                print(f'{100*x_co_ab[o,v]**2:3.0f}% CO(ab) {o+1}a -> {v+1+self.nc}b {x_co_ab[o,v]:10.5f} ')
-            for o,v in zip(* np.where(abs(x_ov_ab)>0.1)):
+                print(f'{100*x_co_ab[o,v]**2:5.2f}% CO(ab) {o+1}a -> {v+1+self.nc}b {x_co_ab[o,v]:10.5f} ')
+            for o,v in zip(* np.where(abs(x_ov_ab)>0.05)):
                 if abs(x_ov_ab[o,v]) > m_excited:
                     m_excited = abs(x_ov_ab[o,v])
                     orb1 = o + self.nc
                     orb2 = v + self.nc+self.no
-                print(f'{100*x_ov_ab[o,v]**2:3.0f}% OV(ab) {o+self.nc+1}a -> {v+1+self.nc+self.no}b {x_ov_ab[o,v]:10.5f} ')
-            for o,v in zip(* np.where(abs(x_oo_ab)>0.1)):
+                print(f'{100*x_ov_ab[o,v]**2:5.2f}% OV(ab) {o+self.nc+1}a -> {v+1+self.nc+self.no}b {x_ov_ab[o,v]:10.5f} ')
+            for o,v in zip(* np.where(abs(x_oo_ab)>0.05)):
                 if abs(x_oo_ab[o,v]) > m_excited:
                     m_excited = abs(x_oo_ab[o,v])
                     orb1 = o + self.nc
                     orb2 = v + self.nc
-                print(f'{100*x_oo_ab[o,v]**2:3.0f}% OO(ab) {o+nc+1}a -> {v+1+self.nc}b {x_oo_ab[o,v]:10.5f} ')
+                print(f'{100*x_oo_ab[o,v]**2:5.2f}% OO(ab) {o+nc+1}a -> {v+1+self.nc}b {x_oo_ab[o,v]:10.5f} ')
             if self.mol.groupname != 'C1':
                 sym = self.calculate_irrep(orb1,orb2)
             else:
@@ -809,8 +889,9 @@ class XSF_TDA():
             else:
                 print(f'Excited state {nstate+1} {self.e[nstate]*27.21138505:10.5f} eV {self.e[nstate]+self.mf.e_tot:11.8f} Hartree {sym}')
 
+            print(f'CV(1):{100*((x_cv_ab**2).sum()):6.3f}%, CO(1):{100*((x_co_ab**2).sum()):6.3f}%, OV(1):{100*((x_ov_ab**2).sum()):6.3f}%, OO(1):{100*((x_oo_ab**2).sum()):6.3f}%')
 
-            print('  ')
+            print('========================================')
         return Ds,syms
     
     def recoder(self): # pec for HF molecule in 6-31G
@@ -925,6 +1006,7 @@ class XSF_TDA():
         D[:,self.nc:,:self.no] += oo1
         
         return D.reshape((nstates,-1))
+        
     
     def gen_response_sf_delta_A(self,hermi=0,max_memory=None): # only \Delta A
         mf = self.mf
@@ -1027,10 +1109,11 @@ class XSF_TDA():
             factor4 = 1/np.sqrt(2*si*(2*si-1))
             
         #@profile
-        def vind(zs0): # vector-matrix product for indexed operations
+        def vind(zs0,sp=False): # vector-matrix product for indexed operations
             ndim0,ndim1 = ndim # ndom0:numuber of alpha orbitals, ndim1:number of beta orbitals
             orbo,orbv = orbov # mo_coeff for alpha and beta
-            start_t = time.time()
+            #start_t = time.time()
+            #print(zs0.shape)
 
             if self.re:
                 oo = np.zeros((np.array(zs0).shape[0],no*no-1)) # get oo from zs0, which is no*no-1
@@ -1055,15 +1138,15 @@ class XSF_TDA():
             #print('zs.shape ',zs.shape)
             vs = np.zeros_like(zs)
             dmov = lib.einsum('xov,qv,po->xpq', zs,orbv.conj(), orbo,optimize=True) # (x,nmo,nmo)
+            #print('dmov.shape',dmov.shape)
             v1ao = vresp(np.asarray(dmov))   # with density and get response function
             vs += lib.einsum('xpq,po,qv->xov', v1ao, orbo.conj(), orbv,optimize=True) # (-1,nocca,nvirb)
-            #np.save('v1_t.npy',v1[:,nc:,no:])
-            #vs += np.einsum('ij,ab,xjb->xia',delta_ij,fockB[noccb:,noccb:],zs)-\
-            #       np.einsum('ab,ij,xjb->xia',delta_ab,fockA[:nocca,:nocca],zs)
             vs += np.einsum('ab,xib->xia',fockB[noccb:,noccb:],zs,optimize=True)-\
                    np.einsum('ij,xja->xia',fockA[:nocca,:nocca],zs,optimize=True)
+                
+            
             vs_dA = np.zeros_like(vs)
-            end_t = time.time()
+            #end_t = time.time()
             #print(f'USF times use {(end_t-start_t)/3600} hours')
 
             if self.SA > 0:
@@ -1089,6 +1172,7 @@ class XSF_TDA():
                 v1_co1_k = np.einsum('xpq,po,qv->xov',v1ao_co1_k,orbo.conj(), orbv,optimize=True)
                 v1_ov1_k = np.einsum('xpq,po,qv->xov',v1ao_ov1_k,orbo.conj(), orbv,optimize=True)
                 v1_oo1_k = np.einsum('xpq,po,qv->xov',v1ao_oo1_k,orbo.conj(), orbv,optimize=True)
+                #print('v1_cv1_k',v1_cv1_k)
 
                 # cv1 - cv1
                 #vs[:,:nc,no:] += (np.einsum('ji,ab,xjb->xia',iden_C,fockB_hf[nc+no:,nc+no:],zs[:,:nc,no:])-\
@@ -1137,6 +1221,11 @@ class XSF_TDA():
                 vs_dA[:,:nc,no:] += foo*(-(factor2-1)*(v1_oo1_k[:,:nc,no:]) + \
                                   (factor2/(2*si))*(np.einsum('ia,xvv->xia',fockB_hf[:nc,nc+no:],zs[:,nc:,:no])-\
                                                     np.einsum('ia,xvv->xia',fockA_hf[:nc,nc+no:],zs[:,nc:,:no])))
+                #self.sp_hh = v1_oo1_k[:,:nc,no:no+1] # for triplet reference state
+                #self.sp_ll = v1_oo1_k[:,:nc,no+1:]
+                #print('<iH|Ha> and <iL|La>')
+                #print(v1_oo1_k[:,:nc,no:no+1],v1_oo1_k[:,:nc,no+1:])
+                #print('v1_oo_k',v1_oo1_k)
                 vs_dA[:,nc:,:no] += foo*(-(factor2-1)*(v1_cv1_k[:,nc:,:no]) + \
                                   (factor2/(2*si))*(np.einsum('vw,ia,xia->xvw',iden_O,fockB_hf[:nc,nc+no:],zs[:,:nc,no:])-\
                                                     np.einsum('vw,ia,xia->xvw',iden_O,fockA_hf[:nc,nc+no:],zs[:,:nc,no:])))
@@ -1182,13 +1271,13 @@ class XSF_TDA():
             else:
                 new_hx = hx.copy()
             #print('hx ',hx.shape)
-            debug = False
-            if debug:
-                self.hx = hx
-                if self.re:
-                    self.debug_hx_dav(hx)
-                else:
-                    self.debug_hx(hx)
+            #debug = False
+            #if debug:
+            #    self.hx = hx
+            #    if self.re:
+            #        self.debug_hx_dav(hx)
+            #    else:
+            #        self.debug_hx(hx)
             return new_hx
         return vind, hdiag
     
@@ -1372,6 +1461,8 @@ class XSF_TDA():
                               max_cycle=1000)
         end_time = time.time()
         #print(f'davidson time use {(end_time-end_t)/3600} hours')
+        #if self.calculate_sp:
+        #    _ = vind(x1,sp=True)
         self.converged = converged
         self.e = e
         self.v = np.array(x1).T
@@ -1398,7 +1489,7 @@ class XSF_TDA():
         tmp_A = tmp_A[:, kept]
         return tmp_A
             
-    def kernel(self, nstates=1,remove=None,frozen=None,foo=1.0,d_lda=0.3,fglobal=None):
+    def kernel(self, nstates=1,remove=None,frozen=None,foo=1.0,d_lda=0.3,fglobal=None,fit=True):
         if remove is None:
             if np.array(self.mf.mo_coeff).ndim==3: # UKS
                 self.re = False
@@ -1414,7 +1505,7 @@ class XSF_TDA():
             else:
                 cx = self.hyb + (self.alpha-self.hyb)*math.erf(self.omega) 
             fglobal = (1-d_lda)*cx + d_lda
-            if self.method == 1:
+            if self.method == 1 and fit:
                 fglobal = fglobal*4*(cx-0.5)**2
         if self.re:
             print('fglobal',fglobal)
@@ -1469,7 +1560,7 @@ if __name__ == '__main__':
     mf.xc = 'bhandhlyp'
     mf.kernel()
     sf_tda = XSF_TDA(mf)
-    e0, values = sf_tda.kernel(nstates=10)
+    e0, values = sf_tda.kernel(nstates=10,remove=True)
     print('excited energy ',e0)
     print('Reference energy: -2.58159612  1.94501967  2.0441558   2.04415705  3.55556409  4.0395836 4.07260624  4.07260634  4.09542032  4.09542242')
 
