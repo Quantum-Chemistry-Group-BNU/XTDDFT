@@ -12,10 +12,8 @@ from typing import Optional, Union
 from pyscf import scf, dft
 from opt_einsum import contract as einsum
 
-from utils import unit
-from xtddft.XTDA import TDM_GSS, TDM_S
-from xtddft.SF_TDA import TDM_S1
-from xtddft.XSF_TDA import TDM_S_1
+from xtddft.utils import unit
+from x2c_hamiltonian.driver.tdm import TDM_GSS, TDM_S, TDM_S1, TDM_S_1
 
 def progress_bar(current, total, start_time, bar_length=30):
     fraction = current / total
@@ -32,16 +30,39 @@ def progress_bar(current, total, start_time, bar_length=30):
     )
     sys.stdout.flush()
 
+from sympy import Rational
 from sympy.physics.wigner import wigner_3j
+
+def _to_halfint(value, tol=1e-8):
+    '''
+    Convert a float-like spin quantum number to an exact Sympy half-integer.
+    '''
+    value = float(value)
+    twice = round(2 * value)
+    if abs(2 * value - twice) > tol:
+        raise ValueError(f"expecting integer or half-integer, got {value}")
+    return Rational(int(twice), 2)
+
 def w(S,M,Sprime,Mprime):
     '''
     Calculate w(S,M,S',M') geo-factor by using Sympy
     '''
-    if abs(wigner_3j(S,1,Sprime,-S,S-Sprime,Sprime).doit().evalf())<1e-9:
+    S = _to_halfint(S)
+    M = _to_halfint(M)
+    Sprime = _to_halfint(Sprime)
+    Mprime = _to_halfint(Mprime)
+
+    phase_exp = S - M
+    if phase_exp.q != 1:
+        raise ValueError(f"S-M must be an integer, got {phase_exp}")
+    phase = -1 if phase_exp.p % 2 else 1
+
+    denom = wigner_3j(S,1,Sprime,-S,S-Sprime,Sprime)
+    if abs(float(denom.doit().evalf()))<1e-9:
         return 0.
     else:
-        return (-1)**(S-M) * (wigner_3j(S,1,Sprime,-M,M-Mprime,Mprime) \
-                                    / wigner_3j(S,1,Sprime,-S,S-Sprime,Sprime)).evalf()
+        num = wigner_3j(S,1,Sprime,-M,M-Mprime,Mprime)
+        return float((phase * num / denom).evalf())
 
 def symm_matrix(h):
     '''
@@ -69,12 +90,12 @@ class SI_driver():
             Vso: numpy.ndarray = None,
             ngs: Optional[Union[int, bool]] = 1,
             states:dict = {},
-            cal_osc:bool = 0,
+            cal_osc:bool = False,
     ) -> None:
         super().__init__()
         self.mf = mf
         self.mol = mf.mol
-        self.cal_osc = cal_osc
+        self.cal_osc = bool(cal_osc)
         # Spin and corresponding relationship
         self.S = S
         assert self.S == self.mol.spin/2.

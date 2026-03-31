@@ -40,9 +40,9 @@ def soc_mf(mf):
     state_dict['|S->'] = []
 
     # |S->
-    from xtddft.XSF_TDA import SA_SF_TDA
+    from xtddft.XSF_TDA import XSF_TDA
     print(f"{'='*15} Perform SF-down-TDA calculation {'='*15}")
-    xsf_tda = SA_SF_TDA(mf,davidson=1)
+    xsf_tda = XSF_TDA(mf,davidson=1)
     xsf_tda.nstates = 20
     xsf_tda.kernel(nstates = xsf_tda.nstates, remove = 1)
     em = xsf_tda.e
@@ -64,7 +64,7 @@ def soc_mf(mf):
     print(f"Excited states |S-⟩:")
     for i in range(0,em.shape[0],1):
         print(f"No.{i:3d} Esf={(em[i]*ha2eV):.5f} eV, Eex={(em[i]-em[0])*ha2eV:.5f}")
-    breakpoint()
+    # breakpoint()
 
     for i in range(0,len(em),1):
         state_dict['|S->'].append((em[i], xm[:,i]))
@@ -73,14 +73,14 @@ def soc_mf(mf):
     from xtddft.XTDA import XTDA
     print(f"{'='*15} Perform XTDA calculation {'='*15}")
     xtda= XTDA(mol,mf,basis='tensor')
-    xtda.nstates = 40
+    xtda.nstates = 20
     xtda.kernel()
     eo = xtda.e / ha2eV # whb's code gives energy in eV
     xo = xtda.v
     print(f"Excited states |So⟩:")
     for i in range(0,xtda.nstates,1):
         print(f"No.{i:3d} Esf={xtda.e[i]:.5f} eV, Eex={(xtda.e[i]-xtda.e[0]):.5f}")
-    breakpoint()
+    # breakpoint()
 
     for i in range(0,len(eo),1):
         state_dict['|So>'].append((eo[i], xo[:,i]))
@@ -90,14 +90,14 @@ def soc_mf(mf):
     print(f"{'='*15} Perform SF-up-TDA calculation {'='*15}")
     sf_tda = SF_TDA(mf,isf=1,davidson=0)
     sf_tda.nstates = 20
-    sf_tda.kernel()
+    sf_tda.kernel(nstates=sf_tda.nstates)
     ep = sf_tda.e[:sf_tda.nstates]
     xp = sf_tda.v[:,:sf_tda.nstates]
     sf_tda.analyse()
     print(f"Excited states |S+⟩:")
     for i in range(0,ep.shape[0],1):
         print(f"No.{i:3d} Esf={(ep[i]*ha2eV):.5f} eV, Eex={(ep[i]-ep[0])*ha2eV:.5f}")
-    breakpoint()
+    # breakpoint()
 
     for i in range(0,len(ep),1):
         state_dict['|S+>'].append((ep[i], xp[:,i]))
@@ -112,15 +112,16 @@ def soc_mf(mf):
     mysi = SI_driver(mf=mf,
                     S=mf.mol.spin/2,
                     Vso=VsoDKH1_a,
-                    ngs=0,
+                    ngs=1,
                     states=state_dict,
+                    cal_osc=True,
                     )
     mysi.kernel(print=40)
     # mysi.print_hso()
 
 mol = gto.M(
     atom = 'As 0 0 0',
-    basis = 'cc-pVTZ-DK',
+    basis = 'aug-cc-pVTZ-DK',
     verbose=6,
     symmetry='D2h',
     charge=0,

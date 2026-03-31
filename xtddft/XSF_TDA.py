@@ -10,7 +10,7 @@ from pyscf.symm import direct_prod
 
 #from line_profiler import profile
 
-from SF_TDA import SF_TDA_down, mf_info,gen_response_sf,_gen_uhf_tda_response_sf,get_ab_sf
+from .SF_TDA import SF_TDA_down, mf_info,gen_response_sf,_gen_uhf_tda_response_sf,get_ab_sf
 #import sys
 #sys.path.append('/home/lenovo2/usrs/zhw/software/test_git_file')
 #from mc_file import _gen_uhf_tda_response_sf
