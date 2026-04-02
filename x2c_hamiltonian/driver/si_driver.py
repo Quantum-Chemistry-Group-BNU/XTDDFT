@@ -74,9 +74,15 @@ States_list = ['|GS>', '|S->', '|So>', '|S+>']
 
 class SI_driver():
     '''
-    Input states: dict
-    should be key in '|GS>', '|S->', '|So>', '|S+>'
-    and value is list of tuple (e(in Hartree), X(CI coefficient))
+    Args:
+        mf: RHF/ROHF/RKS/ROKS (class in PySCF)
+        S: spin (=S=Ms) of reference state
+        Vso: electorn intergal (see Mol. Phys. 111 (24), 3741-3755)
+        ngs: consider reference or not
+        states: Input states: dict
+                should be key in '|GS>', '|S->', '|So>', '|S+>'
+                and value is list of tuple (e(in Hartree), X(CI coefficient))
+        cal_osc: calculate oscillator strength or not.
     '''
     def __init__(
             self,
@@ -118,7 +124,7 @@ class SI_driver():
         # calculate nc, no, nv and corresponding slice
         self.cal_dims()
 
-    def kernel(self,print=100):
+    def kernel(self,printnum=100):
         '''
         State interaction
         0. Do a SI calculation, return eso, vso and hso.
@@ -143,7 +149,7 @@ class SI_driver():
         self.codetime = time2-time0
         logging.info(f"End diagonalization, cost time {time2-time1:.2f}s")
         logging.info(f"End SI calculation, cost time {self.codetime:.2f}s")
-        self.summary(print)
+        self.summary(printnum)
         # self.summary_osc(20)
         return self.eso, self.vso
     
@@ -351,13 +357,13 @@ class SI_driver():
             logging.debug(f"state={L_index}, begin={L_dim}, {int(L_Mnum)}-M, foot-length={L_length}")
         return (L_pos, R_pos)
 
-    def cal_pso_hso(self,L_pos,R_pos):
+    def cal_pos_hso(self,L_pos,R_pos):
         '''
         Given position in hso (L_pos,R_pos)
         Return the quantum number (S,M,i,igs) of bra and ket,
         which is correspondig to matrix in func `cal_hso_pos`
         '''
-        return (*self.cal_pso(L_pos), *self.cal_pso(R_pos))
+        return (*self.cal_pos(L_pos), *self.cal_pos(R_pos))
     
     def cal_pos(self,pos):
         igs = 0

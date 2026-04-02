@@ -116,12 +116,20 @@ def soc_mf(mf):
                     states=state_dict,
                     cal_osc=True,
                     )
-    mysi.kernel(print=40)
+    mysi.kernel(printnum=40)
+    # one can print all hso value use
     # mysi.print_hso()
+    # print hso ⟨GS 1.5 1|hso|S- 0.5 1⟩:
+    # mysi.print_hso_local((3/2,3/2,1,1),(1/2,1/2,1,0))
+    # (3/2,3/2,1,1),(1/2,1/2,1,0) is (SL, ML, iL, igsL),(SR, MR, iR, igsR) see func `mysi.print_hso_local`
+
+    mysi.summary_osc(printnum=20)
+    # one can print osc between state(after SI calculation) 0,1 use:
+    # mysi.print_osc_local(0,1)
 
 mol = gto.M(
     atom = 'As 0 0 0',
-    basis = 'aug-cc-pVTZ-DK',
+    basis = 'cc-pVDZ',
     verbose=6,
     symmetry='D2h',
     charge=0,
