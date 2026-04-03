@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xtddft"
+version = "0.1.0"
+description = "Spin-adapted time-dependent density functional theory for open-shell systems"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [
+  { name = "XTDDFT developers" },
+]
+dependencies = [
+  "numpy",
+  "scipy",
+  "pandas",
+  "pyscf",
+  "joblib",
+  "psutil",
+]
+
+[project.optional-dependencies]
+gpu = [
+  "cupy",
+  "gpu4pyscf",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["xtddft*", "x2c_hamiltonian*"]
+namespaces = true
