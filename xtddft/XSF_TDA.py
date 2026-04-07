@@ -10,7 +10,7 @@ from pyscf.symm import direct_prod
 
 #from line_profiler import profile
 
-from .SF_TDA import SF_TDA_down, mf_info,gen_response_sf,_gen_uhf_tda_response_sf,get_ab_sf
+from .SF_TDA import SF_TDA_down, mf_info,gen_response_sf,_gen_uhf_tda_response_sf,get_ab_sf,deal_v_davidson
 #import sys
 #sys.path.append('/home/lenovo2/usrs/zhw/software/test_git_file')
 #from mc_file import _gen_uhf_tda_response_sf
@@ -92,6 +92,51 @@ def _charge_center(mol):
     charges = mol.atom_charges()
     coords  = mol.atom_coords()
     return np.einsum('z,zr->r', charges, coords)/charges.sum()
+
+def convert(A_mat,nc,no,nv): # change to cv|co|ov|oo type from nvir|nvir|nvir|nvir
+
+    cv = np.zeros((nc*nv,nc*nv))
+    co = np.zeros((nc*no,nc*no))
+    ov = np.zeros((no*nv,no*nv))
+    oo = np.zeros((no*no,no*no))
+    cv_co = np.zeros((nc*nv,nc*no))
+    cv_ov = np.zeros((nc*nv,no*nv))
+    cv_oo = np.zeros((nc*nv,no*no))
+    co_ov = np.zeros((nc*no,no*nv))
+    co_oo = np.zeros((nc*no,no*no))
+    ov_oo = np.zeros((no*nv,no*no))
+    nvir = no+nv
+    passed = nc*nvir
+    for i in range(nc): # cv-cv co-co
+        for j in range(nc):
+            cv[i*nv:(i+1)*nv,nv*j:nv*(j+1)] = A_mat[i*nvir+no:i*nvir+no+nv,no*(j+1)+j*nv:no*(j+1)+nv+j*nv]
+            cv_co[i*nv:(i+1)*nv,no*j:no*(j+1)] = A_mat[i*nvir+no:i*nvir+nv+no,j*nvir:no+j*nvir]
+            co[i*no:(i+1)*no,no*j:no*(j+1)] = A_mat[i*nvir:i*nvir+no,j*nvir:nvir*j+no]
+    for i in range(no): # ov-ov oo-oo
+        for j in range(no):
+            ov[i*nv:(i+1)*nv,nv*j:nv*(j+1)] = A_mat[passed+i*nvir+no:passed+i*nvir+no+nv,passed+no+j*nvir:passed+no+nv+j*nvir]
+            oo[i*no:(i+1)*no,no*j:no*(j+1)] = A_mat[passed+i*nvir:passed+i*nvir+no,passed+j*nvir:passed+no+j*nvir]
+            ov_oo[i*nv:(i+1)*nv,no*j:no*(j+1)] = A_mat[passed+i*nvir+no:passed+i*nvir+no+nv,passed+j*nvir:passed+no+j*nvir]
+    for i in range(nc):
+        for j in range(no):
+            cv_ov[i*nv:(i+1)*nv,nv*j:nv*(j+1)] = A_mat[i*nvir+no:i*nvir+no+nv,passed+no+j*nvir:passed+no+nv+j*nvir]
+            cv_oo[i*nv:(i+1)*nv,no*j:no*(j+1)] = A_mat[i*nvir+no:i*nvir+no+nv,passed+j*nvir:passed+no+j*nvir]
+            co_ov[i*no:(i+1)*no,nv*j:nv*(j+1)] = A_mat[i*nvir:i*nvir+no,passed+j*nvir+no:passed+nvir*j+no+nv]
+            co_oo[i*no:(i+1)*no,no*j:no*(j+1)] = A_mat[i*nvir:i*nvir+no,passed+j*nvir:passed+nvir*j+no]
+    cv_all = np.hstack((cv, cv_co, cv_ov,cv_oo))
+    co_all = np.hstack((co,co_ov,co_oo))
+    ov_all = np.hstack((ov,ov_oo))
+    new_mat = np.zeros_like(A_mat)
+    new_mat[:nc*nv] = cv_all
+    new_mat[nc*nv:nc*nv+nc*no,nc*nv:] = co_all
+    new_mat[nc*nv+nc*no:nc*nv+nc*no+no*nv,nc*nv+nc*no:] = ov_all
+    new_mat[nc*nv+nc*no+no*nv:,nc*nv+nc*no+no*nv:] = oo
+    tmp = np.zeros_like(A_mat)
+    upper_with_diag = np.triu(new_mat, k=0)
+    upper_without_diag = np.triu(new_mat,k=1)
+    tmp += upper_with_diag
+    tmp += upper_without_diag.T
+    return tmp
     
 
 class XSF_TDA():
@@ -244,11 +289,13 @@ class XSF_TDA():
         fockB_V = fockB[nc+no:,nc+no:]
         dim = (nc+no)*(nv+no)
         Amat = np.zeros((dim,dim))
+        #print('dim ',dim)
         if self.method == 0:
             sf_tda = SF_TDA_down(mf,method=self.method)
             sf_tda_A = sf_tda.get_Amat() 
         elif self.method == 1:
             sf_tda_A = get_ab_sf(mf).reshape(((nc+no)*(no+nv),(nc+no)*(no+nv)))
+            sf_tda_A = convert(sf_tda_A,nc,no,nv)
         Amat = np.zeros_like(sf_tda_A)
         dim1 = nc*nv
         dim2 = dim1+nc*no
