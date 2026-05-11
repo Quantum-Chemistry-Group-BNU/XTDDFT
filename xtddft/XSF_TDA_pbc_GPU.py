@@ -602,7 +602,7 @@ class XSF_TDA_pbc_GPU:
             _asnumpy(x0),
             _asnumpy(hdiag),
             tol=1e-8, lindep=1e-9,
-            nroots=self.nstates, max_cycle=1000,
+            nroots=self.nstates, max_cycle=1000, verbose=5
         )
         self.converged = converged
         self.e = cp.asarray(e)
@@ -651,6 +651,248 @@ class XSF_TDA_pbc_GPU:
         return _asnumpy(self.e * au2ev), self.v
 
 
+class XSF_TDA_pbc_GPU_BatchedDeltaJK(XSF_TDA_pbc_GPU):
+    """Experimental variant that batches the four delta-A J/K builds.
+
+    The default solver evaluates cv/co/ov/oo delta-A response blocks with four
+    separate ``get_jk`` calls.  This class keeps the same algebra but
+    concatenates those transition density matrices along the batch dimension,
+    calls ``get_jk`` once, and then slices the result back into the original
+    blocks.  Use ``validate_batched_delta_jk`` to compare one matvec against
+    the parent implementation before relying on it for production runs.
+    """
+
+    def _delta_a_jk_blocks_batched(
+        self, vresp_hf, cv1_mo, co1_mo, ov1_mo, oo1_mo
+    ):
+        ntrial = cv1_mo.shape[0]
+        dm_batch = cp.concatenate([cv1_mo, co1_mo, ov1_mo, oo1_mo], axis=0)
+        vj_batch, vk_batch = vresp_hf(dm_batch)
+        vj_batch = _asarray(vj_batch)
+        vk_batch = _asarray(vk_batch)
+        return (
+            vj_batch[:ntrial],
+            vk_batch[:ntrial],
+            vj_batch[ntrial:2*ntrial],
+            vk_batch[ntrial:2*ntrial],
+            vj_batch[2*ntrial:3*ntrial],
+            vk_batch[2*ntrial:3*ntrial],
+            vj_batch[3*ntrial:],
+            vk_batch[3*ntrial:],
+        )
+
+    def gen_tda_operation_sf(self, foo, fglobal):
+        mf = self.mf
+        mo_energy, mo_occ, mo_coeff = self.mo_energy, self.mo_occ, self.mo_coeff
+        nc, nv, no = self.nc, self.nv, self.no
+        nvir = no + nv
+        nocc = nc + no
+        si = no / 2.0
+        ndim = (nocc, nvir)
+        orboa = mo_coeff[0][:, self.occidx_a]
+        orbvb = mo_coeff[1][:, self.viridx_b]
+        orbov = (orboa, orbvb)
+
+        fockA, fockB = _get_mo_fock(mf, mo_coeff, mo_occ)
+        e_ia = (mo_energy[1][self.viridx_b, None] - mo_energy[0][self.occidx_a]).T
+        hdiag = e_ia.ravel()
+        if self.re:
+            oo = cp.zeros(no * no)
+            for i in range(no):
+                oo[i*no:(i+1)*no] = hdiag[nc*nvir+nvir*i:nc*nvir+no+nvir*i]
+            new_oo = cp.einsum("x,xy->y", oo, self.vects)
+            new_hdiag = cp.zeros(len(hdiag) - 1)
+            new_hdiag[:nc*nvir] = hdiag[:nc*nvir]
+            for i in range(no - 1):
+                new_hdiag[nc*nvir+i*nvir:nc*nvir+no+i*nvir] = new_oo[i*no:(i+1)*no]
+                new_hdiag[nc*nvir+no+i*nvir:nc*nvir+no+nv+i*nvir] = hdiag[nc*nvir+no+i*nvir:nc*nvir+no+nv+i*nvir]
+            new_hdiag[nc*nvir+(no-1)*nvir:nc*nvir+(no-1)*nvir+no-1] = new_oo[(no-1)*no:]
+            new_hdiag[nc*nvir+(no-1)*nvir+no-1:] = hdiag[nc*nvir+(no-1)*nvir+no:]
+            hdiag = new_hdiag
+
+        vresp = gen_response_sf(
+            mf, hermi=0, method=self.method,
+            collinear_samples=self.collinear_samples
+        )
+
+        if self.SA > 0:
+            vresp_hf = self.gen_response_sf_delta_A(hermi=0)
+            fockA_hf, fockB_hf = _get_hf_fock_mo_gamma(mf, mo_coeff, mo_occ)
+            factor1 = cp.sqrt((2*si + 1)/(2*si)) - 1
+            factor2 = cp.sqrt((2*si + 1)/(2*si - 1))
+            factor3 = cp.sqrt((2*si)/(2*si - 1)) - 1
+            factor4 = 1 / cp.sqrt(2*si*(2*si - 1))
+
+        def vind(zs0):
+            zs0 = _asarray(zs0)
+            if self.re:
+                oo = cp.zeros((zs0.shape[0], no*no - 1))
+                for i in range(no - 1):
+                    oo[:, i*no:(i+1)*no] = zs0[:, nc*nvir+i*nvir:nc*nvir+no+i*nvir]
+                oo[:, (no-1)*no:] = zs0[:, nc*nvir+(no-1)*nvir:nc*nvir+(no-1)*nvir+no-1]
+                new_oo = cp.einsum("xy,ny->nx", self.vects, oo)
+                new_zs0 = cp.zeros((zs0.shape[0], zs0.shape[1] + 1))
+                new_zs0[:, :nc*nvir] = zs0[:, :nc*nvir]
+                for i in range(no - 1):
+                    new_zs0[:, nc*nvir+i*nvir:nc*nvir+no+i*nvir] = new_oo[:, i*no:(i+1)*no]
+                    new_zs0[:, nc*nvir+no+i*nvir:nc*nvir+no+nv+i*nvir] = zs0[:, nc*nvir+no+i*nvir:nc*nvir+no+nv+i*nvir]
+                new_zs0[:, nc*nvir+(no-1)*nvir:nc*nvir+no+(no-1)*nvir] = new_oo[:, -no:]
+                new_zs0[:, nc*nvir+(no-1)*nvir+no:] = zs0[:, nc*nvir+(no-1)*nvir+no-1:]
+            else:
+                new_zs0 = zs0.copy()
+
+            zs = new_zs0.reshape(-1, *ndim)
+            orbo, orbv = orbov
+            tmp = cp.matmul(zs, orbv.conj().T)
+            dmov = cp.matmul(orbo, tmp)
+            v1ao = vresp(dmov)
+            tmp = cp.matmul(v1ao, orbv)
+            vs = cp.matmul(orbo.conj().T, tmp)
+
+            vs += cp.einsum("ab,xib->xia", fockB[self.nocc_b:, self.nocc_b:], zs, optimize=True)
+            vs -= cp.einsum("ij,xja->xia", fockA[:self.nocc_a, :self.nocc_a], zs, optimize=True)
+            vs_dA = cp.zeros_like(vs)
+
+            if self.SA > 0:
+                cv1 = zs[:, :nc, no:]
+                co1 = zs[:, :nc, :no]
+                ov1 = zs[:, nc:, no:]
+                oo1 = zs[:, nc:, :no]
+
+                cv1_mo = cp.einsum("xov,qv,po->xpq", cv1, orbvb[:, no:].conj(), orboa[:, :nc], optimize=True)
+                co1_mo = cp.einsum("xov,qv,po->xpq", co1, orbvb[:, :no].conj(), orboa[:, :nc], optimize=True)
+                ov1_mo = cp.einsum("xov,qv,po->xpq", ov1, orbvb[:, no:].conj(), orboa[:, nc:nc+no], optimize=True)
+                oo1_mo = cp.einsum("xov,qv,po->xpq", oo1, orbvb[:, :no].conj(), orboa[:, nc:nc+no], optimize=True)
+
+                (
+                    v1_cv_j, v1_cv_k, v1_co_j, v1_co_k,
+                    v1_ov_j, v1_ov_k, v1_oo_j, v1_oo_k,
+                ) = self._delta_a_jk_blocks_batched(
+                    vresp_hf, cv1_mo, co1_mo, ov1_mo, oo1_mo
+                )
+                del v1_cv_j, v1_oo_j
+
+                v1_co_j = cp.einsum("xpq,po,qv->xov", v1_co_j, orbo.conj(), orbv, optimize=True)
+                v1_ov_j = cp.einsum("xpq,po,qv->xov", v1_ov_j, orbo.conj(), orbv, optimize=True)
+                v1_cv_k = cp.einsum("xpq,po,qv->xov", v1_cv_k, orbo.conj(), orbv, optimize=True)
+                v1_co_k = cp.einsum("xpq,po,qv->xov", v1_co_k, orbo.conj(), orbv, optimize=True)
+                v1_ov_k = cp.einsum("xpq,po,qv->xov", v1_ov_k, orbo.conj(), orbv, optimize=True)
+                v1_oo_k = cp.einsum("xpq,po,qv->xov", v1_oo_k, orbo.conj(), orbv, optimize=True)
+
+                vs_dA[:, :nc, no:] += (
+                    cp.einsum("ab,xib->xia", fockB_hf[nc+no:, nc+no:], zs[:, :nc, no:], optimize=True)
+                    - cp.einsum("ab,xib->xia", fockA_hf[nc+no:, nc+no:], zs[:, :nc, no:], optimize=True)
+                    + cp.einsum("ji,xja->xia", fockB_hf[:nc, :nc], zs[:, :nc, no:], optimize=True)
+                    - cp.einsum("ji,xja->xia", fockA_hf[:nc, :nc], zs[:, :nc, no:], optimize=True)
+                ) / (2*si)
+                vs_dA[:, :nc, :no] += -v1_co_j[:, :nc, :no] / (2*si - 1) + (
+                    cp.einsum("ji,xju->xiu", fockB_hf[:nc, :nc], zs[:, :nc, :no], optimize=True)
+                    - cp.einsum("ji,xju->xiu", fockA_hf[:nc, :nc], zs[:, :nc, :no], optimize=True)
+                ) / (2*si - 1)
+                vs_dA[:, nc:, no:] += -v1_ov_j[:, nc:, no:] / (2*si - 1) + (
+                    cp.einsum("ab,xub->xua", fockB_hf[nc+no:, nc+no:], zs[:, nc:, no:], optimize=True)
+                    - cp.einsum("ab,xub->xua", fockA_hf[nc+no:, nc+no:], zs[:, nc:, no:], optimize=True)
+                ) / (2*si - 1)
+
+            if self.SA > 1:
+                vs_dA[:, :nc, no:] += factor1 * (-v1_co_k[:, :nc, no:] + cp.einsum("av,xiv->xia", fockB_hf[nc+no:, nc:nc+no], zs[:, :nc, :no], optimize=True))
+                vs_dA[:, :nc, :no] += factor1 * (-v1_cv_k[:, :nc, :no] + cp.einsum("av,xja->xjv", fockB_hf[nc+no:, nc:nc+no], zs[:, :nc, no:], optimize=True))
+                vs_dA[:, :nc, no:] += factor1 * (-v1_ov_k[:, :nc, no:] - cp.einsum("vi,xva->xia", fockA_hf[nc:nc+no, :nc], zs[:, nc:, no:], optimize=True))
+                vs_dA[:, nc:, no:] += factor1 * (-v1_cv_k[:, nc:, no:] - cp.einsum("vi,xib->xvb", fockA_hf[nc:nc+no, :nc], zs[:, :nc, no:], optimize=True))
+                vs_dA[:, :nc, :no] += (v1_ov_j[:, :nc, :no] - v1_ov_k[:, :nc, :no]) / (2*si - 1)
+                vs_dA[:, nc:, no:] += (v1_co_j[:, nc:, no:] - v1_co_k[:, nc:, no:]) / (2*si - 1)
+
+            if self.SA > 2:
+                iden_O = cp.eye(no)
+                vs_dA[:, :nc, no:] += foo * (-(factor2 - 1) * v1_oo_k[:, :nc, no:] + (factor2/(2*si)) * (
+                    cp.einsum("ia,xvv->xia", fockB_hf[:nc, nc+no:], zs[:, nc:, :no], optimize=True)
+                    - cp.einsum("ia,xvv->xia", fockA_hf[:nc, nc+no:], zs[:, nc:, :no], optimize=True)
+                ))
+                vs_dA[:, nc:, :no] += foo * (-(factor2 - 1) * v1_cv_k[:, nc:, :no] + (factor2/(2*si)) * (
+                    cp.einsum("vw,ia,xia->xvw", iden_O, fockB_hf[:nc, nc+no:], zs[:, :nc, no:], optimize=True)
+                    - cp.einsum("vw,ia,xia->xvw", iden_O, fockA_hf[:nc, nc+no:], zs[:, :nc, no:], optimize=True)
+                ))
+                vs_dA[:, :nc, :no] += foo * (
+                    factor3 * (-v1_oo_k[:, :nc, :no] - cp.einsum("iw,xwu->xiu", fockA_hf[:nc, nc:nc+no], zs[:, nc:, :no], optimize=True))
+                    + factor4 * cp.einsum("vw,iu,xvw->xiu", iden_O, fockB_hf[:nc, nc:nc+no], zs[:, nc:, :no], optimize=True)
+                )
+                vs_dA[:, nc:, :no] += foo * (
+                    factor3 * (-v1_co_k[:, nc:, :no] - cp.einsum("iw,xiv->xwv", fockA_hf[:nc, nc:nc+no], zs[:, :nc, :no], optimize=True))
+                    + factor4 * cp.einsum("vw,iu,xiu->xvw", iden_O, fockB_hf[:nc, nc:nc+no], zs[:, :nc, :no], optimize=True)
+                )
+                vs_dA[:, nc:, no:] += foo * (
+                    factor3 * (-v1_oo_k[:, nc:, no:] + cp.einsum("av,xuv->xua", fockB_hf[nc+no:, nc:nc+no], zs[:, nc:, :no], optimize=True))
+                    - factor4 * cp.einsum("vw,au,xvw->xua", iden_O, fockA_hf[nc+no:, nc:nc+no], zs[:, nc:, :no], optimize=True)
+                )
+                vs_dA[:, nc:, :no] += foo * (
+                    factor3 * (-v1_ov_k[:, nc:, :no] + cp.einsum("av,xwa->xwv", fockB_hf[nc+no:, nc:nc+no], zs[:, nc:, no:], optimize=True))
+                    - factor4 * cp.einsum("vw,au,xua->xwv", iden_O, fockA_hf[nc+no:, nc:nc+no], zs[:, nc:, no:], optimize=True)
+                )
+
+            hx = (vs + fglobal * vs_dA).reshape(zs.shape[0], -1)
+            if self.re:
+                new_hx = cp.zeros_like(zs0)
+                new_hx[:, :nc*nvir] += hx[:, :nc*nvir]
+                oo = cp.zeros((zs0.shape[0], no*no))
+                for i in range(no):
+                    oo[:, i*no:(i+1)*no] = hx[:, nc*nvir+i*nvir:nc*nvir+no+i*nvir]
+                new_oo = cp.einsum("xy,nx->ny", self.vects, oo, optimize=True)
+                for i in range(no - 1):
+                    new_hx[:, nc*nvir+i*nvir:nc*nvir+i*nvir+no] = new_oo[:, i*no:(i+1)*no]
+                    new_hx[:, nc*nvir+i*nvir+no:nc*nvir+i*nvir+no+nv] = hx[:, nc*nvir+no+i*nvir:nc*nvir+no+nv+i*nvir]
+                new_hx[:, nc*nvir+(no-1)*nvir:nc*nvir+(no-1)*nvir+no-1] = new_oo[:, (no-1)*no:]
+                new_hx[:, nc*nvir+(no-1)*nvir+no-1:] = hx[:, nc*nvir+(no-1)*nvir+no:]
+                return new_hx
+            return hx
+
+        return vind, hdiag
+
+    def validate_batched_delta_jk(
+        self, ntrial=3, seed=1, foo=1.0, fglobal=None,
+        atol=1e-8, rtol=1e-7
+    ):
+        """Compare batched and parent matvecs on random trial vectors."""
+        if fglobal is None:
+            fglobal = self._default_fglobal()
+        if not hasattr(self, "re"):
+            self.re = not self.type_u
+        if self.re and not hasattr(self, "vects"):
+            self.vects = self.get_vect()
+
+        ref_vind, ref_hdiag = XSF_TDA_pbc_GPU.gen_tda_operation_sf(
+            self, foo=foo, fglobal=fglobal
+        )
+        batched_vind, batched_hdiag = self.gen_tda_operation_sf(
+            foo=foo, fglobal=fglobal
+        )
+        hdiag_diff = float(cp.max(cp.abs(ref_hdiag - batched_hdiag)).get())
+
+        dim = int(batched_hdiag.size)
+        ntrial = min(int(ntrial), dim)
+        rng = cp.random.RandomState(seed)
+        xs = rng.standard_normal((ntrial, dim)).astype(batched_hdiag.dtype, copy=False)
+        ref = ref_vind(xs)
+        batched = batched_vind(xs)
+
+        diff = cp.abs(ref - batched)
+        ref_scale = max(float(cp.max(cp.abs(ref)).get()), 1.0)
+        max_abs = float(cp.max(diff).get())
+        max_rel = max_abs / ref_scale
+        passed = hdiag_diff <= atol and (max_abs <= atol or max_rel <= rtol)
+        result = {
+            "passed": passed,
+            "hdiag_max_abs": hdiag_diff,
+            "matvec_max_abs": max_abs,
+            "matvec_max_rel": max_rel,
+            "ntrial": ntrial,
+            "dimension": dim,
+        }
+        if not passed:
+            raise AssertionError(f"Batched delta-A J/K validation failed: {result}")
+        return result
+
+
+XSF_TDA_BatchedDeltaJK = XSF_TDA_pbc_GPU_BatchedDeltaJK
 XSF_TDA = XSF_TDA_pbc_GPU
 
 

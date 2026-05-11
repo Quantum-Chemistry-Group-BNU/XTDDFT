@@ -6,6 +6,7 @@ from functools import reduce
 import functools
 from pyscf.dft.gen_grid import NBINS
 from pyscf.dft.numint import _dot_ao_ao_sparse,_scale_ao_sparse,_tau_dot_sparse
+from loguru import logger
 
 #import sys
 #sys.path.append('/home/lenovo2/usrs/zhw/software/test_git_file')
@@ -517,10 +518,10 @@ class SF_TDA_up():
                 vxc_a = vxc[0,0]*weight
                 vxc_b = vxc[1,0]*weight
                 fxc_ab = (vxc_a-vxc_b)/(rho0a-rho0b+1e-9)
-                rho_o_a = lib.einsum('rp,pi->ri', ao, self.orbo_a)
+                # rho_o_a = lib.einsum('rp,pi->ri', ao, self.orbo_a)
                 rho_v_a = lib.einsum('rp,pi->ri', ao, self.orbv_a)
                 rho_o_b = lib.einsum('rp,pi->ri', ao, self.orbo_b)
-                rho_v_b = lib.einsum('rp,pi->ri', ao, self.orbv_b)
+                # rho_v_b = lib.einsum('rp,pi->ri', ao, self.orbv_b)
                 rho_ov_b2a = np.einsum('ri,ra->ria', rho_o_b, rho_v_a)
                 #rho_ov_a2b = np.einsum('ri,ra->ria', rho_o_a, rho_v_b)
                 w_ov = np.einsum('ria,r->ria', rho_ov_b2a, fxc_ab)
@@ -545,10 +546,10 @@ class SF_TDA_up():
                 vxc_a = vxc[0,0]*weight #first order derivatives about \rho in \alpha
                 vxc_b = vxc[1,0]*weight #\beta
                 fxc_ab = (vxc_a-vxc_b)/(rho0a[0]-rho0b[0]+1e-9)
-                rho_o_a = lib.einsum('rp,pi->ri', ao[0], self.orbo_a) # (N,i)
+                #rho_o_a = lib.einsum('rp,pi->ri', ao[0], self.orbo_a) # (N,i)
                 rho_v_a = lib.einsum('rp,pi->ri', ao[0], self.orbv_a)
                 rho_o_b = lib.einsum('rp,pi->ri', ao[0], self.orbo_b)
-                rho_v_b = lib.einsum('rp,pi->ri', ao[0], self.orbv_b)
+                #rho_v_b = lib.einsum('rp,pi->ri', ao[0], self.orbv_b)
                 #rho_ov_a2b = np.einsum('ri,ra->ria', rho_o_a, rho_v_b)
                 rho_ov_b2a = np.einsum('ri,ra->ria', rho_o_b, rho_v_a)
                 w_ov = np.einsum('ria,r->ria', rho_ov_b2a, fxc_ab)
@@ -615,19 +616,19 @@ class SF_TDA_down():
         nocc_a = self.orbo_a.shape[1]
         nvir_a = self.orbv_a.shape[1]
         nocc_b = self.orbo_b.shape[1]
-        nvir_b = self.orbv_b.shape[1]
+        #nvir_b = self.orbv_b.shape[1]
         self.nc = nocc_b
         self.nv = nvir_a
         self.no = nocc_a-nocc_b
         
         
     def get_Amat(self):
-        a_a2b = np.zeros((self.nc+self.no,self.nv+self.no,self.nc+self.no,self.nv+self.no))
         nocc_a = self.nc+self.no
         nvir_b = self.nv+self.no
+        a_a2b = np.zeros((nocc_a,nvir_b,nocc_a,nvir_b))  # A matrix
         mol = self.mf.mol
-        delta_ij = np.eye(nocc_a)
-        delta_ab = np.eye(nvir_b)
+        # delta_ij = np.eye(nocc_a)
+        # delta_ab = np.eye(nvir_b)
         dm = self.mf.make_rdm1()
         vhf = self.mf.get_veff(mol, dm)
         h1e = self.mf.get_hcore()
@@ -641,16 +642,14 @@ class SF_TDA_down():
         no = self.no
         
         def add_hf_(a_a2b, hyb=1):
-            
-            #eri_a_b2a = ao2mo.general(mol, [orbo_b,orbo_b,orbv_a,orbv_a], compact=False)
-            eri_mo = ao2mo.general(mol, [self.orbo_a,self.orbo_a,self.orbv_b,self.orbv_b], compact=False)
-
-            #eri_a_b2a = eri_a_b2a.reshape(nocc_b,nocc_b,nvir_a,nvir_a)
+            # get (i_alpha j_alpha | a_beta b_beta)
+            eri_mo = ao2mo.general(mol, [self.orbo_a,self.orbo_a,self.orbv_b,self.orbv_b], compact=False)  
             eri_mo = eri_mo.reshape(nocc_a,nocc_a,nvir_b,nvir_b)
 
             #a_b2a, a_a2b = a
 
             #a_b2a-= np.einsum('ijba->iajb', eri_a_b2a) * hyb
+            # 这是在修hf成分？
             a_a2b -= np.einsum('ijba->iajb', eri_mo) * hyb
             del eri_mo
             
@@ -667,7 +666,7 @@ class SF_TDA_down():
             ni = self.mf._numint
             ni.libxc.test_deriv_order(self.mf.xc, 2, raise_error=True)
             if self.mf.nlc or ni.libxc.is_nlc(self.mf.xc):
-                logger.warn(mf, 'NLC functional found in DFT object.  Its second '
+                logger.warn(self.mf, 'NLC functional found in DFT object.  Its second '
                             'deriviative is not available. Its contribution is '
                             'not included in the response function.')
             omega, alpha, hyb = ni.rsh_and_hybrid_coeff(self.mf.xc, self.mf.mol.spin)
@@ -846,8 +845,6 @@ class SF_TDA_down():
                 self.A = self.get_Amat()
             self.e,self.v = scipy.linalg.eigh(self.A)
         return self.e[:nstates]*ha2eV, self.v[:,:nstates]
-    
-    
     
     
 # code from pyscf-forge to construct multicollinear functional
@@ -1047,7 +1044,7 @@ def nr_uks_fxc_sf_tda_mc(ni, mol, grids, xc_code, dm0, dms, relativity=0, hermi=
 
 
 #construct full A matrix for mulitcollinear function
-def get_ab_sf(mf, mo_energy=None, mo_coeff=None, mo_occ=None, collinear_samples=30):
+def get_ab_sf(mf, mo_energy=None, mo_coeff=None, mo_occ=None, collinear_samples=30, return_both=False):
     r'''A and B matrices for TDDFT response function.
 
     A[i,a,j,b] = \delta_{ab}\delta_{ij}(E_a - E_i) + (ia||bj)
@@ -1272,5 +1269,7 @@ def get_ab_sf(mf, mo_energy=None, mo_coeff=None, mo_occ=None, collinear_samples=
     else:
         add_hf_(a, b)
 
+    if return_both:
+        return a
     return a[1]
 

@@ -423,12 +423,12 @@ def nr_uks_fxc_sf_tda_mc(ni, cell, grids, xc_code, dms, hermi=0,
                 aow = _scale_ao(ao, wv)
                 vmat[i] += ao.conj().T.dot(aow)
             elif xctype == "GGA":
-                wv = cp.einsum("bg,abg->ag", rho1sf, fxc_block * 2.0) * weight
+                wv = cp.einsum("bg,abg->ag", rho1sf, fxc_block * 2.0, optimize=True) * weight
                 wv[0] *= .5
                 aow = _scale_ao(ao[:4], wv[:4])
                 vmat[i] += ao[0].conj().T.dot(aow)
             elif xctype == "MGGA":
-                wv = cp.einsum("bg,abg->ag", rho1sf, fxc_block * 2.0) * weight
+                wv = cp.einsum("bg,abg->ag", rho1sf, fxc_block * 2.0, optimize=True) * weight
                 wv[[0, 4]] *= .5
                 aow = _scale_ao(ao[:4], wv[:4])
                 vmat[i] += ao[0].conj().T.dot(aow)
@@ -601,7 +601,7 @@ def davidson_process(mf, nstates, method, isf=-1):
         lambda xs: _asnumpy(vind(cp.asarray(xs))),
         _asnumpy(x0),
         _asnumpy(hdiag),
-        tol=1e-7, lindep=1e-14, nroots=nroots, max_cycle=3000,
+        tol=1e-7, lindep=1e-14, nroots=nroots, max_cycle=3000, verbose=5
     )
     v = cp.asarray(np.asarray(x1).T)
     if isf == -1:
@@ -655,7 +655,7 @@ class _SpinFlipTDABase:
             lambda xs: _asnumpy(vind(cp.asarray(xs))),
             _asnumpy(x0),
             _asnumpy(hdiag),
-            tol=1e-7, lindep=1e-14, nroots=nstates, max_cycle=3000,
+            tol=1e-7, lindep=1e-14, nroots=nstates, max_cycle=3000, verbose=5
         )
         self.converged = converged
         self.e = cp.asarray(e)
@@ -697,16 +697,66 @@ class SF_TDA_down(_SpinFlipTDABase):
     def _postprocess_davidson_vectors(self, v):
         return _reorder_down_vectors(self.ctx, v)
 
+    def _state_blocks(self, value):
+        nc, nv, no = self.nc, self.nv, self.no
+        x_cv = value[:nc*nv].reshape(nc, nv)
+        x_co = value[nc*nv:nc*nv+nc*no].reshape(nc, no)
+        x_ov = value[nc*nv+nc*no:nc*nv+nc*no+no*nv].reshape(no, nv)
+        x_oo = value[nc*nv+nc*no+no*nv:].reshape(no, no)
+        return x_cv, x_co, x_ov, x_oo
+
+    def _get_overlap_gamma(self):
+        try:
+            ovlp = self.mf.get_ovlp(self.cell, kpt=_get_gamma_kpt(self.mf))
+        except TypeError:
+            try:
+                ovlp = self.mf.get_ovlp(self.cell)
+            except TypeError:
+                ovlp = self.mf.get_ovlp()
+        return _asarray(ovlp)
+
+    def _spin_transfer_overlaps(self):
+        cache = getattr(self, "_spin_transfer_overlap_cache", None)
+        if cache is not None:
+            return cache
+        mo = self.mo_coeff
+        ovlp = self._get_overlap_gamma()
+        mooa = mo[0][:, self.occidx_a]
+        moob = mo[1][:, self.occidx_b]
+        movb = mo[1][:, self.viridx_b]
+        sba_oo = moob.conj().T @ ovlp @ mooa
+        sba_vo = movb.conj().T @ ovlp @ mooa
+        cache = (sba_oo, sba_vo)
+        self._spin_transfer_overlap_cache = cache
+        return cache
+
+    def deltaS2_U(self, nstate):
+        """Estimate Delta<S^2> with alpha/beta MO overlaps for PBC UKS."""
+        sba_oo, sba_vo = self._spin_transfer_overlaps()
+        x_cv, x_co, x_ov, x_oo = self._state_blocks(self.v[:, nstate])
+        x_ba = cp.concatenate(
+            [cp.hstack([x_co, x_cv]), cp.hstack([x_oo, x_ov])],
+            axis=0,
+        ).T
+        p_ab = (
+            cp.einsum("ai,aj,jk,ki", x_ba.conj(), x_ba, sba_oo.T.conj(), sba_oo, optimize=True)
+            - cp.einsum("ai,bi,kb,ak", x_ba.conj(), x_ba, sba_vo.T.conj(), sba_vo, optimize=True)
+            + cp.einsum("ai,bj,jb,ai", x_ba.conj(), x_ba, sba_vo.T.conj(), sba_vo, optimize=True)
+        )
+        return p_ab - self.no + 1
+
+    @staticmethod
+    def _real_float(value):
+        value = np.real_if_close(cp.asnumpy(cp.asarray(value)))
+        return float(np.real(value).item())
+
     def analyse(self):
         nc, nv, no = self.nc, self.nv, self.no
         for nstate in range(self.nstates):
             value = self.v[:, nstate]
-            x_cv = value[:nc*nv].reshape(nc, nv)
-            x_co = value[nc*nv:nc*nv+nc*no].reshape(nc, no)
-            x_ov = value[nc*nv+nc*no:nc*nv+nc*no+no*nv].reshape(no, nv)
-            x_oo = value[nc*nv+nc*no+no*nv:].reshape(no, no)
-            dp_ab = cp.sum(x_cv*x_cv) - cp.sum(x_oo*x_oo) + cp.sum(cp.diag(x_oo))**2
-            print(f"Excited state {nstate+1} {float(self.e[nstate].get())*ha2eV:10.5f} eV D<S^2>={float((-no+1+dp_ab).get()):5.2f}")
+            x_cv, x_co, x_ov, x_oo = self._state_blocks(value)
+            ds2 = self.deltaS2_U(nstate)
+            print(f"Excited state {nstate+1} {float(self.e[nstate].get())*ha2eV:10.5f} eV D<S^2>={self._real_float(ds2):5.2f}")
             for label, arr, off_o, off_v in (
                 ("CV(ab)", x_cv, 1, self.nc + self.no + 1),
                 ("CO(ab)", x_co, 1, self.nc + 1),
