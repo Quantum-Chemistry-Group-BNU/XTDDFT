@@ -808,6 +808,7 @@ class SF_TDA_down():
         nv = self.nv
         no = self.no
         Ds = []
+        print("please use USF-TDA in XSF-TDA program with UKS reference")
         for nstate in range(self.nstates):
             value = self.v[:,nstate]
             x_cv_ab = value[:nc*nv].reshape(nc,nv)
@@ -816,7 +817,7 @@ class SF_TDA_down():
             
             x_oo_ab = value[nc*nv+nc*no+no*nv:].reshape(no,no)
             Dp_ab = 0.
-            Dp_ab += sum(sum(x_cv_ab*x_cv_ab)) -sum(sum(x_oo_ab*x_oo_ab))
+            Dp_ab += sum(sum(x_cv_ab*x_cv_ab)) -sum(sum(x_oo_ab*x_oo_ab)) # only for ROKS reference.
             for i in range(no):
                 for j in range(no):
                     Dp_ab += x_oo_ab[i,i]*x_oo_ab[j,j]
