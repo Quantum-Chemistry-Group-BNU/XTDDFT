@@ -743,9 +743,10 @@ class SI_driver():
         factor = 1/sqrt2
         XhX += factor*einsum('vbm,vb->m', self.hm[self.slo,self.slv,:], XR)
         # Case (45) GS S(CV1)
-        XR = R[1][1][self.sl_S_dim3].reshape(self.nc,self.nv)
-        factor = -sqrt(self.S/(1+self.S))
-        XhX += factor*einsum('jbm,jb->m',self.hm[self.slc,self.slv,:], XR)
+        if self.S != 0:
+            XR = R[1][1][self.sl_S_dim3].reshape(self.nc,self.nv)
+            factor = -sqrt(self.S/(1+self.S))
+            XhX += factor*einsum('jbm,jb->m',self.hm[self.slc,self.slv,:], XR)
         return XhX
 
     def interact_GSS1(self, L, R):
@@ -771,10 +772,11 @@ class SI_driver():
         factor = -1/2
         hX[self.sl_S_dim0] += factor*einsum('vim,ab,vb->iam', self.hm[self.slo,self.slc,:], self.delta_v, XR).reshape(self.cv,3)
         # Case (50) S(CV0) S(CV1)
-        XR = R[1][1][self.sl_S_dim3].reshape(self.nc,self.nv)
-        factor = -sqrt(self.S/(2*(1+self.S)))
-        hX[self.sl_S_dim0] += factor*einsum('abm,ij,jb->iam', self.hm[self.slv,self.slv,:], self.delta_c, XR).reshape(self.cv,3)
-        hX[self.sl_S_dim0] += factor*einsum('jim,ab,jb->iam',-self.hm[self.slc,self.slc,:], self.delta_v, XR).reshape(self.cv,3)
+        if self.S != 0:
+            XR = R[1][1][self.sl_S_dim3].reshape(self.nc,self.nv)
+            factor = -sqrt(self.S/(2*(1+self.S)))
+            hX[self.sl_S_dim0] += factor*einsum('abm,ij,jb->iam', self.hm[self.slv,self.slv,:], self.delta_c, XR).reshape(self.cv,3)
+            hX[self.sl_S_dim0] += factor*einsum('jim,ab,jb->iam',-self.hm[self.slc,self.slc,:], self.delta_v, XR).reshape(self.cv,3)
         # ====== line1 ==========
         # Case (48) S(CO0) S(CV0)
         XR = R[1][1][self.sl_S_dim0].reshape(self.nc,self.nv)
@@ -787,9 +789,10 @@ class SI_driver():
         hX[self.sl_S_dim1] += factor*einsum('jim,uv,jv->ium',-self.hm[self.slc,self.slc,:], self.delta_o, XR).reshape(self.co,3)
         # Case (53) S(CO0) S(OV0) = 0
         # Case (54) S(CO0) S(CV1)
-        XR = R[1][1][self.sl_S_dim3].reshape(self.nc,self.nv)
-        factor = (1-self.S)/(2*sqrt(self.S*(self.S+1)))
-        hX[self.sl_S_1_dim1] += factor*einsum('ubm,ij,jb->ium',self.hm[self.slo,self.slv,:], self.delta_c, XR).reshape(self.co,3)
+        if self.S != 0:
+            XR = R[1][1][self.sl_S_dim3].reshape(self.nc,self.nv)
+            factor = (1-self.S)/(2*sqrt(self.S*(self.S+1)))
+            hX[self.sl_S_1_dim1] += factor*einsum('ubm,ij,jb->ium',self.hm[self.slo,self.slv,:], self.delta_c, XR).reshape(self.co,3)
         # ====== line2 ==========
         # Case (49) S(OV0) S(CV0)
         XR = R[1][1][self.sl_S_dim0].reshape(self.nc,self.nv)
@@ -802,28 +805,29 @@ class SI_driver():
         hX[self.sl_S_dim2] += factor*einsum('abm,uv,vb->uam', self.hm[self.slv,self.slv,:], self.delta_o, XR).reshape(self.ov,3)
         hX[self.sl_S_dim2] += factor*einsum('vum,ab,vb->uam',-self.hm[self.slo,self.slo,:], self.delta_v, XR).reshape(self.ov,3)
         # Case (57) S(OV0) S(CV1)
-        XR = R[1][1][self.sl_S_dim3].reshape(self.nc,self.nv)
-        factor = (self.S-1)/(2*sqrt(self.S*(self.S+1)))
-        hX[self.sl_S_dim2] += factor*einsum('jum,ab,jb->uam', self.hm[self.slc,self.slo,:], self.delta_v, XR).reshape(self.ov,3)
+        if self.S != 0:
+            XR = R[1][1][self.sl_S_dim3].reshape(self.nc,self.nv)
+            factor = (self.S-1)/(2*sqrt(self.S*(self.S+1)))
+            hX[self.sl_S_dim2] += factor*einsum('jum,ab,jb->uam', self.hm[self.slc,self.slo,:], self.delta_v, XR).reshape(self.ov,3)
         # ====== line3 ==========
         # Case (50) S(CV1) S(CV0)
-        XR = R[1][1][self.sl_S_dim0].reshape(self.nc,self.nv)
-        factor = -sqrt(self.S/(2*(1+self.S)))
-        hX[self.sl_S_dim3] += factor*einsum('ia,abm,ij->jbm',XR,-self.hm[self.slv,self.slv,:], self.delta_c).reshape(self.cv,3)
-        hX[self.sl_S_dim3] += factor*einsum('ia,jim,ab->jbm',XR, self.hm[self.slc,self.slc,:], self.delta_v).reshape(self.cv,3)
+            XR = R[1][1][self.sl_S_dim0].reshape(self.nc,self.nv)
+            factor = -sqrt(self.S/(2*(1+self.S)))
+            hX[self.sl_S_dim3] += factor*einsum('ia,abm,ij->jbm',XR,-self.hm[self.slv,self.slv,:], self.delta_c).reshape(self.cv,3)
+            hX[self.sl_S_dim3] += factor*einsum('ia,jim,ab->jbm',XR, self.hm[self.slc,self.slc,:], self.delta_v).reshape(self.cv,3)
         # Case (54) S(CV1) S(CO0)
-        XR = R[1][1][self.sl_S_dim1].reshape(self.nc,self.no)
-        factor = (1-self.S)/(2*sqrt(self.S*(self.S+1)))
-        hX[self.sl_S_dim3] += factor*einsum('iu,ubm,ij->jbm',XR,-self.hm[self.slo,self.slv,:], self.delta_c).reshape(self.cv,3)
+            XR = R[1][1][self.sl_S_dim1].reshape(self.nc,self.no)
+            factor = (1-self.S)/(2*sqrt(self.S*(self.S+1)))
+            hX[self.sl_S_dim3] += factor*einsum('iu,ubm,ij->jbm',XR,-self.hm[self.slo,self.slv,:], self.delta_c).reshape(self.cv,3)
         # Case (57) S(CV1) S(OV0)
-        XR = R[1][1][self.sl_S_dim2].reshape(self.no,self.nv)
-        factor = (self.S-1)/(2*sqrt(self.S*(self.S+1)))
-        hX[self.sl_S_dim3] += factor*einsum('ua,jum,ab->jbm',XR,-self.hm[self.slc,self.slo,:], self.delta_v).reshape(self.cv,3)
+            XR = R[1][1][self.sl_S_dim2].reshape(self.no,self.nv)
+            factor = (self.S-1)/(2*sqrt(self.S*(self.S+1)))
+            hX[self.sl_S_dim3] += factor*einsum('ua,jum,ab->jbm',XR,-self.hm[self.slc,self.slo,:], self.delta_v).reshape(self.cv,3)
         # Case (59) S(CV1) S(CV1)
-        XR = R[1][1][self.sl_S_dim3].reshape(self.nc,self.nv)
-        factor = 1/(sqrt2*(1+self.S))
-        hX[self.sl_S_dim3] += factor*einsum('abm,ij,jb->iam', self.hm[self.slv,self.slv,:], self.delta_c, XR).reshape(self.cv,3)
-        hX[self.sl_S_dim3] += factor*einsum('jim,ab,jb->iam', self.hm[self.slc,self.slc,:], self.delta_v, XR).reshape(self.cv,3)
+            XR = R[1][1][self.sl_S_dim3].reshape(self.nc,self.nv)
+            factor = 1/(sqrt2*(1+self.S))
+            hX[self.sl_S_dim3] += factor*einsum('abm,ij,jb->iam', self.hm[self.slv,self.slv,:], self.delta_c, XR).reshape(self.cv,3)
+            hX[self.sl_S_dim3] += factor*einsum('jim,ab,jb->iam', self.hm[self.slc,self.slc,:], self.delta_v, XR).reshape(self.cv,3)
         return XL@hX
 
     def interact_SS1(self, L, R):
@@ -846,9 +850,10 @@ class SI_driver():
         hX[self.sl_S_dim2] += factor*einsum('jum,ab,jb->uam', self.hm[self.slc,self.slo,:], self.delta_v, XR).reshape(self.ov,3)
         # ====== line3 ==========
         # Case (60) (S+1)(CV1) (S+1)(CV1)
-        factor = -sqrt(self.S/(2*(self.S+1)))
-        hX[self.sl_S_dim3] += factor*einsum('jim,ab,jb->iam', self.hm[self.slc,self.slc,:], self.delta_v, XR).reshape(self.cv,3)
-        hX[self.sl_S_dim3] += factor*einsum('abm,ij,jb->iam', self.hm[self.slv,self.slv,:], self.delta_c, XR).reshape(self.cv,3)
+        if self.S != 0:
+            factor = -sqrt(self.S/(2*(self.S+1)))
+            hX[self.sl_S_dim3] += factor*einsum('jim,ab,jb->iam', self.hm[self.slc,self.slc,:], self.delta_v, XR).reshape(self.cv,3)
+            hX[self.sl_S_dim3] += factor*einsum('abm,ij,jb->iam', self.hm[self.slv,self.slv,:], self.delta_c, XR).reshape(self.cv,3)
         return XL@hX
     
     def interact_S1S1(self, L, R):
@@ -921,10 +926,17 @@ class SI_driver():
         return X
 
     def reformat_S(self,X):
-        X = [
+        if self.S != 0:
+            X = [
             X[self.sl_S_dim0].reshape(self.nc,self.nv),
             X[self.sl_S_dim1].reshape(self.nc,self.no),
             X[self.sl_S_dim2].reshape(self.no,self.nv),
             X[self.sl_S_dim3].reshape(self.nc,self.nv),
-            ]
+                ]
+        else:
+            X = [
+            X[self.sl_S_dim0].reshape(self.nc,self.nv),
+            X[self.sl_S_dim1].reshape(self.nc,self.no),
+            X[self.sl_S_dim2].reshape(self.no,self.nv),
+                ]
         return X
