@@ -28,7 +28,8 @@ def TDM_GSS(S,XL,XR,ints_mo,n,sl):
     '''
     slc,slo,slv=sl
     assert np.allclose(XL,np.ones((1,)))
-    assert len(XR) == 4
+    if S != 0:
+        assert len(XR) == 4
     assert len(XR[0].shape) == 2
     tdm = np.zeros((3,))
     # 0 Case(17) GS-CV0
@@ -77,7 +78,8 @@ def TDM_S(S,XL,XR,ints_mo,n,sl):
     delta_c = np.eye(nc)
     delta_o = np.eye(no)
     delta_v = np.eye(nv)
-    assert len(XL) == 4 and len(XR) == 4
+    if S != 0:
+        assert len(XL) == 4 and len(XR) == 4
     assert len(XL[0].shape) == 2 and len(XR[0].shape) == 2
     tdm = np.zeros((3,))
 
@@ -85,41 +87,42 @@ def TDM_S(S,XL,XR,ints_mo,n,sl):
     # (0,0) Case(21) CV(0)-CV(0) r_ab*delta_ij - r_ij*delta_ab
     tdm +=  einsum('ia,xba,ij,jb->x', XL[0], ints_mo[:,slv,slv], delta_c, XR[0])
     tdm += -einsum('ia,xji,ab,jb->x', XL[0], ints_mo[:,slc,slc], delta_v, XR[0])
+    if S != 0:
     # (1,1) Case(25) CO(0)-CO(0) r_uv*delta_ij - r_ij*delta_uv
-    tdm +=  einsum('iu,xvu,ij,jv->x', XL[1], ints_mo[:,slo,slo], delta_c, XR[1])
-    tdm += -einsum('iu,xji,uv,jv->x', XL[1], ints_mo[:,slc,slc], delta_o, XR[1])
-    # (2,2) Case(28) OV(0)-OV(0) r_ab*delta_uv - r_uv*delta_ab
-    tdm +=  einsum('ua,xab,uv,vb->x', XL[2], ints_mo[:,slv,slv], delta_o, XR[2])
-    tdm += -einsum('ua,xuv,ab,vb->x', XL[2], ints_mo[:,slo,slo], delta_v, XR[2])
-    # (3,3) Case(30) CV(1)-CV(1) r_ab*delta_ij - r_ij*delta_ab
-    tdm +=  einsum('ia,xab,ij,jb->x', XL[3], ints_mo[:,slv,slv], delta_c, XR[3])
-    tdm += -einsum('ia,xji,ab,jb->x', XL[3], ints_mo[:,slc,slc], delta_v, XR[3])
+        tdm +=  einsum('iu,xvu,ij,jv->x', XL[1], ints_mo[:,slo,slo], delta_c, XR[1])
+        tdm += -einsum('iu,xji,uv,jv->x', XL[1], ints_mo[:,slc,slc], delta_o, XR[1])
+        # (2,2) Case(28) OV(0)-OV(0) r_ab*delta_uv - r_uv*delta_ab
+        tdm +=  einsum('ua,xab,uv,vb->x', XL[2], ints_mo[:,slv,slv], delta_o, XR[2])
+        tdm += -einsum('ua,xuv,ab,vb->x', XL[2], ints_mo[:,slo,slo], delta_v, XR[2])
+        # (3,3) Case(30) CV(1)-CV(1) r_ab*delta_ij - r_ij*delta_ab
+        tdm +=  einsum('ia,xab,ij,jb->x', XL[3], ints_mo[:,slv,slv], delta_c, XR[3])
+        tdm += -einsum('ia,xji,ab,jb->x', XL[3], ints_mo[:,slc,slc], delta_v, XR[3])
 
     # Off-diagonal
     # (0,1) Case(22) CV(0)-CO(0) 1/sqrt{2} * r_at*delta_ij
-    factor = 1/np.sqrt(2)
-    tdm += factor*einsum('ia,xat,ij,jt->x', XL[0], ints_mo[:,slv,slo], delta_c, XR[1])
-    # (1,0) Case(22) CO(0)-CV(0) 1/sqrt{2} * r_at*delta_ij
-    tdm += factor*einsum('jt,xat,ij,ia->x', XL[1], ints_mo[:,slv,slo], delta_c, XR[0])
-    # (0,2) Case(23) CV(0)-OV(0) -1/sqrt{2} * r_ti*delta_ab
-    factor = -1/np.sqrt(2)
-    tdm += factor*einsum('ia,xti,ab,tb->x', XL[0], ints_mo[:,slo,slc], delta_v, XR[2])
-    # (2,0) Case(23) OV(0)-CV(0) -1/sqrt{2} * r_ti*delta_ab
-    tdm += factor*einsum('tb,xti,ab,ia->x', XL[2], ints_mo[:,slo,slc], delta_v, XR[0])
+        factor = 1/np.sqrt(2)
+        tdm += factor*einsum('ia,xat,ij,jt->x', XL[0], ints_mo[:,slv,slo], delta_c, XR[1])
+        # (1,0) Case(22) CO(0)-CV(0) 1/sqrt{2} * r_at*delta_ij
+        tdm += factor*einsum('jt,xat,ij,ia->x', XL[1], ints_mo[:,slv,slo], delta_c, XR[0])
+        # (0,2) Case(23) CV(0)-OV(0) -1/sqrt{2} * r_ti*delta_ab
+        factor = -1/np.sqrt(2)
+        tdm += factor*einsum('ia,xti,ab,tb->x', XL[0], ints_mo[:,slo,slc], delta_v, XR[2])
+        # (2,0) Case(23) OV(0)-CV(0) -1/sqrt{2} * r_ti*delta_ab
+        tdm += factor*einsum('tb,xti,ab,ia->x', XL[2], ints_mo[:,slo,slc], delta_v, XR[0])
     # (0,3) Case(24) CV(0)-CV(1) 0
     # (3,0) Case(24) CV(1)-CV(0) 0
     # (1,2) Case(24) CO(0)-OV(0) 0
     # (2,1) Case(24) OV(0)-CO(0) 0
     # (1,3) Case(24) CO(0)-CV(1) sqrt((1+S)/(2*S)) * (1+1/S)r_ub*delta_ij
-    factor = np.sqrt((1+S)/(2*S))
-    tdm += factor*einsum('iu,xub,ij,jb->x', XL[1], ints_mo[:,slo,slv], delta_c, XR[3])
-    # (3,1) Case(24) CO(0)-CV(1) sqrt(S/(2*(1+S))) * (1+1/S)r_ub*delta_ij
-    tdm += factor*einsum('jb,xub,ij,iu->x', XL[3], ints_mo[:,slo,slv], delta_c, XR[1])
-    # (2,3) Case(24) OV(0)-CV(1) sqrt((1+S)/(2*S)) * r_ju*delta_ab
-    factor = np.sqrt((1+S)/(2*S))
-    tdm += factor*einsum('ua,xju,ab,jb->x', XL[2], ints_mo[:,slc,slo], delta_v, XR[3])
-    # (3,2) Case(24) CV(1)-OV(0) sqrt((1+S)/(2*S)) * r_ju*delta_ab
-    tdm += factor*einsum('jb,xju,ab,ua->x', XL[3], ints_mo[:,slc,slo], delta_v, XR[2])
+        factor = np.sqrt((1+S)/(2*S))
+        tdm += factor*einsum('iu,xub,ij,jb->x', XL[1], ints_mo[:,slo,slv], delta_c, XR[3])
+        # (3,1) Case(24) CO(0)-CV(1) sqrt(S/(2*(1+S))) * (1+1/S)r_ub*delta_ij
+        tdm += factor*einsum('jb,xub,ij,iu->x', XL[3], ints_mo[:,slo,slv], delta_c, XR[1])
+        # (2,3) Case(24) OV(0)-CV(1) sqrt((1+S)/(2*S)) * r_ju*delta_ab
+        factor = np.sqrt((1+S)/(2*S))
+        tdm += factor*einsum('ua,xju,ab,jb->x', XL[2], ints_mo[:,slc,slo], delta_v, XR[3])
+        # (3,2) Case(24) CV(1)-OV(0) sqrt((1+S)/(2*S)) * r_ju*delta_ab
+        tdm += factor*einsum('jb,xju,ab,ua->x', XL[3], ints_mo[:,slc,slo], delta_v, XR[2])
     return tdm
 
 def TDM_S1(S,XL,XR,ints_mo,n,sl):
