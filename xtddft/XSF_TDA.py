@@ -10,7 +10,7 @@ from pyscf.symm import direct_prod
 
 #from line_profiler import profile
 
-from .SF_TDA import SF_TDA_down, mf_info,gen_response_sf,_gen_uhf_tda_response_sf,get_ab_sf,deal_v_davidson
+from SF_TDA import SF_TDA_down, mf_info,gen_response_sf,_gen_uhf_tda_response_sf,get_ab_sf,deal_v_davidson
 #import sys
 #sys.path.append('/home/lenovo2/usrs/zhw/software/test_git_file')
 #from mc_file import _gen_uhf_tda_response_sf
@@ -1595,19 +1595,29 @@ class XSF_TDA():
 
 if __name__ == '__main__':
     mol = gto.M(
-            atom = """ Be """,
-            basis = 'aug-cc-pvtz',
-            charge = 0,
-            spin = 2,
-            verbose = 3,
-            symmetry='D2h',
+            # atom = """ Be """,
+            atom = 'N 0 0 0; N 0 0 1.1164',
+            # atom = """
+            #     O  0.00000000 0.00000000 0.66606473
+            #     C  0.00000000 0.00000000 -0.52902979
+            #     H  0.00000000 0.96568261 -1.07717157
+            #     H  0.00000000 -0.96568261 -1.07717157
+            # """,
+            basis = 'cc-pvdz',
+            charge = 1,
+            spin = 3,
+            verbose = 4,
+            # symmetry='D2h',
         )
-    print('Test with Be atom.')    
+    # print('Test with Be atom.')    
     mf = dft.ROKS(mol)
-    mf.xc = 'bhandhlyp'
+    # mf.xc = 'bhandhlyp'
+    mf.xc = 'b3lyp'
     mf.kernel()
-    sf_tda = XSF_TDA(mf)
-    e0, values = sf_tda.kernel(nstates=10,remove=True)
+    sf_tda = XSF_TDA(mf, method=1)
+    e0, values = sf_tda.kernel(nstates=10)
+    sf_tda.analyse()
+    sf_tda.calculate_TDM()
     print('excited energy ',e0)
-    print('Reference energy: -2.58159612  1.94501967  2.0441558   2.04415705  3.55556409  4.0395836 4.07260624  4.07260634  4.09542032  4.09542242')
+    # print('Reference energy: -2.58159612  1.94501967  2.0441558   2.04415705  3.55556409  4.0395836 4.07260624  4.07260634  4.09542032  4.09542242')
 
