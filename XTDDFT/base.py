@@ -228,7 +228,6 @@ class XTDDFT_base:
         if self.davidson:
             self.davidson_process(nstates)
         else:
-            
             self.get_Amat()
             e, v = xp.linalg.eigh(xp.asarray(_asnumpy(self.A)))
             self.e, self.v = xp.asarray(e), xp.asarray(v)
