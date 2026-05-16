@@ -1,4 +1,5 @@
 import functools
+
 import numpy as np
 from pyscf import ao2mo, scf, lib, dft
 from pyscf.dft import numint,numint2c,xc_deriv
@@ -8,11 +9,19 @@ from opt_einsum import contract
 
 from XTDDFT.base import (
     XTDDFT_base,
+    _as_cpu_sf_context,
+    _build_initial_guess_from_gaps,
     _build_sf_context,
     _ensure_gamma_df,
     _get_gamma_kpt,
+    _get_k,
     _get_mo_fock,
+    _is_gpu_mf,
     _is_pbc_mf,
+    _make_spinflip_problem,
+    _make_spinflip_vind,
+    _run_davidson,
+    _spinflip_gaps,
     mf_info,
 )
 from utils.backend import _asnumpy, backend, require_cupy, set_backend, xp
@@ -29,18 +38,13 @@ def _as_cpu_mf(mf):
     return mf.to_cpu() if hasattr(mf, "to_cpu") else mf
 
 
-def _as_cpu_ctx(mf):
+def _as_cpu_ctx(mf, ctx=None):
     mode = backend.mode
     set_backend("cpu")
     try:
-        ctx = _build_sf_context(mf)
+        ctx = _build_sf_context(mf) if ctx is None else _as_cpu_sf_context(ctx, mf)
     finally:
         set_backend(mode)
-    for key, value in vars(ctx).items():
-        if hasattr(value, "get"):
-            setattr(ctx, key, value.get())
-        elif key not in ("mf", "cell", "mol"):
-            setattr(ctx, key, np.asarray(value))
     return ctx
 
 
@@ -48,25 +52,8 @@ def _system(mf):
     return mf.cell if _is_pbc_mf(mf) else mf.mol
 
 
-def _is_gpu_mf(mf):
-    return backend.is_gpu or mf.__class__.__module__.startswith("gpu4pyscf")
-
-
 def _is_ks_mf(mf):
     return hasattr(mf, "_numint") and hasattr(mf, "xc")
-
-
-def _get_k(mf, dm, hermi=0, omega=None):
-    kwargs = {"hermi": hermi}
-    if omega is not None and abs(omega) > 1e-14:
-        kwargs["omega"] = omega
-    if _is_pbc_mf(mf):
-        _ensure_gamma_df(mf)
-        try:
-            return mf.get_k(mf.cell, dm, kpt=_get_gamma_kpt(mf), **kwargs)
-        except TypeError:
-            return mf.get_k(mf.cell, dm, **kwargs)
-    return mf.get_k(mf.mol, dm, **kwargs)
 
 
 def _make_response_vxc(ni, mf, dm1, hermi, vxc, max_memory):
@@ -74,23 +61,6 @@ def _make_response_vxc(ni, mf, dm1, hermi, vxc, max_memory):
         ni, mf, mf.grids, mf.xc, None, dm1, 0, hermi,
         vxc=vxc, max_memory=max_memory
     )
-
-
-def _spinflip_up_gaps(ctx):
-    return (ctx.mo_energy[0][ctx.viridx_a, None] - ctx.mo_energy[1][ctx.occidx_b]).T.ravel()
-
-
-def _build_initial_guess_from_gaps(gaps, nstates):
-    gaps = xp.asarray(gaps)
-    nov = int(gaps.size)
-    nroots = min(nstates, nov)
-    if nroots < 1:
-        raise ValueError("No spin-flip-up excitation space is available.")
-    e_threshold = xp.sort(gaps)[nroots - 1] + 1e-5
-    idx = xp.where(gaps <= e_threshold)[0]
-    x0 = xp.zeros((int(idx.size), nov))
-    x0[xp.arange(int(idx.size)), idx] = 1.0
-    return x0
 
 
 def add_hf_a_b2a(a_b2a, mf, orbo_b, orbv_a, nc, nv, hyb=1, omega=None):
@@ -164,14 +134,15 @@ def AldA0(ni, mf, rho, weight, xctype):
     fxc_ab = (vxc_a-vxc_b)/(np.array(rho[0])-np.array(rho[1])+1e-9)
     return fxc_ab
 
-def cache_xc_kernel_sf(mf, mo_coeff, mo_occ, spin=1,max_memory=2000,isf=-1): # for ALDA0
+def cache_xc_kernel_sf(mf, mo_coeff, mo_occ, spin=1,max_memory=2000): # for ALDA0
     '''Compute the fxc_sf, which can be used in SF-TDDFT/TDA
     '''
     MGGA_DENSITY_LAPL = False
     with_lapl = MGGA_DENSITY_LAPL
     ni = mf._numint
     xctype = ni._xc_type(mf.xc)
-    mo_energy,mo_occ,mo_coeff = mf_info(mf)
+    if mo_coeff is None or mo_occ is None:
+        _, mo_occ, mo_coeff = mf_info(mf)
 
     if xctype == 'GGA':
         ao_deriv = 1
@@ -191,7 +162,6 @@ def cache_xc_kernel_sf(mf, mo_coeff, mo_occ, spin=1,max_memory=2000,isf=-1): # f
     make_rho = ni._gen_rho_evaluator(_system(mf), dm0, hermi=0, with_lapl=False)[0]
 
     fxc_abs = []
-    #if isf == -1: # 
     for ao, mask, weight, coords in _iter_block_data(mf, ni, ao_deriv, max_memory):
         rhoa = make_rho(0, ao, mask, xctype)
         rhob = make_rho(1, ao, mask, xctype)
@@ -421,9 +391,11 @@ def nr_uks_fxc_sf_tda_mc(ni, mf, grids, xc_code, dm0, dms, relativity=0, hermi=0
         vmat = np.asarray(vmat, dtype=dtype)
     return vmat
 
-def gen_response_sf(mf,hermi=0,max_memory=None,method=0):
-    mo_energy,mo_occ,mo_coeff = mf_info(mf)
-    del mo_energy
+def gen_response_sf(mf,hermi=0,max_memory=None,method=0,ctx=None):
+    if ctx is None:
+        _, mo_occ, mo_coeff = mf_info(mf)
+    else:
+        mo_occ, mo_coeff = ctx.mo_occ, ctx.mo_coeff
     if _is_gpu_mf(mf):
         return _gen_response_sf_gpu(mf, mo_coeff, mo_occ, hermi=hermi,
                                     max_memory=max_memory, method=method)
@@ -437,7 +409,7 @@ def gen_response_sf(mf,hermi=0,max_memory=None,method=0):
             mem_now = lib.current_memory()[0]
             max_memory = max(2000, mf.max_memory*.8-mem_now)
         if method == 0:
-            vxc = cache_xc_kernel_sf(mf, mo_coeff, mo_occ,1,max_memory,isf=-1) # XC kerkel 
+            vxc = cache_xc_kernel_sf(mf, mo_coeff, mo_occ,1,max_memory) # XC kerkel
         dm0 = None
 
         def vind(dm1):
@@ -651,11 +623,15 @@ def _gen_response_sf_gpu(mf, mo_coeff, mo_occ, hermi=0, max_memory=None, method=
     return vind
 
 # code from pyscf-forge to construct multicollinear functional
-def gen_response_sf_mc(mf, mo_coeff=None, mo_occ=None, hermi=0, collinear_samples=60, max_memory=None,method=1):
+def gen_response_sf_mc(mf, mo_coeff=None, mo_occ=None, hermi=0,
+                       collinear_samples=60, max_memory=None,method=1,ctx=None):
     '''Generate a function to compute the product of Spin Flip UKS response function
     and UKS density matrices.
     '''
-    mo_energy,mo_occ,mo_coeff = mf_info(mf)
+    if ctx is not None:
+        mo_coeff, mo_occ = ctx.mo_coeff, ctx.mo_occ
+    elif mo_coeff is None or mo_occ is None:
+        _, mo_occ, mo_coeff = mf_info(mf)
     #assert isinstance(mf, (uhf.UHF))
     #if mo_coeff is None: mo_coeff = mf.mo_coeff
     #if mo_occ is None: mo_occ = mf.mo_occ
@@ -701,20 +677,19 @@ def gen_response_sf_mc(mf, mo_coeff=None, mo_occ=None, hermi=0, collinear_sample
     return vind
 
 class SF_TDA_up(XTDDFT_base): # just for ROKS
-    isf = 1
-
     def __init__(self, mf, method, davidson=True, davidson_backend="cpu"):
         davidson_backend = davidson_backend.lower()
         if davidson_backend not in ("cpu", "gpu", "auto"):
             raise ValueError("davidson_backend must be 'cpu', 'gpu', or 'auto'")
         super().__init__(mf, method, davidson=davidson)
+        self.isf = 1
         self.davidson_backend = "cpu" if davidson_backend == "auto" else davidson_backend
 
     def get_Amat_ALDA0(self):
         # Dense Amat is built with PySCF/NumPy.  GPU inputs are converted to CPU
         # for construction, then converted back to the active backend at return.
         mf = _as_cpu_mf(self.mf)
-        ctx = _as_cpu_ctx(mf)
+        ctx = _as_cpu_ctx(mf, self.ctx)
 
         mode = backend.mode
         set_backend("cpu")
@@ -898,84 +873,29 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
         return self.A
     
     def gen_tda_operation_sf(self):
-        hdiag = _spinflip_up_gaps(self.ctx)
-        ndim = (self.nocc_b, self.nvir_a)
-        orbo, orbv = self.orbo_b, self.orbv_a
-        focka_mo, fockb_mo = self._get_fock_mo()
-        occ_block = fockb_mo[:self.nocc_b, :self.nocc_b]
-        vir_block = focka_mo[self.nocc_a:, self.nocc_a:]
         if self.method == 1:
-            vresp = gen_response_sf_mc(self.mf,hermi=0,collinear_samples=50)
+            vresp = gen_response_sf_mc(self.mf,hermi=0,collinear_samples=50,ctx=self.ctx)
         else:
-            vresp = gen_response_sf(self.mf,hermi=0)
-            
-        def vind(zs0): # vector-matrix product for indexed operations
-            zs = xp.asarray(zs0).reshape(-1, *ndim)
-            dmov = contract('xov,qv,po->xpq', zs, orbv.conj(), orbo, optimize=True)
-            v1ao = xp.asarray(vresp(dmov))
-            vs = contract('xpq,po,qv->xov', v1ao, orbo.conj(), orbv, optimize=True)
-            vs += contract('ab,xib->xia', vir_block, zs, optimize=True)
-            vs -= contract('ij,xja->xia', occ_block, zs, optimize=True)
-            return vs.reshape(zs.shape[0], -1)
-        return vind, hdiag
+            vresp = gen_response_sf(self.mf,hermi=0,ctx=self.ctx)
+        problem = _make_spinflip_problem(self.ctx, self._get_fock_mo(), self.isf)
+        return _make_spinflip_vind(problem, vresp), problem.hdiag
     
     def init_guess(self, nstates):
-        return _build_initial_guess_from_gaps(_spinflip_up_gaps(self.ctx), nstates)
+        return _build_initial_guess_from_gaps(_spinflip_gaps(self.ctx, self.isf), nstates)
     
     def davidson_process(self, nstates):
         vind, hdiag = self.gen_tda_operation_sf()
         nroots = min(nstates, int(hdiag.size))
         x0 = self.init_guess(nroots)
 
-        if self.davidson_backend == "gpu":
-            return self._gpu_davidson_process(vind, hdiag, x0, nroots)
-
-        def aop(xs):
-            return _asnumpy(vind(xp.asarray(xs)))
-
-        converged, e, x1 = lib.davidson1(
-            aop, _asnumpy(x0), _asnumpy(hdiag),
-            tol=1e-7, lindep=1e-14,
-            nroots=nroots, max_cycle=3000
+        converged, e, x1 = _run_davidson(
+            self.mf, self.davidson_backend,
+            vind, hdiag, x0, nroots,
         )
         self.converged = converged
         self.e = xp.asarray(e)
-        self.v = xp.asarray(np.asarray(x1).T)
+        self.v = xp.asarray(_asnumpy(x1)).T
         logger.info('SF_TDA_up Davidson converged: {}', converged)
-        return self.e, self.v
-
-    def _gpu_davidson_process(self, vind, hdiag, x0, nroots):
-        if not _is_gpu_mf(self.mf):
-            raise RuntimeError("davidson_backend='gpu' requires the gpu backend/gpu4pyscf path.")
-
-        cp = require_cupy()
-        from gpu4pyscf.tdscf._lr_eig import eigh as lr_eigh
-
-        hdiag = cp.asarray(hdiag)
-        x0 = cp.asarray(x0)
-
-        def precond(dx, e, *args):
-            denom = hdiag - e
-            threshold = 1.0e-8
-            small = abs(denom) < threshold
-            denom = cp.where(small, cp.where(denom >= 0, threshold, -threshold), denom)
-            return dx / denom
-
-        def pick(w, v, nroots, envs):
-            del envs
-            idx = cp.argsort(w)[:nroots]
-            return w[idx], v[:, idx], idx
-
-        result = lr_eigh(
-            vind, x0, precond,
-            tol_residual=1e-7, lindep=1e-14,
-            nroots=nroots, pick=pick, max_cycle=3000
-        )
-        converged, e, x1 = result[:3]
-        self.converged = converged
-        self.e = cp.asarray(e)
-        self.v = cp.asarray(x1).T
-        logger.info('SF_TDA_up GPU Davidson converged: {}', converged)
         return self.e, self.v
 
     def analyse(self):

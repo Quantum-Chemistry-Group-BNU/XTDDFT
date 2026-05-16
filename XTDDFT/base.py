@@ -1,6 +1,9 @@
 from types import SimpleNamespace
 import numpy as np
-from utils.backend import backend, xp, _asarray, _asnumpy
+from opt_einsum import contract
+from pyscf import lib
+
+from utils.backend import backend, require_cupy, xp, _asarray, _asnumpy
 from utils.unit import ha2eV
 
 try:
@@ -70,6 +73,24 @@ def _build_sf_context(mf, mo_energy=None, mo_occ=None, mo_coeff=None):
            "mo_occ": mo_occ, "mo_coeff": mo_coeff}
     ctx.update(vars(spaces))
     return SimpleNamespace(**ctx)
+
+def _as_cpu_sf_context(ctx, mf=None):
+    """Copy an existing spin-flip context to NumPy without recomputing mf_info."""
+    out = {}
+    for key, value in vars(ctx).items():
+        if key == "mf":
+            out[key] = mf if mf is not None else value
+        elif key == "cell" and mf is not None:
+            out[key] = getattr(mf, "cell", None)
+        elif key == "mol" and mf is not None:
+            out[key] = None if getattr(mf, "cell", None) is not None else getattr(mf, "mol", None)
+        elif hasattr(value, "get"):
+            out[key] = value.get()
+        elif hasattr(value, "shape"):
+            out[key] = np.asarray(value)
+        else:
+            out[key] = value
+    return SimpleNamespace(**out)
 
 def _make_spin_dm(mo_coeff, mo_occ):
     return xp.asarray([
@@ -157,6 +178,21 @@ def _get_hcore_mol(mf):
 def _is_pbc_mf(mf):
     return getattr(mf, "cell", None) is not None
 
+def _is_gpu_mf(mf):
+    return backend.is_gpu or mf.__class__.__module__.startswith("gpu4pyscf")
+
+def _get_k(mf, dm, hermi=0, omega=None):
+    kwargs = {"hermi": hermi}
+    if omega is not None and abs(omega) > 1e-14:
+        kwargs["omega"] = omega
+    if _is_pbc_mf(mf):
+        _ensure_gamma_df(mf)
+        try:
+            return mf.get_k(mf.cell, dm, kpt=_get_gamma_kpt(mf), **kwargs)
+        except TypeError:
+            return mf.get_k(mf.cell, dm, **kwargs)
+    return mf.get_k(mf.mol, dm, **kwargs)
+
 def _is_unrestricted_mf(mf):
     cls_name = mf.__class__.__name__.upper()
     if "UKS" in cls_name or "UHF" in cls_name or "ROKS" in cls_name or "ROHF" in cls_name: # 
@@ -194,6 +230,110 @@ def _get_mo_fock(mf, mo_coeff, mo_occ=None):
     focka_mo = mo_coeff[0].conj().T @ (h1e + vhf[0]) @ mo_coeff[0]
     fockb_mo = mo_coeff[1].conj().T @ (h1e + vhf[1]) @ mo_coeff[1]
     return focka_mo, fockb_mo
+
+def _spinflip_gaps(ctx, isf):
+    if isf == 1:
+        return (ctx.mo_energy[0][ctx.viridx_a, None]
+                - ctx.mo_energy[1][ctx.occidx_b]).T.ravel()
+    if isf == -1:
+        return (ctx.mo_energy[1][ctx.viridx_b, None]
+                - ctx.mo_energy[0][ctx.occidx_a]).T.ravel()
+    raise ValueError(f"Unsupported isf={isf!r}; expected -1 or 1.")
+
+def _build_initial_guess_from_gaps(gaps, nstates):
+    gaps = xp.asarray(gaps)
+    nov = int(gaps.size)
+    nroots = min(nstates, nov)
+    if nroots < 1:
+        raise ValueError("No spin-flip excitation space is available.")
+    e_threshold = xp.sort(gaps)[nroots - 1] + 1e-5
+    idx = xp.where(gaps <= e_threshold)[0]
+    x0 = xp.zeros((int(idx.size), nov))
+    x0[xp.arange(int(idx.size)), idx] = 1.0
+    return x0
+
+def _make_spinflip_problem(ctx, fock_mo, isf):
+    focka_mo, fockb_mo = fock_mo
+    if isf == 1:
+        return SimpleNamespace(
+            hdiag=_spinflip_gaps(ctx, isf),
+            ndim=(ctx.nocc_b, ctx.nvir_a),
+            orbo=ctx.orbo_b,
+            orbv=ctx.orbv_a,
+            occ_block=fockb_mo[:ctx.nocc_b, :ctx.nocc_b],
+            vir_block=focka_mo[ctx.nocc_a:, ctx.nocc_a:],
+        )
+    if isf == -1:
+        return SimpleNamespace(
+            hdiag=_spinflip_gaps(ctx, isf),
+            ndim=(ctx.nocc_a, ctx.nvir_b),
+            orbo=ctx.orbo_a,
+            orbv=ctx.orbv_b,
+            occ_block=focka_mo[:ctx.nocc_a, :ctx.nocc_a],
+            vir_block=fockb_mo[ctx.nocc_b:, ctx.nocc_b:],
+        )
+    raise ValueError(f"Unsupported isf={isf!r}; expected -1 or 1.")
+
+def _make_spinflip_vind(problem, vresp):
+    def vind(zs0):
+        zs = xp.asarray(zs0).reshape(-1, *problem.ndim)
+        dmov = contract(
+            'xov,qv,po->xpq',
+            zs, problem.orbv.conj(), problem.orbo,
+            optimize=True,
+        )
+        v1ao = xp.asarray(vresp(dmov))
+        vs = contract(
+            'xpq,po,qv->xov',
+            v1ao, problem.orbo.conj(), problem.orbv,
+            optimize=True,
+        )
+        vs += contract('ab,xib->xia', problem.vir_block, zs, optimize=True)
+        vs -= contract('ij,xja->xia', problem.occ_block, zs, optimize=True)
+        return vs.reshape(zs.shape[0], -1)
+    return vind
+
+def _cpu_davidson(vind, hdiag, x0, nroots):
+    def aop(xs):
+        return _asnumpy(vind(xp.asarray(xs)))
+
+    return lib.davidson1(
+        aop, _asnumpy(x0), _asnumpy(hdiag),
+        tol=1e-7, lindep=1e-14,
+        nroots=nroots, max_cycle=3000,
+    )
+
+def _gpu_davidson(vind, hdiag, x0, nroots):
+    cp = require_cupy()
+    from gpu4pyscf.tdscf._lr_eig import eigh as lr_eigh
+
+    hdiag = cp.asarray(hdiag)
+    x0 = cp.asarray(x0)
+
+    def precond(dx, e, *args):
+        denom = hdiag - e
+        threshold = 1.0e-8
+        small = abs(denom) < threshold
+        denom = cp.where(small, cp.where(denom >= 0, threshold, -threshold), denom)
+        return dx / denom
+
+    def pick(w, v, nroots, envs):
+        del envs
+        idx = cp.argsort(w)[:nroots]
+        return w[idx], v[:, idx], idx
+
+    return lr_eigh(
+        vind, x0, precond,
+        tol_residual=1e-7, lindep=1e-14,
+        nroots=nroots, pick=pick, max_cycle=3000,
+    )[:3]
+
+def _run_davidson(mf, davidson_backend, vind, hdiag, x0, nroots):
+    if davidson_backend == "gpu":
+        if not _is_gpu_mf(mf):
+            raise RuntimeError("davidson_backend='gpu' requires the gpu backend/gpu4pyscf path.")
+        return _gpu_davidson(vind, hdiag, x0, nroots)
+    return _cpu_davidson(vind, hdiag, x0, nroots)
 
 class XTDDFT_base:
     def __init__(self, mf, method, davidson=True):
