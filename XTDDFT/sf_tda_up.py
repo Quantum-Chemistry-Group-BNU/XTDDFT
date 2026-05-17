@@ -12,9 +12,7 @@ from opt_einsum import contract
 
 from XTDDFT.base import (
     XTDDFT_base,
-    _as_cpu_sf_context,
     _build_initial_guess_from_gaps,
-    _build_sf_context,
     _ensure_gamma_df,
     _get_gamma_kpt,
     _get_k,
@@ -26,6 +24,20 @@ from XTDDFT.base import (
     _run_davidson,
     _spinflip_gaps,
     mf_info,
+    _as_cpu_mf,
+    _as_cpu_ctx,
+    _system,
+    _is_ks_mf,
+    _make_reference_dm,
+    _response_max_memory,
+    _iter_block_data,
+    _iter_ao_blocks,
+    _xc_ao_deriv,
+    cache_xc_kernel_sf,
+    cache_xc_kernel_sf_mc,
+    _cache_xc_kernel_sf_gpu_mol,
+    _cache_xc_kernel_sf_gpu_pbc,
+    _cache_xc_kernel_sf_mc_gpu_mol
 )
 from utils.backend import _asnumpy, backend, require_cupy, set_backend, xp
 from utils.unit import ha2eV
@@ -37,35 +49,6 @@ except ModuleNotFoundError:
     logger = logging.getLogger(__name__)
 
 
-def _as_cpu_mf(mf):
-    return mf.to_cpu() if hasattr(mf, "to_cpu") else mf
-
-
-def _as_cpu_ctx(mf, ctx=None):
-    mode = backend.mode
-    set_backend("cpu")
-    try:
-        ctx = _build_sf_context(mf) if ctx is None else _as_cpu_sf_context(ctx, mf)
-    finally:
-        set_backend(mode)
-    return ctx
-
-
-def _system(mf):
-    return mf.cell if _is_pbc_mf(mf) else mf.mol
-
-
-def _is_ks_mf(mf):
-    return hasattr(mf, "_numint") and hasattr(mf, "xc")
-
-
-def _response_max_memory(mf, max_memory):
-    if max_memory is not None:
-        return max_memory
-    mem_now = lib.current_memory()[0]
-    return max(2000, mf.max_memory * .8 - mem_now)
-
-
 def _xc_response_params(mf, ni, xc_code=None):
     xc_code = mf.xc if xc_code is None else xc_code
     xctype = ni._xc_type(xc_code)
@@ -73,14 +56,6 @@ def _xc_response_params(mf, ni, xc_code=None):
         return xctype, True, 0.0, 0.0, 1.0
     omega, alpha, hyb = ni.rsh_and_hybrid_coeff(xc_code, _system(mf).spin)
     return xctype, ni.libxc.is_hybrid_xc(xc_code), omega, alpha, hyb
-
-
-def _xc_ao_deriv(xctype, with_lapl=False):
-    if xctype == "GGA":
-        return 1
-    if xctype == "MGGA":
-        return 2 if with_lapl else 1
-    return 0
 
 
 def _alda0_rho_and_denom(array_api, rho_a, rho_b, xctype):
@@ -142,7 +117,7 @@ def add_hf_a_b2a(a_b2a, mf, orbo_b, orbv_a, nc, nv, hyb=1, omega=None):
     return a_b2a
 
 
-def construct_xc(ao, orbo_b, orbv_a, fxc_ab):
+def construct_xc_b2a(ao, orbo_b, orbv_a, fxc_ab):
     rho_v_a = contract('rp,pi->ri', ao, orbv_a, optimize=True)
     rho_o_b = contract('rp,pi->ri', ao, orbo_b, optimize=True)
     rho_ov_b2a = contract('ri,ra->ria', rho_o_b, rho_v_a, optimize=True)
@@ -150,73 +125,20 @@ def construct_xc(ao, orbo_b, orbv_a, fxc_ab):
     iajb = contract('ria,rjb->iajb', rho_ov_b2a, w_ov, optimize=True)
     return iajb
 
-
-def _make_reference_dm(mf, mo_occ):
-    dm0 = mf.make_rdm1()
-    if np.asarray(mf.mo_coeff).ndim == 2:
-        dm0.mo_coeff = (mf.mo_coeff, mf.mo_coeff)
-        dm0.mo_occ = mo_occ
-    return dm0
-
-def _iter_ao_blocks(mf, ni, ao_deriv, max_memory=None, mol=None, nao=None, kpt=None):
-    if _is_gpu_mf(mf):
-        if _is_pbc_mf(mf):
-            _ensure_gamma_df(mf)
-            kpt = _get_gamma_kpt(mf) if kpt is None else kpt
-            for ao_ks, weight, coords in ni.block_loop(mf.cell, mf.grids, ao_deriv, kpt):
-                yield SimpleNamespace(
-                    ao=ao_ks[0], ao_ks=ao_ks, mask=None,
-                    weight=weight, coords=coords, idx=None,
-                )
-        else:
-            mol = mf.mol if mol is None else mol
-            nao = mol.nao_nr() if nao is None else nao
-            for ao, idx, weight, coords in ni.block_loop(mol, mf.grids, nao, ao_deriv):
-                yield SimpleNamespace(
-                    ao=ao, ao_ks=None, mask=None,
-                    weight=weight, coords=coords, idx=idx,
-                )
-        return
-
-    if _is_pbc_mf(mf):
-        kpt = _get_gamma_kpt(mf) if kpt is None else kpt
-        for ao, ao_k2, mask, weight, coords in ni.block_loop(
-            mf.cell, mf.grids, mf.cell.nao_nr(), ao_deriv,
-            kpt, None, max_memory,
-        ):
-            yield SimpleNamespace(
-                ao=ao, ao_ks=(ao, ao_k2), mask=mask,
-                weight=weight, coords=coords, idx=None,
-            )
-    else:
-        for ao, mask, weight, coords in ni.block_loop(
-            mf.mol, mf.grids, mf.mol.nao_nr(), ao_deriv, max_memory
-        ):
-            yield SimpleNamespace(
-                ao=ao, ao_ks=None, mask=mask,
-                weight=weight, coords=coords, idx=None,
-            )
-
-
-def _iter_block_data(mf, ni, ao_deriv, max_memory):
-    for block in _iter_ao_blocks(mf, ni, ao_deriv, max_memory):
-        yield block.ao, block.mask, block.weight, block.coords
-
-
 def _make_rho_evaluator(ni, mf, dms, hermi, grids):
     if _is_pbc_mf(mf):
         return ni._gen_rho_evaluator(_system(mf), dms, hermi, False)[:2]
     return ni._gen_rho_evaluator(_system(mf), dms, hermi, False, grids)[:2]
 
 
-def _pair_hessian_block(occ_fock, vir_fock, tensor_block):
-    nocc = occ_fock.shape[0]
-    nvir = vir_fock.shape[0]
+def _pair_hessian_block_b2a(occ_fock_b, vir_fock_a, tensor_block):
+    nocc_b = occ_fock_b.shape[0]
+    nvir_a = vir_fock_a.shape[0]
     return (
-        contract('ij,ab->iajb', np.eye(nocc), vir_fock, optimize=True)
-        - contract('ji,ab->iajb', occ_fock, np.eye(nvir), optimize=True)
-        + tensor_block.reshape(nocc, nvir, nocc, nvir)
-    ).reshape(nocc * nvir, nocc * nvir)
+        contract('ij,ab->iajb', np.eye(nocc_b), vir_fock_a, optimize=True)
+        - contract('ji,ab->iajb', occ_fock_b, np.eye(nvir_a), optimize=True)
+        + tensor_block.reshape(nocc_b, nvir_a, nocc_b, nvir_a)
+    ).reshape(nocc_b * nvir_a, nocc_b * nvir_a)
 
 def AldA0(ni, mf, rho, weight, xctype):
     vxc= ni.eval_xc_eff(mf.xc, rho, deriv=1, xctype=xctype)[1] # 
@@ -224,47 +146,6 @@ def AldA0(ni, mf, rho, weight, xctype):
     vxc_b = vxc[1,0]*weight
     fxc_ab = (vxc_a-vxc_b)/(np.array(rho[0])-np.array(rho[1])+1e-9)
     return fxc_ab
-
-def cache_xc_kernel_sf(mf, mo_coeff, mo_occ, spin=1,max_memory=2000): # for ALDA0
-    '''Compute the fxc_sf, which can be used in SF-TDDFT/TDA
-    '''
-    MGGA_DENSITY_LAPL = False
-    with_lapl = MGGA_DENSITY_LAPL
-    ni = mf._numint
-    xctype = ni._xc_type(mf.xc)
-    if mo_coeff is None or mo_occ is None:
-        _, mo_occ, mo_coeff = mf_info(mf)
-
-    ao_deriv = _xc_ao_deriv(xctype, MGGA_DENSITY_LAPL)
-
-    assert mo_coeff[0].ndim == 2
-    assert spin == 1
-
-    nao = mo_coeff[0].shape[0]
-    dm0 = mf.make_rdm1()
-    if np.array(mf.mo_coeff).ndim==2:
-        dm0.mo_coeff = (mf.mo_coeff, mf.mo_coeff)
-        dm0.mo_occ = mo_occ
-    make_rho = ni._gen_rho_evaluator(_system(mf), dm0, hermi=0, with_lapl=False)[0]
-
-    fxc_abs = []
-    for ao, mask, weight, coords in _iter_block_data(mf, ni, ao_deriv, max_memory):
-        rhoa = make_rho(0, ao, mask, xctype)
-        rhob = make_rho(1, ao, mask, xctype)
-        if xctype == 'LDA':
-            rho = (rhoa,rhob)
-        else: # GGA
-            rha = np.zeros_like(rhoa)
-            rhb = np.zeros_like(rhob)
-            rha[0] = rhoa[0]
-            rhb[0] = rhob[0]
-            rho = (rha,rhb)
-            rhoa = rhoa[0]
-            rhob = rhob[0]
-        fxc_ab = AldA0(ni, mf, rho, weight, xctype)
-        fxc_abs += list(fxc_ab)
-    fxc_abs = np.asarray(fxc_abs)
-    return fxc_abs
 
 def __mcfun_fn_eval_xc(ni, xc_code, xctype, rho, deriv):
     evfk = ni.eval_xc_eff(xc_code, rho, deriv=deriv, xctype=xctype)
@@ -300,35 +181,6 @@ def mcfun_eval_xc_adapter_sf(ni, xc_code):
             collinear_samples=ni.collinear_samples, workers=nproc)
     return eval_xc_eff
 
-def cache_xc_kernel_sf_mc(self, mf, mol, grids, xc_code, mo_coeff, mo_occ, deriv=2,spin=1,max_memory=2000):
-    '''Compute the fxc_sf, which can be used in SF-TDDFT/TDA
-    '''
-    MGGA_DENSITY_LAPL = False
-    xctype = self._xc_type(xc_code)
-    ao_deriv = _xc_ao_deriv(xctype, MGGA_DENSITY_LAPL)
-    with_lapl = MGGA_DENSITY_LAPL
-
-    assert mo_coeff[0].ndim == 2
-    assert spin == 1
-
-    nao = mo_coeff[0].shape[0]
-    rhoa = []
-    rhob = []
-
-    ni_eval = pbc_numint.NumInt() if _is_pbc_mf(mf) else numint.NumInt()
-    ni_block = self if _is_pbc_mf(mf) else ni_eval
-    for ao, mask, weight, coords in _iter_block_data(mf, ni_block, ao_deriv, max_memory):
-        rhoa.append(ni_eval.eval_rho2(mol, ao, mo_coeff[0], mo_occ[0], mask, xctype, with_lapl))
-        rhob.append(ni_eval.eval_rho2(mol, ao, mo_coeff[1], mo_occ[1], mask, xctype, with_lapl))
-    rho_ab = (np.hstack(rhoa), np.hstack(rhob))
-    rho_ab = np.asarray(rho_ab)
-    rho_tmz = np.zeros_like(rho_ab)+1e-11
-    rho_tmz[0] += rho_ab[0]+rho_ab[1]
-    rho_tmz[1] += rho_ab[0]-rho_ab[1]
-    eval_xc = mcfun_eval_xc_adapter_sf(self,xc_code)
-    fxc_sf = eval_xc(xc_code, rho_tmz, deriv=2, xctype=xctype)
-    return fxc_sf
-
 def _cpu_xc_weighted_density(xctype, rho1sf, kernel_block, weight, method):
     if method == "alda0":
         if xctype == "LDA":
@@ -336,7 +188,7 @@ def _cpu_xc_weighted_density(xctype, rho1sf, kernel_block, weight, method):
         rhosf = np.zeros_like(rho1sf)
         rhosf[0] += rho1sf[0]
         return rhosf * kernel_block
-    if xctype == "LDA":
+    if xctype == "LDA":  # 这个是为MCOL准备的
         return rho1sf * kernel_block[0, 0] * 2.0 * weight
     return contract("bg,abg->ag", rho1sf, kernel_block * 2.0, optimize=True) * weight
 
@@ -451,101 +303,7 @@ def gen_response_sf(mf,hermi=0,max_memory=None,ctx=None):
     return vind
 
 
-def _cache_xc_kernel_sf_gpu_mol(mf, mo_coeff, mo_occ, max_memory=2000):
-    del max_memory
-    cp = require_cupy()
-    from gpu4pyscf.dft.numint import eval_rho2
 
-    ni = mf._numint
-    mol = mf.mol
-    xctype = ni._xc_type(mf.xc)
-    if xctype == "HF":
-        return None
-    if xctype not in ("LDA", "GGA", "MGGA"):
-        raise NotImplementedError(f"GPU ALDA0 response is not implemented for {xctype}.")
-    ao_deriv = _xc_ao_deriv(xctype)
-
-    mo_coeff = cp.asarray(mo_coeff)
-    mo_occ = cp.asarray(mo_occ)
-    opt = getattr(ni, "gdftopt", None)
-    if opt is None or mol not in [opt.mol, getattr(opt, "_sorted_mol", None)]:
-        ni.build(mol, mf.grids.coords)
-        opt = ni.gdftopt
-    sorted_mol = opt._sorted_mol
-    mo_coeff = opt.sort_orbitals(mo_coeff, axis=[1])
-
-    rhoa = []
-    rhob = []
-    for block in _iter_ao_blocks(mf, ni, ao_deriv, mol=sorted_mol, nao=mol.nao_nr()):
-        rhoa.append(eval_rho2(sorted_mol, block.ao, mo_coeff[0, block.idx, :], mo_occ[0], None, xctype, False))
-        rhob.append(eval_rho2(sorted_mol, block.ao, mo_coeff[1, block.idx, :], mo_occ[1], None, xctype, False))
-
-    rho_a = cp.hstack(rhoa)
-    rho_b = cp.hstack(rhob)
-    rho, denom = _alda0_rho_and_denom(cp, rho_a, rho_b, xctype)
-    vxc = ni.eval_xc_eff(mf.xc, rho, deriv=1, xctype=xctype, spin=1)[1]
-    # gpu4pyscf.tdscf._uhf_resp_sf.nr_uks_fxc_sf multiplies the spin-flip
-    # kernel by 2.0 internally for the xx/yy channels.
-    fxc_ab = (vxc[0, 0] - vxc[1, 0]) / (2.0 * (denom + 1e-9))
-    return cp.pad(fxc_ab[None, None], ((0, 3), (0, 3), (0, 0)))
-
-
-def _cache_xc_kernel_sf_gpu_pbc(mf, mo_coeff, mo_occ, max_memory=2000):
-    del max_memory
-    cp = require_cupy()
-    _ensure_gamma_df(mf)
-    ni = mf._numint
-    xctype = ni._xc_type(mf.xc)
-    if xctype == "HF":
-        return None
-    if xctype not in ("LDA", "GGA", "MGGA"):
-        raise NotImplementedError(f"GPU Gamma PBC ALDA0 response is not implemented for {xctype}.")
-    ao_deriv = _xc_ao_deriv(xctype)
-
-    dm = cp.asarray([
-        (mo_coeff[s] * mo_occ[s]) @ mo_coeff[s].conj().T
-        for s in range(2)
-    ])
-    fxc_abs = []
-    for block in _iter_ao_blocks(mf, ni, ao_deriv):
-        rho_a = ni.eval_rho(mf.cell, block.ao_ks, dm[0][None], xctype=xctype, hermi=0)
-        rho_b = ni.eval_rho(mf.cell, block.ao_ks, dm[1][None], xctype=xctype, hermi=0)
-        rho, denom = _alda0_rho_and_denom(cp, rho_a, rho_b, xctype)
-        vxc = ni.eval_xc_eff(mf.xc, rho, deriv=1, xctype=xctype)[1]
-        fxc_abs.append((vxc[0, 0] - vxc[1, 0]) * block.weight / (denom + 1e-9))
-    return cp.hstack(fxc_abs) if fxc_abs else cp.asarray([])
-
-
-def _cache_xc_kernel_sf_mc_gpu_mol(mf, mo_coeff, mo_occ, collinear_samples, max_memory=2000):
-    del max_memory
-    cp = require_cupy()
-    from gpu4pyscf.dft.numint import eval_rho2
-    from gpu4pyscf.tdscf._uhf_resp_sf import mcfun_eval_xc_adapter_sf
-
-    ni = mf._numint
-    mol = mf.mol
-    xctype = ni._xc_type(mf.xc)
-    ao_deriv = _xc_ao_deriv(xctype)
-
-    mo_coeff = cp.asarray(mo_coeff)
-    mo_occ = cp.asarray(mo_occ)
-    opt = getattr(ni, "gdftopt", None)
-    if opt is None or mol not in [opt.mol, getattr(opt, "_sorted_mol", None)]:
-        ni.build(mol, mf.grids.coords)
-        opt = ni.gdftopt
-    sorted_mol = opt._sorted_mol
-    mo_coeff = opt.sort_orbitals(mo_coeff, axis=[1])
-
-    rhoa = []
-    rhob = []
-    for block in _iter_ao_blocks(mf, ni, ao_deriv, mol=sorted_mol, nao=mol.nao_nr()):
-        rhoa.append(eval_rho2(sorted_mol, block.ao, mo_coeff[0, block.idx, :], mo_occ[0], None, xctype, False))
-        rhob.append(eval_rho2(sorted_mol, block.ao, mo_coeff[1, block.idx, :], mo_occ[1], None, xctype, False))
-
-    rho_ab = (cp.hstack(rhoa), cp.hstack(rhob))
-    rho_z = cp.asarray([rho_ab[0] + rho_ab[1], rho_ab[0] - rho_ab[1]])
-    eval_xc_eff = mcfun_eval_xc_adapter_sf(ni, mf.xc, collinear_samples)
-    return eval_xc_eff(mf.xc, rho_z, deriv=2, xctype=xctype)[2]
 
 
 def _gen_response_sf_mc_gpu_mol(mf, mo_coeff, mo_occ, hermi=0, collinear_samples=60, max_memory=None):
@@ -793,76 +551,61 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
         try:
             a_b2a = np.zeros((ctx.nc, ctx.nv, ctx.nc, ctx.nv))
 
-            try:
-                xctype = mf.xc
-            except AttributeError:
-                xctype = None
-
-            if xctype is not None:
-                ni = mf._numint
-                ni.libxc.test_deriv_order(mf.xc, 2, raise_error=True)
-                if getattr(mf, "nlc", None) or ni.libxc.is_nlc(mf.xc):
-                    logger.warning(
-                        'NLC functional found in DFT object. Its second '
-                        'derivative is not available and is not included in '
-                        'the response function.'
-                    )
-
-                omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, _system(mf).spin)
-                if hyb != 0:
+            if self.mfxctype is not None:
+                # ni = mf._numint
+                if self.hyb != 0:
                     a_b2a = add_hf_a_b2a(
-                        a_b2a, mf, ctx.orbo_b, ctx.orbv_a, ctx.nc, ctx.nv, hyb
+                        a_b2a, mf, ctx.orbo_b, ctx.orbv_a, ctx.nc, ctx.nv, self.hyb
                     )
-                if abs(omega) > 1e-10:
+                if abs(self.omega) > 1e-10:
                     a_b2a = add_hf_a_b2a(
                         a_b2a, mf, ctx.orbo_b, ctx.orbv_a, ctx.nc, ctx.nv,
-                        alpha - hyb, omega=omega
+                        self.alpha - self.hyb, omega=self.omega
                     )
 
-                xctype = ni._xc_type(mf.xc)
+                # xctype = ni._xc_type(mf.xc)
                 dm0 = _make_reference_dm(mf, ctx.mo_occ)
-                make_rho = ni._gen_rho_evaluator(_system(mf), dm0, hermi=0, with_lapl=False)[0]
-                mem_now = lib.current_memory()[0]
-                max_memory = max(2000, mf.max_memory * .8 - mem_now)
+                make_rho = self.ni._gen_rho_evaluator(_system(mf), dm0, hermi=0, with_lapl=False)[0]
+                max_memory = _response_max_memory(mf, None)
 
-            if xctype == 'LDA' and not getattr(self, "collinear", False):
-                ao_deriv = 0
-                for ao, mask, weight, coords in _iter_block_data(mf, ni, ao_deriv, max_memory):
-                    rho0a = make_rho(0, ao, mask, xctype)
-                    rho0b = make_rho(1, ao, mask, xctype)
-                    rho = (rho0a, rho0b)
-                    vxc = ni.eval_xc_eff(mf.xc, rho, deriv=1, omega=omega, xctype=xctype)[1]
-                    vxc_a = vxc[0, 0] * weight
-                    vxc_b = vxc[1, 0] * weight
-                    fxc_ab = (vxc_a - vxc_b) / (rho0a - rho0b + 1e-9)
-                    a_b2a += construct_xc(ao, ctx.orbo_b, ctx.orbv_a, fxc_ab)
+                if self.xctype == 'LDA' and not getattr(self, "collinear", False):
+                    ao_deriv = 0
+                    for ao, mask, weight, coords in _iter_block_data(mf, self.ni, ao_deriv, max_memory):
+                        rho0a = make_rho(0, ao, mask, self.xctype)
+                        rho0b = make_rho(1, ao, mask, self.xctype)
+                        rho = (rho0a, rho0b)
+                        vxc = self.ni.eval_xc_eff(mf.xc, rho, deriv=1, omega=self.omega, xctype=self.xctype)[1]
+                        vxc_a = vxc[0, 0] * weight
+                        vxc_b = vxc[1, 0] * weight
+                        fxc_ab = (vxc_a - vxc_b) / (rho0a - rho0b + 1e-9)
+                        a_b2a += construct_xc_b2a(ao, ctx.orbo_b, ctx.orbv_a, fxc_ab)
 
-            elif xctype == 'GGA' and not getattr(self, "collinear", False):  # 进行简化
-                ao_deriv = 0
-                for ao, mask, weight, coords in _iter_block_data(mf, ni, ao_deriv, max_memory):
-                    # 这里只需要 density，不需要 gradient
-                    rho0a = make_rho(0, ao, mask, 'LDA')
-                    rho0b = make_rho(1, ao, mask, 'LDA')
-                    # 为 GGA eval_xc_eff 构造 shape = (4, ngrids) 的输入
-                    rha = np.zeros((4, rho0a.size))
-                    rhb = np.zeros((4, rho0b.size))
-                    rha[0] = rho0a
-                    rhb[0] = rho0b
-                    vxc = ni.eval_xc_eff(
-                        mf.xc, (rha, rhb), deriv=1, omega=omega, xctype=xctype
-                    )[1]
-                    vxc_a = vxc[0, 0] * weight
-                    vxc_b = vxc[1, 0] * weight
-                    fxc_ab = (vxc_a - vxc_b) / (rho0a - rho0b + 1e-9)
-                    a_b2a += construct_xc(ao, ctx.orbo_b, ctx.orbv_a, fxc_ab)
+                elif self.xctype == 'GGA' and not getattr(self, "collinear", False):  # 进行简化
+                    ao_deriv = 0
+                    for ao, mask, weight, coords in _iter_block_data(mf, self.ni, ao_deriv, max_memory):
+                        # 这里只需要 density，不需要 gradient
+                        rho0a = make_rho(0, ao, mask, 'LDA')
+                        rho0b = make_rho(1, ao, mask, 'LDA')
+                        # 为 GGA eval_xc_eff 构造 shape = (4, ngrids) 的输入
+                        rha = np.zeros((4, rho0a.size))
+                        rhb = np.zeros((4, rho0b.size))
+                        rha[0] = rho0a
+                        rhb[0] = rho0b
+                        vxc = self.ni.eval_xc_eff(
+                            mf.xc, (rha, rhb), deriv=1, omega=self.omega, xctype=self.xctype
+                        )[1]
+                        vxc_a = vxc[0, 0] * weight
+                        vxc_b = vxc[1, 0] * weight
+                        fxc_ab = (vxc_a - vxc_b) / (rho0a - rho0b + 1e-9)
+                        a_b2a += construct_xc_b2a(ao, ctx.orbo_b, ctx.orbv_a, fxc_ab)
 
-            elif xctype is None:
+            else:
                 a_b2a = add_hf_a_b2a(a_b2a, mf, ctx.orbo_b, ctx.orbv_a, ctx.nc, ctx.nv, hyb=1)
 
             focka_mo, fockb_mo = (
                 _asnumpy(x) for x in _get_mo_fock(mf, ctx.mo_coeff, ctx.mo_occ)
             )
-            amat = _pair_hessian_block(
+            amat = _pair_hessian_block_b2a(
                 fockb_mo[:ctx.nc, :ctx.nc],
                 focka_mo[ctx.nocc_a:, ctx.nocc_a:],
                 a_b2a,
@@ -874,91 +617,99 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
         return self.A
     
     def get_Amat_MCOL(self, collinear_samples=30):
-        a_b2a = np.zeros((self.nocc_b,self.nvir_a,self.nocc_b,self.nvir_a))
-        
-        if isinstance(self.mf, dft.KohnShamDFT):
-            ni0 = self.mf._numint
-            ni = numint2c.NumInt2C()
-            ni.collinear = 'mcol'
-            ni.collinear_samples = collinear_samples
-            ni.libxc.test_deriv_order(self.mf.xc, 2, raise_error=True)
-            omega, alpha, hyb = ni.rsh_and_hybrid_coeff(self.mf.xc, _system(self.mf).spin)
-            
-            if hyb != 0:
-                a_b2a = add_hf_a_b2a(a_b2a, self.mf, self.orbo_b, self.orbv_a, self.nc, self.nv, hyb)
-            if omega != 0:
-                k_fac = alpha - hyb
-                if k_fac != 0:
-                    with _system(self.mf).with_range_coulomb(omega):
-                        a_b2a = add_hf_a_b2a(k_fac)
-            # If only HF exchange is requested
-            if collinear_samples < 0:
-                return a_b2a
-            xctype = ni._xc_type(self.mf.xc)
-            mem_now = lib.current_memory()[0]
-            max_memory = max(2000, self.mf.max_memory * 0.8 - mem_now)
-            
-            # This function is assumed to be available from your original file
-            fxc = cache_xc_kernel_sf_mc(
-                ni, self.mf, self.mf.grids, self.mf.xc, self.mo_coeff, self.mo_occ, deriv=2, spin=1)[2]
-            p0, p1 = 0, 0
-            if xctype == 'LDA':
-                ao_deriv = 0
-                for ao, mask, weight, coords in _iter_block_data(self.mf, ni0, ao_deriv, max_memory):
-                    p0 = p1
-                    p1 += weight.shape[0]
-                    wfxc = fxc[0, 0][..., p0:p1] * weight
-                    rho_o_b = contract('rp,pi->ri', ao, self.orbo_b, optimize=True)
-                    rho_v_a = contract('rp,pi->ri', ao, self.orbv_a, optimize=True)
-                    rho_ov_b2a = contract('ri,ra->ria', rho_o_b, rho_v_a, optimize=True)
-                    w_ov = contract('ria,r->ria', rho_ov_b2a, wfxc * 2.0, optimize=True)
-                    iajb = contract('ria,rjb->iajb', rho_ov_b2a, w_ov, optimize=True)
-                    a_b2a += iajb
-            elif xctype == 'GGA':
-                ao_deriv = 1
-                for ao, mask, weight, coords in _iter_block_data(self.mf, ni0, ao_deriv, max_memory):
-                    p0 = p1
-                    p1 += weight.shape[0]
-                    wfxc = fxc[..., p0:p1] * weight
-                    rho_o_b = contract('xrp,pi->xri', ao, self.orbo_b, optimize=True)
-                    rho_v_a = contract('xrp,pi->xri', ao, self.orbv_a, optimize=True)
-                    rho_ov_b2a = contract('xri,ra->xria', rho_o_b, rho_v_a[0], optimize=True)
-                    rho_ov_b2a[1:4] += contract('ri,xra->xria', rho_o_b[0], rho_v_a[1:4], optimize=True)
-                    w_ov = contract('xyr,xria->yria', wfxc * 2.0, rho_ov_b2a, optimize=True)
-                    iajb = contract('xria,xrjb->iajb', w_ov, rho_ov_b2a, optimize=True)
-                    a_b2a += iajb
-            elif xctype == 'MGGA':
-                ao_deriv = 1
-                for ao, mask, weight, coords in _iter_block_data(self.mf, ni0, ao_deriv, max_memory):
-                    p0 = p1
-                    p1 += weight.shape[0]
-                    wfxc = fxc[..., p0:p1] * weight
-                    rho_ob = contract('xrp,pi->xri', ao, self.orbo_b, optimize=True)
-                    rho_va = contract('xrp,pi->xri', ao, self.orbv_a, optimize=True)
-                    rho_ov_b2a = contract('xri,ra->xria', rho_ob, rho_va[0], optimize=True)
-                    rho_ov_b2a[1:4] += contract('ri,xra->xria', rho_ob[0], rho_va[1:4], optimize=True)
-                    tau_ov_b2a = contract('xri,xra->ria', rho_ob[1:4], rho_va[1:4], optimize=True) * 0.5
-                    rho_ov_b2a = np.vstack([rho_ov_b2a, tau_ov_b2a[np.newaxis]])
-                    w_ov = contract('xyr,xria->yria', wfxc * 2.0, rho_ov_b2a, optimize=True)
-                    iajb = contract('xria,xrjb->iajb', w_ov, rho_ov_b2a, optimize=True)
-                    a_b2a += iajb
-            elif xctype == 'HF':
-                pass
-            elif xctype == 'NLC':
-                raise NotImplementedError('NLC functional is not supported here.')
+        # Dense Amat is built with PySCF/NumPy.  GPU inputs are converted to CPU
+        # for construction, then converted back to the active backend at return.
+        mf = _as_cpu_mf(self.mf)
+        ctx = _as_cpu_ctx(mf, self.ctx)
+
+        mode = backend.mode
+        set_backend("cpu")
+        try:
+            a_b2a = np.zeros((ctx.nc, ctx.nv, ctx.nc, ctx.nv))
+
+            if self.mfxctype is not None:
+                ni0 = mf._numint
+                ni = pbc_numint2c.NumInt2C() if _is_pbc_mf(mf) else numint2c.NumInt2C()
+                ni.collinear = 'mcol'
+                ni.collinear_samples = collinear_samples
+
+                if self.hyb != 0:
+                    a_b2a = add_hf_a_b2a(
+                        a_b2a, mf, ctx.orbo_b, ctx.orbv_a, ctx.nc, ctx.nv, self.hyb
+                    )
+                if abs(self.omega) > 1e-10:
+                    a_b2a = add_hf_a_b2a(
+                        a_b2a, mf, ctx.orbo_b, ctx.orbv_a, ctx.nc, ctx.nv,
+                        self.alpha - self.hyb, omega=self.omega
+                    )
+
+                max_memory = _response_max_memory(mf, None)
+
+                if collinear_samples >= 0:
+                    fxc = cache_xc_kernel_sf_mc(
+                        ni, mf, _system(mf), mf.grids, mf.xc,
+                        ctx.mo_coeff, ctx.mo_occ, deriv=2, spin=1,
+                        max_memory=max_memory,
+                    )[2]
+                    p0, p1 = 0, 0
+                    if self.xctype == 'LDA':
+                        ao_deriv = 0
+                        for ao, mask, weight, coords in _iter_block_data(mf, ni0, ao_deriv, max_memory):
+                            p0 = p1
+                            p1 += weight.shape[0]
+                            wfxc = fxc[0, 0][..., p0:p1] * weight
+                            rho_o_b = contract('rp,pi->ri', ao, ctx.orbo_b, optimize=True)
+                            rho_v_a = contract('rp,pi->ri', ao, ctx.orbv_a, optimize=True)
+                            rho_ov_b2a = contract('ri,ra->ria', rho_o_b, rho_v_a, optimize=True)
+                            w_ov = contract('ria,r->ria', rho_ov_b2a, wfxc * 2.0, optimize=True)
+                            iajb = contract('ria,rjb->iajb', rho_ov_b2a, w_ov, optimize=True)
+                            a_b2a += iajb
+                    elif self.xctype == 'GGA':
+                        ao_deriv = 1
+                        for ao, mask, weight, coords in _iter_block_data(mf, ni, ao_deriv, max_memory):
+                            p0 = p1
+                            p1 += weight.shape[0]
+                            wfxc = fxc[..., p0:p1] * weight
+                            rho_o_b = contract('xrp,pi->xri', ao, ctx.orbo_b, optimize=True)
+                            rho_v_a = contract('xrp,pi->xri', ao, ctx.orbv_a, optimize=True)
+                            rho_ov_b2a = contract('xri,ra->xria', rho_o_b, rho_v_a[0], optimize=True)
+                            rho_ov_b2a[1:4] += contract('ri,xra->xria', rho_o_b[0], rho_v_a[1:4], optimize=True)
+                            w_ov = contract('xyr,xria->yria', wfxc * 2.0, rho_ov_b2a, optimize=True)
+                            iajb = contract('xria,xrjb->iajb', w_ov, rho_ov_b2a, optimize=True)
+                            a_b2a += iajb
+                    elif self.xctype == 'MGGA':
+                        ao_deriv = 1
+                        for ao, mask, weight, coords in _iter_block_data(mf, ni, ao_deriv, max_memory):
+                            p0 = p1
+                            p1 += weight.shape[0]
+                            wfxc = fxc[..., p0:p1] * weight
+                            rho_ob = contract('xrp,pi->xri', ao, ctx.orbo_b, optimize=True)
+                            rho_va = contract('xrp,pi->xri', ao, ctx.orbv_a, optimize=True)
+                            rho_ov_b2a = contract('xri,ra->xria', rho_ob, rho_va[0], optimize=True)
+                            rho_ov_b2a[1:4] += contract('ri,xra->xria', rho_ob[0], rho_va[1:4], optimize=True)
+                            tau_ov_b2a = contract('xri,xra->ria', rho_ob[1:4], rho_va[1:4], optimize=True) * 0.5
+                            rho_ov_b2a = np.vstack([rho_ov_b2a, tau_ov_b2a[np.newaxis]])
+                            w_ov = contract('xyr,xria->yria', wfxc * 2.0, rho_ov_b2a, optimize=True)
+                            iajb = contract('xria,xrjb->iajb', w_ov, rho_ov_b2a, optimize=True)
+                            a_b2a += iajb
+                    elif self.xctype == 'HF':
+                        pass
+                    elif self.xctype == 'NLC':
+                        raise NotImplementedError('NLC functional is not supported here.')
+                    else:
+                        raise NotImplementedError(f'Unsupported xctype: {self.xctype}')
             else:
-                raise NotImplementedError(f'Unsupported xctype: {xctype}')
-        else:
-            # Pure HF case
-            a_b2a = add_hf_a_b2a(1.0)
-        focka_mo, fockb_mo = (
-                _asnumpy(x) for x in _get_mo_fock(self.mf, self.mo_coeff, self.mo_occ)
-            )
-        amat = _pair_hessian_block(
-                fockb_mo[:self.nc, :self.nc],
-                focka_mo[self.nocc_a:, self.nocc_a:],
+                a_b2a = add_hf_a_b2a(a_b2a, mf, ctx.orbo_b, ctx.orbv_a, ctx.nc, ctx.nv, hyb=1)
+
+            focka_mo, fockb_mo = (_asnumpy(x) for x in _get_mo_fock(mf, ctx.mo_coeff, ctx.mo_occ))
+            amat = _pair_hessian_block_b2a(
+                fockb_mo[:ctx.nc, :ctx.nc],
+                focka_mo[ctx.nocc_a:, ctx.nocc_a:],
                 a_b2a,
             )
+        finally:
+            set_backend(mode)
+
         self.A = xp.asarray(amat)
         return self.A
     
