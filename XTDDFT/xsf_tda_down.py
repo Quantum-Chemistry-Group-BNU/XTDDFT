@@ -1,39 +1,34 @@
-from types import SimpleNamespace
-
 import math
+from types import SimpleNamespace
 import numpy as np
 from pyscf import ao2mo, scf, lib, dft
 from pyscf.dft import numint2c
 from pyscf.dft.gen_grid import NBINS
-from pyscf.dft.numint import _dot_ao_ao_sparse,_scale_ao_sparse,_tau_dot_sparse
 from pyscf.pbc import scf as pbc_scf
 from pyscf.pbc.dft import numint2c as pbc_numint2c
-
+from XTDDFT.hxc_part import (
+    cache_xc_kernel_sf_mc,
+    gen_response_sf,
+    gen_response_sf_mc,
+    AldA0
+) 
 from XTDDFT.base import (
     XTDDFT_base,
     _build_initial_guess_from_gaps,
     _ensure_gamma_df,
     _get_gamma_kpt,
-    _get_k,
     _get_hcore,
     _get_veff,
-    AldA0,
-    _is_gpu_mf,
     _is_pbc_mf,
-    _make_spinflip_problem,
-    _make_spinflip_vind,
     _run_davidson,
     _spinflip_gaps,
-    mf_info,
     _as_cpu_mf,
     _as_cpu_ctx,
     _system,
-    _is_ks_mf,
     _make_reference_dm,
     _response_max_memory,
-    cache_xc_kernel_sf_mc,
 )
-from utils.backend import _asnumpy, contract, xp
+from utils.backend import _asarray, _asnumpy, contract, xp
 from utils.unit import ha2eV
 
 try:
@@ -159,8 +154,54 @@ def _iter_block_data_cpu(mf, ni, ao_deriv, max_memory):
         ):
             yield ao, mask, weight, coords
 
+def _get_jk(mf, dm, hermi=0, batch=False):
+    dm = _asarray(dm)
+    if _is_pbc_mf(mf):
+        _ensure_gamma_df(mf)
+        with_df = getattr(mf, "with_df", None)
+        gamma_df = bool(getattr(with_df, "is_gamma_point", False))
+        if batch and dm.ndim == 3 and not gamma_df:
+            vjs, vks = [], []
+            for x in dm:
+                vj, vk = _get_jk(mf, x, hermi=hermi, batch=False)
+                vjs.append(vj)
+                vks.append(vk)
+            return xp.stack(vjs), xp.stack(vks)
+        if dm.ndim == 3 and dm.shape[0] != 2 and not batch:
+            return _get_jk(mf, dm, hermi=hermi, batch=True)
+        if gamma_df:
+            return with_df.get_jk(
+                dm, hermi=hermi, kpts=None, with_j=True, with_k=True,
+                exxdiv=getattr(mf, "exxdiv", None),
+            )
+        try:
+            return mf.get_jk(mf.cell, dm, hermi=hermi, kpt=_get_gamma_kpt(mf))
+        except TypeError:
+            return mf.get_jk(mf.cell, dm, hermi=hermi)
+    return mf.get_jk(mf.mol, dm, hermi=hermi)
+
+def _get_hf_mo_fock(mf, mo_coeff, mo_occ):
+    mo_coeff = _asarray(mo_coeff)
+    mo_occ = _asarray(mo_occ)
+    dm = xp.asarray([
+        (mo_coeff[s] * mo_occ[s]) @ mo_coeff[s].conj().T
+        for s in range(2)
+    ])
+    vj, vk = _get_jk(mf, dm, hermi=1)
+    vj, vk = _asarray(vj), _asarray(vk)
+    coul = vj if vj.ndim == 2 else vj[0] + vj[1]
+    if vk.ndim == 2:
+        vk = xp.stack([vk, vk])
+    vhf = coul - vk
+    h1e = _asarray(_get_hcore(mf))
+    return (
+        mo_coeff[0].conj().T @ (h1e + vhf[0]) @ mo_coeff[0],
+        mo_coeff[1].conj().T @ (h1e + vhf[1]) @ mo_coeff[1],
+    )
+
 class XSF_TDA_down(XTDDFT_base): # just for ROKS
-    def __init__(self, mf, method, davidson=True, SA = None, davidson_backend="cpu"):
+    def __init__(self, mf, method, davidson=True, SA = None, davidson_backend="cpu",
+                 collinear_samples=60):
         """SA=0: SF-TDA
            SA=1: only add diagonal block for dA
            SA=2: add all dA except for OO block
@@ -173,6 +214,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         self.isf = -1
         self.type_u = True
         self.davidson_backend = "cpu" if davidson_backend == "auto" else davidson_backend
+        self.collinear_samples = collinear_samples
         if SA is None:
             self.SA = 3
         else:
@@ -184,10 +226,12 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
     def get_Amat_ALDA0(self):
         mf = _as_cpu_mf(self.mf)
         ctx = _as_cpu_ctx(mf, self.ctx)
-        ni = mf._numint if hasattr(mf, "_numint") else self.ni
+        ni = getattr(mf, "_numint", None)
 
         a_a2b = np.zeros((ctx.nocc_a, ctx.nvir_b, ctx.nocc_a, ctx.nvir_b))
         if self.mfxctype is not None:  # 构建K矩阵
+            if ni is None:
+                ni = self.ni
             if self.hyb != 0:
                 a_a2b = add_hf_a_a2b(a_a2b, mf, ctx.orbo_a, ctx.orbv_b, ctx.nocc_a, ctx.nvir_b, self.hyb)
             # 范围分离泛函的处理
@@ -517,23 +561,302 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         self.e = xp.asarray(e[:nstates])
         self.v = xp.asarray(v[:, :nstates])
         return self.e, self.v
-    
-    def gen_tda_operation_sf(self)
 
-    def kernel(self, nstates=1, remove=None, frozen=None, foo=1.0, d_lda=0.3, fglobal=None, fit=True):
-        self.re = (_asnumpy(self.mf.mo_coeff).ndim != 3) if remove is None else bool(remove)
-        nov = (self.nc + self.no) * (self.no + self.nv)
-        self.nstates = min(nstates, nov)
-        if fglobal is None:
-            fglobal = self._default_fglobal(d_lda=d_lda, fit=fit)
-        self.fglobal = fglobal
-
+    def _prepare_dense_A(self, foo=1.0, fglobal=1.0, frozen=None):
         self.A = self.get_Amat(foo=foo, fglobal=fglobal)
         if self.re:
             logger.info(f"fglobal: {fglobal}")
             self.A = self.remove()
         elif frozen is not None:
             self.A = self.frozen_A(frozen)
+        return self.A
 
-        self._diagonalize_dense(self.A, self.nstates)
+    def _compress_removed_hdiag(self, hdiag):
+        nc, no, nv = self.nc, self.no, self.nv
+        nvir = no + nv
+        oo = xp.zeros(no * no, dtype=hdiag.dtype)
+        for i in range(no):
+            oo[i * no:(i + 1) * no] = hdiag[nc * nvir + i * nvir:nc * nvir + no + i * nvir]
+        new_oo = contract("x,xy->y", oo, self.vects)
+        new_hdiag = xp.zeros(int(hdiag.size) - 1, dtype=hdiag.dtype)
+        new_hdiag[:nc * nvir] = hdiag[:nc * nvir]
+        for i in range(no - 1):
+            new_hdiag[nc * nvir + i * nvir:nc * nvir + no + i * nvir] = new_oo[i * no:(i + 1) * no]
+            new_hdiag[nc * nvir + no + i * nvir:nc * nvir + no + nv + i * nvir] = hdiag[nc * nvir + no + i * nvir:nc * nvir + no + nv + i * nvir]
+        new_hdiag[nc * nvir + (no - 1) * nvir:nc * nvir + (no - 1) * nvir + no - 1] = new_oo[(no - 1) * no:]
+        new_hdiag[nc * nvir + (no - 1) * nvir + no - 1:] = hdiag[nc * nvir + (no - 1) * nvir + no:]
+        return new_hdiag
+
+    def _expand_removed_vectors(self, zs0):
+        nc, no, nv = self.nc, self.no, self.nv
+        nvir = no + nv
+        oo = xp.zeros((zs0.shape[0], no * no - 1), dtype=zs0.dtype)
+        for i in range(no - 1):
+            oo[:, i * no:(i + 1) * no] = zs0[:, nc * nvir + i * nvir:nc * nvir + no + i * nvir]
+        oo[:, (no - 1) * no:] = zs0[:, nc * nvir + (no - 1) * nvir:nc * nvir + (no - 1) * nvir + no - 1]
+        new_oo = contract("xy,ny->nx", self.vects, oo)
+        full = xp.zeros((zs0.shape[0], zs0.shape[1] + 1), dtype=zs0.dtype)
+        full[:, :nc * nvir] = zs0[:, :nc * nvir]
+        for i in range(no - 1):
+            full[:, nc * nvir + i * nvir:nc * nvir + no + i * nvir] = new_oo[:, i * no:(i + 1) * no]
+            full[:, nc * nvir + no + i * nvir:nc * nvir + no + nv + i * nvir] = zs0[:, nc * nvir + no + i * nvir:nc * nvir + no + nv + i * nvir]
+        full[:, nc * nvir + (no - 1) * nvir:nc * nvir + no + (no - 1) * nvir] = new_oo[:, -no:]
+        full[:, nc * nvir + (no - 1) * nvir + no:] = zs0[:, nc * nvir + (no - 1) * nvir + no - 1:]
+        return full
+
+    def _compress_removed_vectors(self, hx):
+        nc, no, nv = self.nc, self.no, self.nv
+        nvir = no + nv
+        out = xp.zeros((hx.shape[0], hx.shape[1] - 1), dtype=hx.dtype)
+        out[:, :nc * nvir] = hx[:, :nc * nvir]
+        oo = xp.zeros((hx.shape[0], no * no), dtype=hx.dtype)
+        for i in range(no):
+            oo[:, i * no:(i + 1) * no] = hx[:, nc * nvir + i * nvir:nc * nvir + no + i * nvir]
+        new_oo = contract("xy,nx->ny", self.vects, oo)
+        for i in range(no - 1):
+            out[:, nc * nvir + i * nvir:nc * nvir + no + i * nvir] = new_oo[:, i * no:(i + 1) * no]
+            out[:, nc * nvir + no + i * nvir:nc * nvir + no + nv + i * nvir] = hx[:, nc * nvir + no + i * nvir:nc * nvir + no + nv + i * nvir]
+        out[:, nc * nvir + (no - 1) * nvir:nc * nvir + (no - 1) * nvir + no - 1] = new_oo[:, (no - 1) * no:]
+        out[:, nc * nvir + (no - 1) * nvir + no - 1:] = hx[:, nc * nvir + (no - 1) * nvir + no:]
+        return out
+
+    def _order_davidson_vectors(self):
+        data = _asnumpy(self.v)
+        nroot = data.shape[1]
+        cv = np.zeros((nroot, self.nc, self.nv))
+        co = np.zeros((nroot, self.nc, self.no))
+        ov = np.zeros((nroot, self.no, self.nv))
+        oo = np.zeros((nroot, self.no * self.no - 1 if self.re else self.no * self.no))
+        nvir = self.no + self.nv
+        passed = self.nc * nvir
+        for state in range(nroot):
+            vec = data[:, state]
+            for i in range(self.nc):
+                co[state, i] = vec[i * nvir:i * nvir + self.no]
+                cv[state, i] = vec[i * nvir + self.no:i * nvir + self.no + self.nv]
+            if self.re:
+                for i in range(self.no - 1):
+                    oo[state, i * self.no:(i + 1) * self.no] = vec[passed + i * nvir:passed + i * nvir + self.no]
+                    ov[state, i] = vec[passed + i * nvir + self.no:passed + i * nvir + self.no + self.nv]
+                oo[state, (self.no - 1) * self.no:] = vec[passed + (self.no - 1) * nvir:passed + (self.no - 1) * nvir + self.no - 1]
+                ov[state, self.no - 1] = vec[passed + (self.no - 1) * nvir + self.no - 1:]
+            else:
+                for i in range(self.no):
+                    oo[state, i * self.no:(i + 1) * self.no] = vec[passed + i * nvir:passed + i * nvir + self.no]
+                    ov[state, i] = vec[passed + i * nvir + self.no:passed + i * nvir + self.no + self.nv]
+        ordered = np.hstack([
+            cv.reshape(nroot, -1),
+            co.reshape(nroot, -1),
+            ov.reshape(nroot, -1),
+            oo.reshape(nroot, -1),
+        ])
+        return xp.asarray(ordered.T)
+
+    def gen_response_sf_delta_A(self, hermi=0, max_memory=None):
+        del max_memory
+
+        def vind(dm1):
+            return _get_jk(self.mf, dm1, hermi=hermi, batch=True)
+
+        return vind
+
+    def gen_tda_operation_sf(self, foo=1.0, fglobal=1.0):
+        nc, no, nv = self.nc, self.no, self.nv
+        nvir = no + nv
+        nocc = nc + no
+        si = no / 2.0
+        if self.SA > 0 and _asnumpy(self.mf.mo_coeff).ndim != 3 and abs(2 * si - 1) < 1e-12:
+            raise ValueError(
+                "Table-3 Delta A contains 2*S_i-1 denominators and is singular for S_i=1/2. "
+                "Use SA=0 for doublet references."
+            )
+
+        mo_coeff = _asarray(self.mo_coeff)
+        mo_occ = _asarray(self.mo_occ)
+        orboa = mo_coeff[0][:, self.occidx_a]
+        orbvb = mo_coeff[1][:, self.viridx_b]
+        fockA, fockB = self._get_fock_mo()
+        hdiag = xp.asarray(_spinflip_gaps(self.ctx, self.isf))
+        if self.re:
+            self.vects = xp.asarray(self.get_vect())
+            hdiag = self._compress_removed_hdiag(hdiag)
+
+        vresp = (
+            gen_response_sf_mc(
+                self.mf, hermi=0, collinear_samples=self.collinear_samples,
+                ctx=self.ctx,
+            )
+            if self.method == 1
+            else gen_response_sf(self.mf, hermi=0, ctx=self.ctx)
+        )
+
+        use_delta_a = self.SA > 0 and _asnumpy(self.mf.mo_coeff).ndim != 3
+        if use_delta_a:
+            vresp_hf = self.gen_response_sf_delta_A(hermi=0)
+            fockA_hf, fockB_hf = _get_hf_mo_fock(self.mf, mo_coeff, mo_occ)
+            factor1 = xp.sqrt((2 * si + 1) / (2 * si)) - 1
+            factor2 = xp.sqrt((2 * si + 1) / (2 * si - 1))
+            factor3 = xp.sqrt((2 * si) / (2 * si - 1)) - 1
+            factor4 = 1 / xp.sqrt(2 * si * (2 * si - 1))
+            iden_O = xp.eye(no)
+
+        def vind(zs0):
+            zs0 = xp.asarray(zs0)
+            full_zs0 = self._expand_removed_vectors(zs0) if self.re else zs0.copy()
+            zs = full_zs0.reshape(-1, nocc, nvir)
+
+            dmov = contract("xov,qv,po->xpq", zs, orbvb.conj(), orboa)
+            v1ao = vresp(dmov)
+            vs = contract("xpq,po,qv->xov", v1ao, orboa.conj(), orbvb)
+            vs += contract("ab,xib->xia", fockB[self.nocc_b:, self.nocc_b:], zs)
+            vs -= contract("ij,xja->xia", fockA[:self.nocc_a, :self.nocc_a], zs)
+
+            if use_delta_a:
+                vs_dA = xp.zeros_like(vs)
+                cv1 = zs[:, :nc, no:]
+                co1 = zs[:, :nc, :no]
+                ov1 = zs[:, nc:, no:]
+                oo1 = zs[:, nc:, :no]
+
+                cv1_mo = contract("xov,qv,po->xpq", cv1, orbvb[:, no:].conj(), orboa[:, :nc])
+                co1_mo = contract("xov,qv,po->xpq", co1, orbvb[:, :no].conj(), orboa[:, :nc])
+                ov1_mo = contract("xov,qv,po->xpq", ov1, orbvb[:, no:].conj(), orboa[:, nc:nc + no])
+                oo1_mo = contract("xov,qv,po->xpq", oo1, orbvb[:, :no].conj(), orboa[:, nc:nc + no])
+
+                _, v1_cv_k = vresp_hf(cv1_mo)
+                v1_co_j, v1_co_k = vresp_hf(co1_mo)
+                v1_ov_j, v1_ov_k = vresp_hf(ov1_mo)
+                _, v1_oo_k = vresp_hf(oo1_mo)
+
+                v1_co_j = contract("xpq,po,qv->xov", v1_co_j, orboa.conj(), orbvb)
+                v1_ov_j = contract("xpq,po,qv->xov", v1_ov_j, orboa.conj(), orbvb)
+                v1_cv_k = contract("xpq,po,qv->xov", v1_cv_k, orboa.conj(), orbvb)
+                v1_co_k = contract("xpq,po,qv->xov", v1_co_k, orboa.conj(), orbvb)
+                v1_ov_k = contract("xpq,po,qv->xov", v1_ov_k, orboa.conj(), orbvb)
+                v1_oo_k = contract("xpq,po,qv->xov", v1_oo_k, orboa.conj(), orbvb)
+
+                vs_dA[:, :nc, no:] += (
+                    contract("ab,xib->xia", fockB_hf[nc + no:, nc + no:], zs[:, :nc, no:])
+                    - contract("ab,xib->xia", fockA_hf[nc + no:, nc + no:], zs[:, :nc, no:])
+                    + contract("ji,xja->xia", fockB_hf[:nc, :nc], zs[:, :nc, no:])
+                    - contract("ji,xja->xia", fockA_hf[:nc, :nc], zs[:, :nc, no:])
+                ) / (2 * si)
+                vs_dA[:, :nc, :no] += -v1_co_j[:, :nc, :no] / (2 * si - 1) + (
+                    contract("ji,xju->xiu", fockB_hf[:nc, :nc], zs[:, :nc, :no])
+                    - contract("ji,xju->xiu", fockA_hf[:nc, :nc], zs[:, :nc, :no])
+                ) / (2 * si - 1)
+                vs_dA[:, nc:, no:] += -v1_ov_j[:, nc:, no:] / (2 * si - 1) + (
+                    contract("ab,xub->xua", fockB_hf[nc + no:, nc + no:], zs[:, nc:, no:])
+                    - contract("ab,xub->xua", fockA_hf[nc + no:, nc + no:], zs[:, nc:, no:])
+                ) / (2 * si - 1)
+
+                if self.SA > 1:
+                    vs_dA[:, :nc, no:] += factor1 * (
+                        -v1_co_k[:, :nc, no:]
+                        + contract("av,xiv->xia", fockB_hf[nc + no:, nc:nc + no], zs[:, :nc, :no])
+                    )
+                    vs_dA[:, :nc, :no] += factor1 * (
+                        -v1_cv_k[:, :nc, :no]
+                        + contract("av,xja->xjv", fockB_hf[nc + no:, nc:nc + no], zs[:, :nc, no:])
+                    )
+                    vs_dA[:, :nc, no:] += factor1 * (
+                        -v1_ov_k[:, :nc, no:]
+                        - contract("vi,xva->xia", fockA_hf[nc:nc + no, :nc], zs[:, nc:, no:])
+                    )
+                    vs_dA[:, nc:, no:] += factor1 * (
+                        -v1_cv_k[:, nc:, no:]
+                        - contract("vi,xib->xvb", fockA_hf[nc:nc + no, :nc], zs[:, :nc, no:])
+                    )
+                    vs_dA[:, :nc, :no] += (v1_ov_j[:, :nc, :no] - v1_ov_k[:, :nc, :no]) / (2 * si - 1)
+                    vs_dA[:, nc:, no:] += (v1_co_j[:, nc:, no:] - v1_co_k[:, nc:, no:]) / (2 * si - 1)
+
+                if self.SA > 2:
+                    vs_dA[:, :nc, no:] += foo * (
+                        -(factor2 - 1) * v1_oo_k[:, :nc, no:]
+                        + (factor2 / (2 * si)) * (
+                            contract("ia,xvv->xia", fockB_hf[:nc, nc + no:], zs[:, nc:, :no])
+                            - contract("ia,xvv->xia", fockA_hf[:nc, nc + no:], zs[:, nc:, :no])
+                        )
+                    )
+                    vs_dA[:, nc:, :no] += foo * (
+                        -(factor2 - 1) * v1_cv_k[:, nc:, :no]
+                        + (factor2 / (2 * si)) * (
+                            contract("vw,ia,xia->xvw", iden_O, fockB_hf[:nc, nc + no:], zs[:, :nc, no:])
+                            - contract("vw,ia,xia->xvw", iden_O, fockA_hf[:nc, nc + no:], zs[:, :nc, no:])
+                        )
+                    )
+                    vs_dA[:, :nc, :no] += foo * (
+                        factor3 * (
+                            -v1_oo_k[:, :nc, :no]
+                            - contract("iw,xwu->xiu", fockA_hf[:nc, nc:nc + no], zs[:, nc:, :no])
+                        )
+                        + factor4 * contract("vw,iu,xvw->xiu", iden_O, fockB_hf[:nc, nc:nc + no], zs[:, nc:, :no])
+                    )
+                    vs_dA[:, nc:, :no] += foo * (
+                        factor3 * (
+                            -v1_co_k[:, nc:, :no]
+                            - contract("iw,xiv->xwv", fockA_hf[:nc, nc:nc + no], zs[:, :nc, :no])
+                        )
+                        + factor4 * contract("vw,iu,xiu->xvw", iden_O, fockB_hf[:nc, nc:nc + no], zs[:, :nc, :no])
+                    )
+                    vs_dA[:, nc:, no:] += foo * (
+                        factor3 * (
+                            -v1_oo_k[:, nc:, no:]
+                            + contract("av,xuv->xua", fockB_hf[nc + no:, nc:nc + no], zs[:, nc:, :no])
+                        )
+                        - factor4 * contract("vw,au,xvw->xua", iden_O, fockA_hf[nc + no:, nc:nc + no], zs[:, nc:, :no])
+                    )
+                    vs_dA[:, nc:, :no] += foo * (
+                        factor3 * (
+                            -v1_ov_k[:, nc:, :no]
+                            + contract("av,xwa->xwv", fockB_hf[nc + no:, nc:nc + no], zs[:, nc:, no:])
+                        )
+                        - factor4 * contract("vw,au,xua->xwv", iden_O, fockA_hf[nc + no:, nc:nc + no], zs[:, nc:, no:])
+                    )
+                vs += fglobal * vs_dA
+
+            hx = vs.reshape(zs.shape[0], -1)
+            return self._compress_removed_vectors(hx) if self.re else hx
+
+        return vind, hdiag
+
+    def init_guess(self, nstates, hdiag=None):
+        if hdiag is None:
+            hdiag = _spinflip_gaps(self.ctx, self.isf)
+        return _build_initial_guess_from_gaps(hdiag, nstates)
+
+    def davidson_process(self, nstates, foo=1.0, fglobal=1.0):
+        vind, hdiag = self.gen_tda_operation_sf(
+            foo=foo, fglobal=fglobal
+        )
+        nroots = min(nstates, int(hdiag.size))
+        x0 = self.init_guess(nroots, hdiag=hdiag)
+        converged, e, x1 = _run_davidson(
+            self.mf, self.davidson_backend,
+            vind, hdiag, x0, nroots,
+            positive_eig_threshold=1.0e-3 if _is_pbc_mf(self.mf) else None,
+        )
+        self.converged = converged
+        self.e = xp.asarray(e)
+        self.v = xp.asarray(_asnumpy(x1)).T
+        self.v = self._order_davidson_vectors()
+        logger.info('XSF_TDA_down Davidson converged: {}', converged)
+        return self.e, self.v
+
+    def kernel(self, nstates=1, remove=None, frozen=None, foo=1.0, d_lda=0.3, fglobal=None, fit=True):
+        self.re = (_asnumpy(self.mf.mo_coeff).ndim != 3) if remove is None else bool(remove)
+        nov = (self.nc + self.no) * (self.no + self.nv)
+        effective_dim = nov - 1 if self.re else nov
+        self.nstates = min(nstates, effective_dim)
+        if fglobal is None:
+            fglobal = self._default_fglobal(d_lda=d_lda, fit=fit)
+        self.fglobal = fglobal
+
+        if self.davidson:
+            if frozen is not None:
+                raise NotImplementedError("frozen orbital truncation is only implemented for dense XSF_TDA_down.")
+            self.davidson_process(self.nstates, foo=foo, fglobal=fglobal)
+        else:
+            self._prepare_dense_A(foo=foo, fglobal=fglobal, frozen=frozen)
+            self._diagonalize_dense(self.A, self.nstates)
         return _asnumpy(self.e[:self.nstates] * ha2eV), self.v[:, :self.nstates]

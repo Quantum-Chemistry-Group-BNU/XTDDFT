@@ -1,5 +1,4 @@
 from types import SimpleNamespace
-import functools
 import numpy as np
 from pyscf import lib
 from pyscf.dft import numint, xc_deriv
@@ -211,10 +210,19 @@ def _get_k(mf, dm, hermi=0, omega=None):
         kwargs["omega"] = omega
     if _is_pbc_mf(mf):
         _ensure_gamma_df(mf)
+        dm = _asarray(dm)
         try:
             return mf.get_k(mf.cell, dm, kpt=_get_gamma_kpt(mf), **kwargs)
-        except TypeError:
-            return mf.get_k(mf.cell, dm, **kwargs)
+        except (TypeError, AssertionError) as err:
+            try:
+                return mf.get_k(mf.cell, dm, **kwargs)
+            except (TypeError, AssertionError):
+                if dm.ndim == 3:
+                    return xp.stack([
+                        _get_k(mf, dm_i, hermi=hermi, omega=omega)
+                        for dm_i in dm
+                    ])
+                raise err
     return mf.get_k(mf.mol, dm, **kwargs)
 
 def _is_unrestricted_mf(mf):
@@ -286,262 +294,6 @@ def _get_mo_fock(mf, mo_coeff, mo_occ=None, force_cpu=False):
     fockb_mo = mo_coeff[1].conj().T @ (h1e + vhf[1]) @ mo_coeff[1]
     return focka_mo, fockb_mo
 
-def _xc_ao_deriv(xctype, with_lapl=False):
-    if xctype == "GGA":
-        return 1
-    if xctype == "MGGA":
-        return 2 if with_lapl else 1
-    return 0
-
-def _iter_ao_blocks(mf, ni, ao_deriv, max_memory=None, mol=None, nao=None, kpt=None, force_cpu=False):
-    if not force_cpu and _is_gpu_mf(mf):
-        if _is_pbc_mf(mf):
-            _ensure_gamma_df(mf)
-            kpt = _get_gamma_kpt(mf) if kpt is None else kpt
-            for ao_ks, weight, coords in ni.block_loop(mf.cell, mf.grids, ao_deriv, kpt):
-                yield SimpleNamespace(
-                    ao=ao_ks[0], ao_ks=ao_ks, mask=None,
-                    weight=weight, coords=coords, idx=None,
-                )
-        else:
-            mol = mf.mol if mol is None else mol
-            nao = mol.nao_nr() if nao is None else nao
-            for ao, idx, weight, coords in ni.block_loop(mol, mf.grids, nao, ao_deriv):
-                yield SimpleNamespace(
-                    ao=ao, ao_ks=None, mask=None,
-                    weight=weight, coords=coords, idx=idx,
-                )
-        return
-
-    if _is_pbc_mf(mf):
-        kpt = _get_gamma_kpt(mf) if kpt is None else kpt
-        for ao, ao_k2, mask, weight, coords in ni.block_loop(
-            mf.cell, mf.grids, mf.cell.nao_nr(), ao_deriv,
-            kpt, None, max_memory,
-        ):
-            yield SimpleNamespace(
-                ao=ao, ao_ks=(ao, ao_k2), mask=mask,
-                weight=weight, coords=coords, idx=None,
-            )
-    else:
-        for ao, mask, weight, coords in ni.block_loop(
-            mf.mol, mf.grids, mf.mol.nao_nr(), ao_deriv, max_memory
-        ):
-            yield SimpleNamespace(
-                ao=ao, ao_ks=None, mask=mask,
-                weight=weight, coords=coords, idx=None,
-            )
-
-
-def _iter_block_data(mf, ni, ao_deriv, max_memory, force_cpu=False):
-    for block in _iter_ao_blocks(mf, ni, ao_deriv, max_memory, force_cpu=force_cpu):
-        yield block.ao, block.mask, block.weight, block.coords
-
-def AldA0(ni, mf, rho, weight, xctype, omega=None):
-    vxc = ni.eval_xc_eff(mf.xc, rho, deriv=1, omega=omega, xctype=xctype)[1]
-    vxc_a = vxc[0, 0] * weight
-    vxc_b = vxc[1, 0] * weight
-    if xctype == "LDA":
-        denom = np.asarray(rho[0]) - np.asarray(rho[1])
-    else:
-        denom = np.asarray(rho[0][0]) - np.asarray(rho[1][0])
-    return (vxc_a - vxc_b) / (denom + 1e-9)
-
-def __mcfun_fn_eval_xc(ni, xc_code, xctype, rho, deriv):
-    evfk = ni.eval_xc_eff(xc_code, rho, deriv=deriv, xctype=xctype)
-    for order in range(1, deriv + 1):
-        if evfk[order] is not None:
-            evfk[order] = xc_deriv.ud2ts(evfk[order])
-    return evfk
-
-def mcfun_eval_xc_adapter_sf(ni, xc_code):
-    try:
-        import mcfun
-    except ImportError:
-        raise ImportError(
-            "This feature requires mcfun library.\n"
-            "Try install mcfun with `pip install mcfun`"
-        )
-
-    xctype = ni._xc_type(xc_code)
-    fn_eval_xc = functools.partial(__mcfun_fn_eval_xc, ni, xc_code, xctype)
-    nproc = lib.num_threads()
-
-    def eval_xc_eff(xc_code, rho, deriv=1, omega=None, xctype=None, verbose=None):
-        del xc_code, omega, xctype, verbose
-        return mcfun.eval_xc_eff_sf(
-            fn_eval_xc, rho, deriv,
-            collinear_samples=ni.collinear_samples,
-            workers=nproc,
-        )
-    return eval_xc_eff
-
-def cache_xc_kernel_sf(mf, mo_coeff, mo_occ, spin=1,max_memory=2000): # for ALDA0
-    '''Compute the fxc_sf, which can be used in SF-TDDFT/TDA
-    '''
-    MGGA_DENSITY_LAPL = False
-    with_lapl = MGGA_DENSITY_LAPL
-    ni = mf._numint
-    xctype = ni._xc_type(mf.xc)
-    if mo_coeff is None or mo_occ is None:
-        _, mo_occ, mo_coeff = mf_info(mf)
-
-    ao_deriv = _xc_ao_deriv(xctype, MGGA_DENSITY_LAPL)
-
-    assert mo_coeff[0].ndim == 2
-    assert spin == 1
-
-    nao = mo_coeff[0].shape[0]
-    dm0 = mf.make_rdm1()
-    if np.array(mf.mo_coeff).ndim==2:
-        dm0.mo_coeff = (mf.mo_coeff, mf.mo_coeff)
-        dm0.mo_occ = mo_occ
-    make_rho = ni._gen_rho_evaluator(_system(mf), dm0, hermi=0, with_lapl=False)[0]
-
-    fxc_abs = []
-    for ao, mask, weight, coords in _iter_block_data(mf, ni, ao_deriv, max_memory):
-        rhoa = make_rho(0, ao, mask, xctype)
-        rhob = make_rho(1, ao, mask, xctype)
-        if xctype == 'LDA':
-            rho = (rhoa,rhob)
-        else: # GGA
-            rha = np.zeros_like(rhoa)
-            rhb = np.zeros_like(rhob)
-            rha[0] = rhoa[0]
-            rhb[0] = rhob[0]
-            rho = (rha,rhb)
-            rhoa = rhoa[0]
-            rhob = rhob[0]
-        fxc_ab = AldA0(ni, mf, rho, weight, xctype)
-        fxc_abs += list(fxc_ab)
-    fxc_abs = np.asarray(fxc_abs)
-    return fxc_abs
-
-def cache_xc_kernel_sf_mc(self, mf, mol, grids, xc_code, mo_coeff, mo_occ, deriv=2,spin=1,max_memory=2000):
-    '''Compute the fxc_sf, which can be used in SF-TDDFT/TDA
-    '''
-    MGGA_DENSITY_LAPL = False
-    xctype = self._xc_type(xc_code)
-    ao_deriv = _xc_ao_deriv(xctype, MGGA_DENSITY_LAPL)
-    with_lapl = MGGA_DENSITY_LAPL
-
-    assert mo_coeff[0].ndim == 2
-    assert spin == 1
-
-    nao = mo_coeff[0].shape[0]
-    rhoa = []
-    rhob = []
-
-    ni_eval = pbc_numint.NumInt() if _is_pbc_mf(mf) else numint.NumInt()
-    ni_block = self if _is_pbc_mf(mf) else ni_eval
-    for ao, mask, weight, coords in _iter_block_data(mf, ni_block, ao_deriv, max_memory):
-        rhoa.append(ni_eval.eval_rho2(mol, ao, mo_coeff[0], mo_occ[0], mask, xctype, with_lapl))
-        rhob.append(ni_eval.eval_rho2(mol, ao, mo_coeff[1], mo_occ[1], mask, xctype, with_lapl))
-    rho_ab = (np.hstack(rhoa), np.hstack(rhob))
-    rho_ab = np.asarray(rho_ab)
-    rho_tmz = np.zeros_like(rho_ab)+1e-11
-    rho_tmz[0] += rho_ab[0]+rho_ab[1]
-    rho_tmz[1] += rho_ab[0]-rho_ab[1]
-    eval_xc = mcfun_eval_xc_adapter_sf(self,xc_code)
-    fxc_sf = eval_xc(xc_code, rho_tmz, deriv=2, xctype=xctype)
-    return fxc_sf
-
-def _cache_xc_kernel_sf_gpu_mol(mf, mo_coeff, mo_occ, max_memory=2000):
-    del max_memory
-    cp = require_cupy()
-    from gpu4pyscf.dft.numint import eval_rho2
-
-    ni = mf._numint
-    mol = mf.mol
-    xctype = ni._xc_type(mf.xc)
-    if xctype == "HF":
-        return None
-    if xctype not in ("LDA", "GGA", "MGGA"):
-        raise NotImplementedError(f"GPU ALDA0 response is not implemented for {xctype}.")
-    ao_deriv = _xc_ao_deriv(xctype)
-
-    mo_coeff = cp.asarray(mo_coeff)
-    mo_occ = cp.asarray(mo_occ)
-    opt = getattr(ni, "gdftopt", None)
-    if opt is None or mol not in [opt.mol, getattr(opt, "_sorted_mol", None)]:
-        ni.build(mol, mf.grids.coords)
-        opt = ni.gdftopt
-    sorted_mol = opt._sorted_mol
-    mo_coeff = opt.sort_orbitals(mo_coeff, axis=[1])
-
-    rhoa = []
-    rhob = []
-    for block in _iter_ao_blocks(mf, ni, ao_deriv, mol=sorted_mol, nao=mol.nao_nr()):
-        rhoa.append(eval_rho2(sorted_mol, block.ao, mo_coeff[0, block.idx, :], mo_occ[0], None, xctype, False))
-        rhob.append(eval_rho2(sorted_mol, block.ao, mo_coeff[1, block.idx, :], mo_occ[1], None, xctype, False))
-
-    rho_a = cp.hstack(rhoa)
-    rho_b = cp.hstack(rhob)
-    rho, denom = _alda0_rho_and_denom(cp, rho_a, rho_b, xctype)
-    vxc = ni.eval_xc_eff(mf.xc, rho, deriv=1, xctype=xctype, spin=1)[1]
-    # gpu4pyscf.tdscf._uhf_resp_sf.nr_uks_fxc_sf multiplies the spin-flip
-    # kernel by 2.0 internally for the xx/yy channels.
-    fxc_ab = (vxc[0, 0] - vxc[1, 0]) / (2.0 * (denom + 1e-9))
-    return cp.pad(fxc_ab[None, None], ((0, 3), (0, 3), (0, 0)))
-
-
-def _cache_xc_kernel_sf_gpu_pbc(mf, mo_coeff, mo_occ, max_memory=2000):
-    del max_memory
-    cp = require_cupy()
-    _ensure_gamma_df(mf)
-    ni = mf._numint
-    xctype = ni._xc_type(mf.xc)
-    if xctype == "HF":
-        return None
-    if xctype not in ("LDA", "GGA", "MGGA"):
-        raise NotImplementedError(f"GPU Gamma PBC ALDA0 response is not implemented for {xctype}.")
-    ao_deriv = _xc_ao_deriv(xctype)
-
-    dm = cp.asarray([
-        (mo_coeff[s] * mo_occ[s]) @ mo_coeff[s].conj().T
-        for s in range(2)
-    ])
-    fxc_abs = []
-    for block in _iter_ao_blocks(mf, ni, ao_deriv):
-        rho_a = ni.eval_rho(mf.cell, block.ao_ks, dm[0][None], xctype=xctype, hermi=0)
-        rho_b = ni.eval_rho(mf.cell, block.ao_ks, dm[1][None], xctype=xctype, hermi=0)
-        rho, denom = _alda0_rho_and_denom(cp, rho_a, rho_b, xctype)
-        vxc = ni.eval_xc_eff(mf.xc, rho, deriv=1, xctype=xctype)[1]
-        fxc_abs.append((vxc[0, 0] - vxc[1, 0]) * block.weight / (denom + 1e-9))
-    return cp.hstack(fxc_abs) if fxc_abs else cp.asarray([])
-
-
-def _cache_xc_kernel_sf_mc_gpu_mol(mf, mo_coeff, mo_occ, collinear_samples, max_memory=2000):
-    del max_memory
-    cp = require_cupy()
-    from gpu4pyscf.dft.numint import eval_rho2
-    from gpu4pyscf.tdscf._uhf_resp_sf import mcfun_eval_xc_adapter_sf
-
-    ni = mf._numint
-    mol = mf.mol
-    xctype = ni._xc_type(mf.xc)
-    ao_deriv = _xc_ao_deriv(xctype)
-
-    mo_coeff = cp.asarray(mo_coeff)
-    mo_occ = cp.asarray(mo_occ)
-    opt = getattr(ni, "gdftopt", None)
-    if opt is None or mol not in [opt.mol, getattr(opt, "_sorted_mol", None)]:
-        ni.build(mol, mf.grids.coords)
-        opt = ni.gdftopt
-    sorted_mol = opt._sorted_mol
-    mo_coeff = opt.sort_orbitals(mo_coeff, axis=[1])
-
-    rhoa = []
-    rhob = []
-    for block in _iter_ao_blocks(mf, ni, ao_deriv, mol=sorted_mol, nao=mol.nao_nr()):
-        rhoa.append(eval_rho2(sorted_mol, block.ao, mo_coeff[0, block.idx, :], mo_occ[0], None, xctype, False))
-        rhob.append(eval_rho2(sorted_mol, block.ao, mo_coeff[1, block.idx, :], mo_occ[1], None, xctype, False))
-
-    rho_ab = (cp.hstack(rhoa), cp.hstack(rhob))
-    rho_z = cp.asarray([rho_ab[0] + rho_ab[1], rho_ab[0] - rho_ab[1]])
-    eval_xc_eff = mcfun_eval_xc_adapter_sf(ni, mf.xc, collinear_samples)
-    return eval_xc_eff(mf.xc, rho_z, deriv=2, xctype=xctype)[2]
-
 def _spinflip_gaps(ctx, isf):
     if isf == 1:
         return (ctx.mo_energy[0][ctx.viridx_a, None]
@@ -603,17 +355,24 @@ def _make_spinflip_vind(problem, vresp):
         return vs.reshape(zs.shape[0], -1)
     return vind
 
-def _cpu_davidson(vind, hdiag, x0, nroots):
+def _cpu_davidson(vind, hdiag, x0, nroots, positive_eig_threshold=None):
     def aop(xs):
         return _asnumpy(vind(xp.asarray(xs)))
+
+    pick = None
+    if positive_eig_threshold is not None:
+        def pick(w, v, nroots, envs):
+            del envs
+            idx = np.where(w > positive_eig_threshold)[0]
+            return w[idx], v[:, idx], idx
 
     return lib.davidson1(
         aop, _asnumpy(x0), _asnumpy(hdiag),
         tol=1e-7, lindep=1e-14,
-        nroots=nroots, max_cycle=3000,
+        nroots=nroots, max_cycle=3000, pick=pick,
     )
 
-def _gpu_davidson(vind, hdiag, x0, nroots):
+def _gpu_davidson(vind, hdiag, x0, nroots, positive_eig_threshold=None):
     cp = require_cupy()
     from gpu4pyscf.tdscf._lr_eig import eigh as lr_eigh
 
@@ -621,7 +380,8 @@ def _gpu_davidson(vind, hdiag, x0, nroots):
     x0 = cp.asarray(x0)
 
     def precond(dx, e, *args):
-        denom = hdiag - e
+        e = cp.asarray(e)
+        denom = hdiag - e[:, None] if e.ndim > 0 and dx.ndim > 1 else hdiag - e
         threshold = 1.0e-8
         small = abs(denom) < threshold
         denom = cp.where(small, cp.where(denom >= 0, threshold, -threshold), denom)
@@ -629,7 +389,10 @@ def _gpu_davidson(vind, hdiag, x0, nroots):
 
     def pick(w, v, nroots, envs):
         del envs
-        idx = cp.argsort(w)[:nroots]
+        if positive_eig_threshold is None:
+            idx = cp.argsort(w)[:nroots]
+        else:
+            idx = cp.where(w > positive_eig_threshold)[0]
         return w[idx], v[:, idx], idx
 
     return lr_eigh(
@@ -638,12 +401,19 @@ def _gpu_davidson(vind, hdiag, x0, nroots):
         nroots=nroots, pick=pick, max_cycle=3000,
     )[:3]
 
-def _run_davidson(mf, davidson_backend, vind, hdiag, x0, nroots):
+def _run_davidson(mf, davidson_backend, vind, hdiag, x0, nroots,
+                  positive_eig_threshold=None):
     if davidson_backend == "gpu":
         if not _is_gpu_mf(mf):
             raise RuntimeError("davidson_backend='gpu' requires the gpu backend/gpu4pyscf path.")
-        return _gpu_davidson(vind, hdiag, x0, nroots)
-    return _cpu_davidson(vind, hdiag, x0, nroots)
+        return _gpu_davidson(
+            vind, hdiag, x0, nroots,
+            positive_eig_threshold=positive_eig_threshold,
+        )
+    return _cpu_davidson(
+        vind, hdiag, x0, nroots,
+        positive_eig_threshold=positive_eig_threshold,
+    )
 
 class XTDDFT_base:
     def __init__(self, mf, method, davidson=True):
