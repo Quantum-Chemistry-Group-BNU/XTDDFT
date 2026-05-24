@@ -1,10 +1,8 @@
 import math
 from types import SimpleNamespace
 import numpy as np
-from pyscf import ao2mo, scf, lib, dft
+from pyscf import ao2mo
 from pyscf.dft import numint2c
-from pyscf.dft.gen_grid import NBINS
-from pyscf.pbc import scf as pbc_scf
 from pyscf.pbc.dft import numint2c as pbc_numint2c
 from XTDDFT.hxc_part import (
     cache_xc_kernel_sf_mc,
@@ -14,12 +12,16 @@ from XTDDFT.hxc_part import (
 ) 
 from XTDDFT.base import (
     XTDDFT_base,
+    _ao2mo_full_gamma,
     _build_initial_guess_from_gaps,
-    _ensure_gamma_df,
     _get_gamma_kpt,
-    _get_hcore,
-    _get_veff,
+    _get_hf_mo_fock,
+    _get_jk,
+    _get_mo_fock,
+    _get_ovlp,
     _is_pbc_mf,
+    _iter_block_data,
+    _make_rohf_reference_mf,
     _run_davidson,
     _spinflip_gaps,
     _as_cpu_mf,
@@ -87,118 +89,6 @@ def _convert_a2b_to_cv_co_ov_oo(amat, nc, no, nv):
     ordered = np.asarray(amat)[np.ix_(idx, idx)]
     return ordered
 
-def _make_rohf_reference_mf(mf):
-    if _is_pbc_mf(mf):
-        hf = pbc_scf.ROHF(mf.cell)
-        hf.kpt = _get_gamma_kpt(mf)
-    else:
-        hf = scf.ROHF(mf.mol)
-        if getattr(mf, "with_x2c", None) is not None and hasattr(hf, "x2c"):
-            hf = hf.x2c()
-
-    for name in ("with_df", "exxdiv", "max_memory", "verbose", "stdout"):
-        if hasattr(mf, name):
-            try:
-                setattr(hf, name, getattr(mf, name))
-            except AttributeError:
-                pass
-    return hf
-
-def _ao2mo_full_gamma(mf, mo_coeff):
-    mo_coeff = _asnumpy(mo_coeff)
-    nmo = mo_coeff.shape[1]
-    if _is_pbc_mf(mf):
-        _ensure_gamma_df(mf)
-        kpt = _get_gamma_kpt(mf)
-        try:
-            eri = mf.with_df.ao2mo([mo_coeff] * 4, kpt, compact=False)
-        except TypeError:
-            eri = mf.with_df.ao2mo([mo_coeff] * 4, [kpt] * 4, compact=False)
-    else:
-        eri = ao2mo.general(mf.mol, [mo_coeff] * 4, compact=False)
-    return _asnumpy(eri).reshape(nmo, nmo, nmo, nmo)
-
-def _as_spin_potential_cpu(vhf):
-    vhf = _asnumpy(vhf)
-    if vhf.ndim == 3 and vhf.shape[0] == 1:
-        vhf = vhf[0]
-    if vhf.ndim == 4 and vhf.shape[1] == 1:
-        vhf = vhf[:, 0]
-    if vhf.ndim == 2:
-        vhf = np.stack([vhf, vhf])
-    return vhf
-
-def _get_mo_fock_cpu(mf, mo_coeff, mo_occ):
-    mo_coeff = _asnumpy(mo_coeff)
-    mo_occ = _asnumpy(mo_occ)
-    dm = np.asarray([
-        (mo_coeff[s] * mo_occ[s]) @ mo_coeff[s].conj().T
-        for s in range(2)
-    ])
-    vhf = _as_spin_potential_cpu(_get_veff(mf, dm))
-    h1e = _asnumpy(_get_hcore(mf))
-    focka_mo = mo_coeff[0].conj().T @ (h1e + vhf[0]) @ mo_coeff[0]
-    fockb_mo = mo_coeff[1].conj().T @ (h1e + vhf[1]) @ mo_coeff[1]
-    return focka_mo, fockb_mo
-
-def _iter_block_data_cpu(mf, ni, ao_deriv, max_memory):
-    if _is_pbc_mf(mf):
-        for ao, ao_k2, mask, weight, coords in ni.block_loop(
-            mf.cell, mf.grids, mf.cell.nao_nr(), ao_deriv,
-            _get_gamma_kpt(mf), None, max_memory,
-        ):
-            yield ao, mask, weight, coords
-    else:
-        for ao, mask, weight, coords in ni.block_loop(
-            mf.mol, mf.grids, mf.mol.nao_nr(), ao_deriv, max_memory
-        ):
-            yield ao, mask, weight, coords
-
-def _get_jk(mf, dm, hermi=0, batch=False):
-    dm = _asarray(dm)
-    if _is_pbc_mf(mf):
-        _ensure_gamma_df(mf)
-        with_df = getattr(mf, "with_df", None)
-        gamma_df = bool(getattr(with_df, "is_gamma_point", False))
-        if batch and dm.ndim == 3 and not gamma_df:
-            vjs, vks = [], []
-            for x in dm:
-                vj, vk = _get_jk(mf, x, hermi=hermi, batch=False)
-                vjs.append(vj)
-                vks.append(vk)
-            return xp.stack(vjs), xp.stack(vks)
-        if dm.ndim == 3 and dm.shape[0] != 2 and not batch:
-            return _get_jk(mf, dm, hermi=hermi, batch=True)
-        if gamma_df:
-            return with_df.get_jk(
-                dm, hermi=hermi, kpts=None, with_j=True, with_k=True,
-                exxdiv=getattr(mf, "exxdiv", None),
-            )
-        try:
-            return mf.get_jk(mf.cell, dm, hermi=hermi, kpt=_get_gamma_kpt(mf))
-        except TypeError:
-            return mf.get_jk(mf.cell, dm, hermi=hermi)
-    return mf.get_jk(mf.mol, dm, hermi=hermi)
-
-def _get_hf_mo_fock(mf, mo_coeff, mo_occ):
-    mo_coeff = _asarray(mo_coeff)
-    mo_occ = _asarray(mo_occ)
-    dm = xp.asarray([
-        (mo_coeff[s] * mo_occ[s]) @ mo_coeff[s].conj().T
-        for s in range(2)
-    ])
-    vj, vk = _get_jk(mf, dm, hermi=1)
-    vj, vk = _asarray(vj), _asarray(vk)
-    coul = vj if vj.ndim == 2 else vj[0] + vj[1]
-    if vk.ndim == 2:
-        vk = xp.stack([vk, vk])
-    vhf = coul - vk
-    h1e = _asarray(_get_hcore(mf))
-    return (
-        mo_coeff[0].conj().T @ (h1e + vhf[0]) @ mo_coeff[0],
-        mo_coeff[1].conj().T @ (h1e + vhf[1]) @ mo_coeff[1],
-    )
-
 class XSF_TDA_down(XTDDFT_base): # just for ROKS
     def __init__(self, mf, method, davidson=True, SA = None, davidson_backend="cpu",
                  collinear_samples=60):
@@ -212,13 +102,10 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             raise ValueError("davidson_backend must be 'cpu', 'gpu', or 'auto'")
         super().__init__(mf, method, davidson=davidson)
         self.isf = -1
-        self.type_u = True
+        self.type_u = _asnumpy(self.mf.mo_coeff).ndim == 3
         self.davidson_backend = "cpu" if davidson_backend == "auto" else davidson_backend
         self.collinear_samples = collinear_samples
-        if SA is None:
-            self.SA = 3
-        else:
-            self.SA = SA
+        self.SA = (0 if self.type_u else 3) if SA is None else SA
         spin_mf = mf if hasattr(mf, "spin_square") else _as_cpu_mf(mf)
         _,dsp1 = spin_mf.spin_square()
         self.ground_s = (dsp1-1)/2
@@ -246,7 +133,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
 
             if self.xctype == 'LDA' and not getattr(self, "collinear", False):
                 ao_deriv = 0
-                for ao, mask, weight, coords in _iter_block_data_cpu(mf, ni, ao_deriv, max_memory):
+                for ao, mask, weight, coords in _iter_block_data(mf, ni, ao_deriv, max_memory, force_cpu=True):
                     rho0a = make_rho(0, ao, mask, self.xctype)
                     rho0b = make_rho(1, ao, mask, self.xctype)
                     rho = (rho0a, rho0b)
@@ -255,7 +142,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
 
             elif self.xctype == 'GGA' and not getattr(self, "collinear", False):  # 进行简化
                 ao_deriv = 0
-                for ao, mask, weight, coords in _iter_block_data_cpu(mf, ni, ao_deriv, max_memory):
+                for ao, mask, weight, coords in _iter_block_data(mf, ni, ao_deriv, max_memory, force_cpu=True):
                     # 这里只需要 density，不需要 gradient
                     rho0a = make_rho(0, ao, mask, 'LDA')
                     rho0b = make_rho(1, ao, mask, 'LDA')
@@ -270,7 +157,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         else:
             a_a2b = add_hf_a_a2b(a_a2b, mf, ctx.orbo_a, ctx.orbv_b, ctx.nocc_a, ctx.nvir_b, hyb=1)
 
-        focka_mo, fockb_mo = _get_mo_fock_cpu(mf, ctx.mo_coeff, ctx.mo_occ)
+        focka_mo, fockb_mo = _get_mo_fock(mf, ctx.mo_coeff, ctx.mo_occ, force_cpu=True)
 
         nc = self.nc
         no = self.no
@@ -326,7 +213,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
                 p0, p1 = 0, 0
                 if self.xctype == 'LDA':
                     ao_deriv = 0
-                    for ao, mask, weight, coords in _iter_block_data_cpu(mf, ni0, ao_deriv, max_memory):
+                    for ao, mask, weight, coords in _iter_block_data(mf, ni0, ao_deriv, max_memory, force_cpu=True):
                         p0 = p1
                         p1 += weight.shape[0]
                         wfxc = fxc[0, 0][..., p0:p1] * weight
@@ -338,7 +225,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
                         a_a2b += iajb
                 elif self.xctype == 'GGA':
                     ao_deriv = 1
-                    for ao, mask, weight, coords in _iter_block_data_cpu(mf, ni, ao_deriv, max_memory):
+                    for ao, mask, weight, coords in _iter_block_data(mf, ni, ao_deriv, max_memory, force_cpu=True):
                         p0 = p1
                         p1 += weight.shape[0]
                         wfxc = fxc[..., p0:p1] * weight
@@ -351,7 +238,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
                         a_a2b += iajb
                 elif self.xctype == 'MGGA':
                     ao_deriv = 1
-                    for ao, mask, weight, coords in _iter_block_data_cpu(mf, ni, ao_deriv, max_memory):
+                    for ao, mask, weight, coords in _iter_block_data(mf, ni, ao_deriv, max_memory, force_cpu=True):
                         p0 = p1
                         p1 += weight.shape[0]
                         wfxc = fxc[..., p0:p1] * weight
@@ -373,7 +260,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         else:
             a_a2b = add_hf_a_a2b(a_a2b, mf, ctx.orbo_a, ctx.orbv_b, ctx.nocc_a, ctx.nvir_b, hyb=1)
 
-        focka_mo, fockb_mo = _get_mo_fock_cpu(mf, ctx.mo_coeff, ctx.mo_occ)
+        focka_mo, fockb_mo = _get_mo_fock(mf, ctx.mo_coeff, ctx.mo_occ, force_cpu=True)
         dim = (self.nc + self.no) * (self.nv + self.no)
         amat = _pair_hessian_block_a2b(
             focka_mo[:ctx.nocc_a, :ctx.nocc_a],
@@ -418,7 +305,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
 
         Amat = np.zeros_like(_asnumpy(self.sf_tda_A))
         hf = _make_rohf_reference_mf(mf)
-        fockA_hf, fockB_hf = _get_mo_fock_cpu(hf, ctx.mo_coeff, ctx.mo_occ)
+        fockA_hf, fockB_hf = _get_mo_fock(hf, ctx.mo_coeff, ctx.mo_occ, force_cpu=True)
         fockS = (fockB_hf - fockA_hf) * 0.5
         eri = _ao2mo_full_gamma(mf, ctx.mo_coeff[0])
 
@@ -842,6 +729,89 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         self.v = self._order_davidson_vectors()
         logger.info('XSF_TDA_down Davidson converged: {}', converged)
         return self.e, self.v
+
+    def _split_analysis_vectors(self, value):
+        value = np.asarray(value)
+        nc, no, nv = self.nc, self.no, self.nv
+        dim1 = nc * nv
+        dim2 = dim1 + nc * no
+        dim3 = dim2 + no * nv
+        x_cv = value[:dim1].reshape(nc, nv)
+        x_co = value[dim1:dim2].reshape(nc, no)
+        x_ov = value[dim2:dim3].reshape(no, nv)
+        if self.re:
+            vects = np.asarray(_asnumpy(self.vects))
+            x_oo = (vects @ value[dim3:].reshape(-1, 1)).reshape(no, no)
+        else:
+            x_oo = value[dim3:].reshape(no, no)
+        return x_cv, x_co, x_ov, x_oo
+
+    def deltaS2_U(self, nstate):
+        mf = _as_cpu_mf(self.mf)
+        ctx = _as_cpu_ctx(mf, self.ctx)
+        mo_coeff = _asnumpy(ctx.mo_coeff)
+        occidx_a = _asnumpy(ctx.occidx_a)
+        occidx_b = _asnumpy(ctx.occidx_b)
+        viridx_a = _asnumpy(ctx.viridx_a)
+        viridx_b = _asnumpy(ctx.viridx_b)
+
+        mooa = mo_coeff[0][:, occidx_a]
+        moob = mo_coeff[1][:, occidx_b]
+        mova = mo_coeff[0][:, viridx_a]
+        movb = mo_coeff[1][:, viridx_b]
+        ovlp = _asnumpy(_get_ovlp(mf))
+
+        sab_oo = mooa.conj().T @ ovlp @ moob
+        sba_oo = sab_oo.conj().T
+        sba_vo = movb.conj().T @ ovlp @ mooa
+
+        x_cv, x_co, x_ov, x_oo = self._split_analysis_vectors(_asnumpy(self.v[:, nstate]))
+        x_ba = np.concatenate([np.hstack([x_co, x_cv]), np.hstack([x_oo, x_ov])], axis=0).T
+        ds2 = (
+            np.einsum("ai,aj,jk,ki", x_ba.conj(), x_ba, sba_oo.T.conj(), sba_oo)
+            - np.einsum("ai,bi,kb,ak", x_ba.conj(), x_ba, sba_vo.T.conj(), sba_vo)
+            + np.einsum("ai,bj,jb,ai", x_ba.conj(), x_ba, sba_vo.T.conj(), sba_vo)
+        )
+        return np.real_if_close(ds2)
+
+    def deltaS2(self):
+        ds2 = []
+        for nstate in range(self.nstates):
+            value = _asnumpy(self.v[:, nstate])
+            x_cv, _, _, x_oo = self._split_analysis_vectors(value)
+            if self.SA == 0 and not self.type_u:
+                dp_ab = np.sum(x_cv * x_cv) - np.sum(x_oo * x_oo) + np.sum(np.diag(x_oo)) ** 2
+                ds2.append(-2.0 * self.ground_s + 1.0 + dp_ab)
+            elif self.type_u:
+                ds2.append(self.deltaS2_U(nstate) - self.no + 1.0)
+            else:
+                ds2.append(np.nan)
+        return np.asarray(np.real_if_close(ds2), dtype=float)
+
+    def analyse(self, threshold=0.05):
+        energies = _asnumpy(self.e) * ha2eV
+        self.dS2 = self.deltaS2()
+        for nstate in range(self.nstates):
+            x_cv, x_co, x_ov, x_oo = self._split_analysis_vectors(_asnumpy(self.v[:, nstate]))
+            if np.isfinite(self.dS2[nstate]):
+                print(f"Excited state {nstate + 1} {energies[nstate]:10.5f} eV D<S^2>={self.dS2[nstate]:8.4f}")
+            else:
+                print(f"Excited state {nstate + 1} {energies[nstate]:10.5f} eV D<S^2>=     n/a")
+
+            for label, arr, occ_offset, vir_offset in (
+                ("CV(ab)", x_cv, 1, self.nc + self.no + 1),
+                ("CO(ab)", x_co, 1, self.nc + 1),
+                ("OV(ab)", x_ov, self.nc + 1, self.nc + self.no + 1),
+                ("OO(ab)", x_oo, self.nc + 1, self.nc + 1),
+            ):
+                for occ, vir in zip(*np.where(abs(arr) > threshold)):
+                    amp = arr[occ, vir]
+                    print(
+                        f"{100 * amp**2:5.2f}% {label} "
+                        f"{occ + occ_offset}a -> {vir + vir_offset}b {amp:10.5f}"
+                    )
+            print("========================================")
+        return self.dS2
 
     def kernel(self, nstates=1, remove=None, frozen=None, foo=1.0, d_lda=0.3, fglobal=None, fit=True):
         self.re = (_asnumpy(self.mf.mo_coeff).ndim != 3) if remove is None else bool(remove)

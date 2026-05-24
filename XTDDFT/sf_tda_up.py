@@ -1,12 +1,8 @@
 import numpy as np
-from types import SimpleNamespace
-from pyscf import ao2mo, scf, lib, dft
-from pyscf.dft import numint,numint2c
-from pyscf.dft.gen_grid import NBINS
-from pyscf.pbc.dft import numint as pbc_numint
+from pyscf import ao2mo
+from pyscf.dft import numint2c
 from pyscf.pbc.dft import numint2c as pbc_numint2c
 from XTDDFT.hxc_part import (
-    _iter_block_data,
     cache_xc_kernel_sf_mc,
     gen_response_sf,
     gen_response_sf_mc,
@@ -18,6 +14,7 @@ from XTDDFT.base import (
     _get_gamma_kpt,
     _get_mo_fock,
     _is_pbc_mf,
+    _iter_block_data,
     _make_spinflip_problem,
     _make_spinflip_vind,
     _run_davidson,
@@ -85,8 +82,7 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
         self.davidson_backend = "cpu" if davidson_backend == "auto" else davidson_backend
 
     def get_Amat_ALDA0(self):
-        # Dense Amat is built with PySCF/NumPy.  GPU inputs are converted to CPU
-        # for construction, then converted back to the active backend at return.
+        # Dense Amat is always built with CPU PySCF/NumPy.
         mf = _as_cpu_mf(self.mf)
         ctx = _as_cpu_ctx(mf, self.ctx)
 
@@ -96,7 +92,7 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
             a_b2a = np.zeros((ctx.nc, ctx.nv, ctx.nc, ctx.nv))
 
             if self.mfxctype is not None:
-                # ni = mf._numint
+                ni = mf._numint
                 if self.hyb != 0:
                     a_b2a = add_hf_a_b2a(
                         a_b2a, mf, ctx.orbo_b, ctx.orbv_a, ctx.nc, ctx.nv, self.hyb
@@ -107,23 +103,22 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
                         self.alpha - self.hyb, omega=self.omega
                     )
 
-                # xctype = ni._xc_type(mf.xc)
                 dm0 = _make_reference_dm(mf, ctx.mo_occ)
-                make_rho = self.ni._gen_rho_evaluator(_system(mf), dm0, hermi=0, with_lapl=False)[0]
+                make_rho = ni._gen_rho_evaluator(_system(mf), dm0, hermi=0, with_lapl=False)[0]
                 max_memory = _response_max_memory(mf, None)
 
                 if self.xctype == 'LDA' and not getattr(self, "collinear", False):
                     ao_deriv = 0
-                    for ao, mask, weight, coords in _iter_block_data(mf, self.ni, ao_deriv, max_memory):
+                    for ao, mask, weight, coords in _iter_block_data(mf, ni, ao_deriv, max_memory, force_cpu=True):
                         rho0a = make_rho(0, ao, mask, self.xctype)
                         rho0b = make_rho(1, ao, mask, self.xctype)
                         rho = (rho0a, rho0b)
-                        fxc_ab = AldA0(self.ni, mf, rho, weight, self.xctype, omega=self.omega)
+                        fxc_ab = AldA0(ni, mf, rho, weight, self.xctype, omega=self.omega)
                         a_b2a += construct_xc_b2a(ao, ctx.orbo_b, ctx.orbv_a, fxc_ab)
 
                 elif self.xctype == 'GGA' and not getattr(self, "collinear", False):  # 进行简化
                     ao_deriv = 0
-                    for ao, mask, weight, coords in _iter_block_data(mf, self.ni, ao_deriv, max_memory):
+                    for ao, mask, weight, coords in _iter_block_data(mf, ni, ao_deriv, max_memory, force_cpu=True):
                         # 这里只需要 density，不需要 gradient
                         rho0a = make_rho(0, ao, mask, 'LDA')
                         rho0b = make_rho(1, ao, mask, 'LDA')
@@ -132,15 +127,13 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
                         rhb = np.zeros((4, rho0b.size))
                         rha[0] = rho0a
                         rhb[0] = rho0b
-                        fxc_ab = AldA0(self.ni, mf, (rha, rhb), weight, self.xctype, omega=self.omega)
+                        fxc_ab = AldA0(ni, mf, (rha, rhb), weight, self.xctype, omega=self.omega)
                         a_b2a += construct_xc_b2a(ao, ctx.orbo_b, ctx.orbv_a, fxc_ab)
 
             else:
                 a_b2a = add_hf_a_b2a(a_b2a, mf, ctx.orbo_b, ctx.orbv_a, ctx.nc, ctx.nv, hyb=1)
 
-            focka_mo, fockb_mo = (
-                _asnumpy(x) for x in _get_mo_fock(mf, ctx.mo_coeff, ctx.mo_occ)
-            )
+            focka_mo, fockb_mo = _get_mo_fock(mf, ctx.mo_coeff, ctx.mo_occ, force_cpu=True)
             amat = _pair_hessian_block_b2a(
                 fockb_mo[:ctx.nc, :ctx.nc],
                 focka_mo[ctx.nocc_a:, ctx.nocc_a:],
@@ -149,12 +142,11 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
         finally:
             set_backend(mode)
 
-        self.A = xp.asarray(amat)
+        self.A = np.asarray(amat)
         return self.A
     
     def get_Amat_MCOL(self, collinear_samples=30):
-        # Dense Amat is built with PySCF/NumPy.  GPU inputs are converted to CPU
-        # for construction, then converted back to the active backend at return.
+        # Dense Amat is always built with CPU PySCF/NumPy.
         mf = _as_cpu_mf(self.mf)
         ctx = _as_cpu_ctx(mf, self.ctx)
 
@@ -190,7 +182,7 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
                     p0, p1 = 0, 0
                     if self.xctype == 'LDA':
                         ao_deriv = 0
-                        for ao, mask, weight, coords in _iter_block_data(mf, ni0, ao_deriv, max_memory):
+                        for ao, mask, weight, coords in _iter_block_data(mf, ni0, ao_deriv, max_memory, force_cpu=True):
                             p0 = p1
                             p1 += weight.shape[0]
                             wfxc = fxc[0, 0][..., p0:p1] * weight
@@ -202,7 +194,7 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
                             a_b2a += iajb
                     elif self.xctype == 'GGA':
                         ao_deriv = 1
-                        for ao, mask, weight, coords in _iter_block_data(mf, ni, ao_deriv, max_memory):
+                        for ao, mask, weight, coords in _iter_block_data(mf, ni, ao_deriv, max_memory, force_cpu=True):
                             p0 = p1
                             p1 += weight.shape[0]
                             wfxc = fxc[..., p0:p1] * weight
@@ -215,7 +207,7 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
                             a_b2a += iajb
                     elif self.xctype == 'MGGA':
                         ao_deriv = 1
-                        for ao, mask, weight, coords in _iter_block_data(mf, ni, ao_deriv, max_memory):
+                        for ao, mask, weight, coords in _iter_block_data(mf, ni, ao_deriv, max_memory, force_cpu=True):
                             p0 = p1
                             p1 += weight.shape[0]
                             wfxc = fxc[..., p0:p1] * weight
@@ -237,7 +229,7 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
             else:
                 a_b2a = add_hf_a_b2a(a_b2a, mf, ctx.orbo_b, ctx.orbv_a, ctx.nc, ctx.nv, hyb=1)
 
-            focka_mo, fockb_mo = (_asnumpy(x) for x in _get_mo_fock(mf, ctx.mo_coeff, ctx.mo_occ))
+            focka_mo, fockb_mo = _get_mo_fock(mf, ctx.mo_coeff, ctx.mo_occ, force_cpu=True)
             amat = _pair_hessian_block_b2a(
                 fockb_mo[:ctx.nc, :ctx.nc],
                 focka_mo[ctx.nocc_a:, ctx.nocc_a:],
@@ -246,7 +238,7 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
         finally:
             set_backend(mode)
 
-        self.A = xp.asarray(amat)
+        self.A = np.asarray(amat)
         return self.A
     
     def get_Amat(self):
@@ -255,6 +247,19 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
         else:
             self.get_Amat_ALDA0()
         return self.A
+
+    def _diagonalize_dense(self, amat, nstates):
+        amat = np.asarray(_asnumpy(amat))
+        if self.davidson_backend == "gpu":
+            cp = require_cupy()
+            e, v = cp.linalg.eigh(cp.asarray(amat))
+            self.e = e[:nstates]
+            self.v = v[:, :nstates]
+        else:
+            e, v = np.linalg.eigh(amat)
+            self.e = e[:nstates]
+            self.v = v[:, :nstates]
+        return self.e, self.v
     
     def gen_tda_operation_sf(self):
         if self.method == 1:
@@ -299,6 +304,5 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
             self.davidson_process(nstates)
         else:
             self.get_Amat()
-            e, v = xp.linalg.eigh(xp.asarray(_asnumpy(self.A)))
-            self.e, self.v = xp.asarray(e), xp.asarray(v)
+            self._diagonalize_dense(self.A, nstates)
         return _asnumpy(self.e[:nstates] * ha2eV), self.v[:, :nstates]

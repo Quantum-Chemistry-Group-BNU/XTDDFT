@@ -1,6 +1,5 @@
 import numpy as np
 import functools
-from types import SimpleNamespace
 from pyscf.dft import numint, xc_deriv
 from pyscf import lib
 from pyscf.dft import numint,numint2c
@@ -12,15 +11,20 @@ from pyscf.pbc.dft import numint2c as pbc_numint2c
 from XTDDFT.base import (
     _get_gamma_kpt,
     _ensure_gamma_df,
+    _as_cpu_mf,
+    _get_j,
+    _get_jk,
     _get_k,
     _is_gpu_mf,
     _is_pbc_mf,
+    _iter_ao_blocks,
+    _iter_block_data,
     mf_info,
     _system,
     _is_ks_mf,
     _response_max_memory,
 )
-from utils.backend import _asnumpy, contract, require_cupy
+from utils.backend import _asarray, _asnumpy, backend, contract, require_cupy, set_backend, xp
 
 try:
     from loguru import logger
@@ -34,50 +38,6 @@ def _xc_ao_deriv(xctype, with_lapl=False):
     if xctype == "MGGA":
         return 2 if with_lapl else 1
     return 0
-
-def _iter_ao_blocks(mf, ni, ao_deriv, max_memory=None, mol=None, nao=None, kpt=None, force_cpu=False):
-    if not force_cpu and _is_gpu_mf(mf):
-        if _is_pbc_mf(mf):
-            _ensure_gamma_df(mf)
-            kpt = _get_gamma_kpt(mf) if kpt is None else kpt
-            for ao_ks, weight, coords in ni.block_loop(mf.cell, mf.grids, ao_deriv, kpt):
-                yield SimpleNamespace(
-                    ao=ao_ks[0], ao_ks=ao_ks, mask=None,
-                    weight=weight, coords=coords, idx=None,
-                )
-        else:
-            mol = mf.mol if mol is None else mol
-            nao = mol.nao_nr() if nao is None else nao
-            for ao, idx, weight, coords in ni.block_loop(mol, mf.grids, nao, ao_deriv):
-                yield SimpleNamespace(
-                    ao=ao, ao_ks=None, mask=None,
-                    weight=weight, coords=coords, idx=idx,
-                )
-        return
-
-    if _is_pbc_mf(mf):
-        kpt = _get_gamma_kpt(mf) if kpt is None else kpt
-        for ao, ao_k2, mask, weight, coords in ni.block_loop(
-            mf.cell, mf.grids, mf.cell.nao_nr(), ao_deriv,
-            kpt, None, max_memory,
-        ):
-            yield SimpleNamespace(
-                ao=ao, ao_ks=(ao, ao_k2), mask=mask,
-                weight=weight, coords=coords, idx=None,
-            )
-    else:
-        for ao, mask, weight, coords in ni.block_loop(
-            mf.mol, mf.grids, mf.mol.nao_nr(), ao_deriv, max_memory
-        ):
-            yield SimpleNamespace(
-                ao=ao, ao_ks=None, mask=mask,
-                weight=weight, coords=coords, idx=None,
-            )
-
-
-def _iter_block_data(mf, ni, ao_deriv, max_memory, force_cpu=False):
-    for block in _iter_ao_blocks(mf, ni, ao_deriv, max_memory, force_cpu=force_cpu):
-        yield block.ao, block.mask, block.weight, block.coords
 
 def _alda0_rho_and_denom(array_api, rho_a, rho_b, xctype):
     if xctype == "LDA":
@@ -142,6 +102,23 @@ def _add_hybrid_k(mf, v1, dm1, hybrid, hyb, omega, alpha, hermi):
     if abs(omega) > 1e-10:
         vk += _get_k(mf, dm1, hermi=hermi, omega=omega) * (alpha - hyb)
     return v1 - vk
+
+def _add_spin_conserving_jk(mf, v1, dm1, hybrid, hyb, omega, alpha, hermi, with_j=True):
+    if not with_j:
+        return _add_hybrid_k(mf, v1, dm1, hybrid, hyb, omega, alpha, hermi)
+
+    if hybrid:
+        vj, vk = _get_jk(mf, dm1, hermi=hermi)
+        vk = _asarray(vk) * hyb
+        if abs(omega) > 1e-10:
+            vk += _get_k(mf, dm1, hermi=hermi, omega=omega) * (alpha - hyb)
+    else:
+        vj = _get_j(mf, dm1, hermi=hermi)
+        vk = 0
+
+    vj = _asarray(vj)
+    coul = vj if vj.ndim == 2 else vj[0] + vj[1]
+    return v1 + coul - vk
 
 def _make_gpu_response_vind(mf, xctype, hybrid, omega, alpha, hyb, hermi, apply_xc):
     cp = require_cupy()
@@ -479,6 +456,103 @@ def gen_response_sf(mf,hermi=0,max_memory=None,ctx=None):
     else: # in HF case
         def vind(dm1):
             return -_get_k(mf, dm1, hermi=hermi)
+    return vind
+
+def gen_response_tda(mf, mo_coeff=None, mo_occ=None, hermi=0,
+                     max_memory=None, with_j=True, ctx=None):
+    """Spin-conserving UKS/ROKS TDA response for molecules and Gamma PBC."""
+    if ctx is not None:
+        mo_coeff, mo_occ = ctx.mo_coeff, ctx.mo_occ
+    elif mo_coeff is None or mo_occ is None:
+        _, mo_occ, mo_coeff = mf_info(mf)
+
+    if _is_gpu_mf(mf) and _is_pbc_mf(mf):
+        cp = require_cupy()
+        mf_cpu = _as_cpu_mf(mf)
+        mo_coeff_cpu = _asnumpy(mo_coeff)
+        mo_occ_cpu = _asnumpy(mo_occ)
+        mode = backend.mode
+        set_backend("cpu")
+        try:
+            cpu_vresp = gen_response_tda(
+                mf_cpu, mo_coeff=mo_coeff_cpu, mo_occ=mo_occ_cpu,
+                hermi=hermi, max_memory=max_memory, with_j=with_j,
+            )
+        finally:
+            set_backend(mode)
+
+        def vind(dm1):
+            mode0 = backend.mode
+            set_backend("cpu")
+            try:
+                v1 = cpu_vresp(_asnumpy(dm1))
+            finally:
+                set_backend(mode0)
+            return cp.asarray(v1)
+        return vind
+
+    if _is_ks_mf(mf):
+        ni = mf._numint
+        ni.libxc.test_deriv_order(mf.xc, 2, raise_error=True)
+        xctype, hybrid, omega, alpha, hyb = _xc_response_params(mf, ni)
+        max_memory = _response_max_memory(mf, max_memory)
+
+        if xctype == "HF":
+            def vind(dm1):
+                dm1 = _asarray(dm1)
+                v1 = xp.zeros_like(dm1)
+                return _add_spin_conserving_jk(
+                    mf, v1, dm1, hybrid, hyb, omega, alpha, hermi,
+                    with_j=with_j,
+                )
+            return vind
+
+        system = _system(mf)
+        if _is_pbc_mf(mf):
+            kpt = _get_gamma_kpt(mf)
+            kpts = np.asarray([kpt])
+            rho0, vxc, fxc = ni.cache_xc_kernel(
+                system, mf.grids, mf.xc, mo_coeff, mo_occ, 1,
+                kpt=kpt, max_memory=max_memory,
+            )
+        else:
+            rho0, vxc, fxc = ni.cache_xc_kernel(
+                system, mf.grids, mf.xc, mo_coeff, mo_occ, 1,
+            )
+        dm0 = None
+
+        def vind(dm1):
+            dm1 = _asarray(dm1)
+            if _is_pbc_mf(mf):
+                v1 = ni.nr_uks_fxc(
+                    system, mf.grids, mf.xc, dm0, dm1, 0, hermi,
+                    rho0, vxc, fxc, kpts=kpts,
+                    max_memory=max_memory,
+                )
+            else:
+                v1 = ni.nr_uks_fxc(
+                    system, mf.grids, mf.xc, dm0, dm1, 0, hermi,
+                    rho0, vxc, fxc, max_memory=max_memory,
+                )
+            return _add_spin_conserving_jk(
+                mf, v1, dm1, hybrid, hyb, omega, alpha, hermi,
+                with_j=with_j,
+            )
+        return vind
+
+    if with_j:
+        def vind(dm1):
+            dm1 = _asarray(dm1)
+            v1 = xp.zeros_like(dm1)
+            return _add_spin_conserving_jk(
+                mf, v1, dm1, True, 1.0, 0.0, 0.0, hermi,
+                with_j=True,
+            )
+        return vind
+
+    def vind(dm1):
+        dm1 = _asarray(dm1)
+        return -_get_k(mf, dm1, hermi=hermi)
     return vind
 
 def _gen_response_sf_mc_gpu_mol(mf, mo_coeff, mo_occ, hermi=0, collinear_samples=60, max_memory=None):

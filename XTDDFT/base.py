@@ -1,7 +1,8 @@
 from types import SimpleNamespace
 import numpy as np
-from pyscf import lib
+from pyscf import ao2mo, lib, scf
 from pyscf.dft import numint, xc_deriv
+from pyscf.pbc import scf as pbc_scf
 from pyscf.pbc.dft import numint as pbc_numint
 
 from utils.backend import backend, contract, require_cupy, xp, _asarray, _asnumpy, set_backend
@@ -204,6 +205,80 @@ def _is_pbc_mf(mf):
 def _is_gpu_mf(mf):
     return backend.is_gpu or mf.__class__.__module__.startswith("gpu4pyscf")
 
+def _make_rohf_reference_mf(mf):
+    if _is_pbc_mf(mf):
+        hf = pbc_scf.ROHF(mf.cell)
+        hf.kpt = _get_gamma_kpt(mf)
+    else:
+        hf = scf.ROHF(mf.mol)
+        if getattr(mf, "with_x2c", None) is not None and hasattr(hf, "x2c"):
+            hf = hf.x2c()
+
+    for name in ("with_df", "exxdiv", "max_memory", "verbose", "stdout"):
+        if hasattr(mf, name):
+            try:
+                setattr(hf, name, getattr(mf, name))
+            except AttributeError:
+                pass
+    return hf
+
+def _ao2mo_full_gamma(mf, mo_coeff):
+    mo_coeff = _asnumpy(mo_coeff)
+    nmo = mo_coeff.shape[1]
+    if _is_pbc_mf(mf):
+        _ensure_gamma_df(mf)
+        kpt = _get_gamma_kpt(mf)
+        try:
+            eri = mf.with_df.ao2mo([mo_coeff] * 4, kpt, compact=False)
+        except TypeError:
+            eri = mf.with_df.ao2mo([mo_coeff] * 4, [kpt] * 4, compact=False)
+    else:
+        eri = ao2mo.general(mf.mol, [mo_coeff] * 4, compact=False)
+    return _asnumpy(eri).reshape(nmo, nmo, nmo, nmo)
+
+def _iter_ao_blocks(mf, ni, ao_deriv, max_memory=None, mol=None, nao=None, kpt=None, force_cpu=False):
+    if not force_cpu and _is_gpu_mf(mf):
+        if _is_pbc_mf(mf):
+            _ensure_gamma_df(mf)
+            kpt = _get_gamma_kpt(mf) if kpt is None else kpt
+            for ao_ks, weight, coords in ni.block_loop(mf.cell, mf.grids, ao_deriv, kpt):
+                yield SimpleNamespace(
+                    ao=ao_ks[0], ao_ks=ao_ks, mask=None,
+                    weight=weight, coords=coords, idx=None,
+                )
+        else:
+            mol = mf.mol if mol is None else mol
+            nao = mol.nao_nr() if nao is None else nao
+            for ao, idx, weight, coords in ni.block_loop(mol, mf.grids, nao, ao_deriv):
+                yield SimpleNamespace(
+                    ao=ao, ao_ks=None, mask=None,
+                    weight=weight, coords=coords, idx=idx,
+                )
+        return
+
+    if _is_pbc_mf(mf):
+        kpt = _get_gamma_kpt(mf) if kpt is None else kpt
+        for ao, ao_k2, mask, weight, coords in ni.block_loop(
+            mf.cell, mf.grids, mf.cell.nao_nr(), ao_deriv,
+            kpt, None, max_memory,
+        ):
+            yield SimpleNamespace(
+                ao=ao, ao_ks=(ao, ao_k2), mask=mask,
+                weight=weight, coords=coords, idx=None,
+            )
+    else:
+        for ao, mask, weight, coords in ni.block_loop(
+            mf.mol, mf.grids, mf.mol.nao_nr(), ao_deriv, max_memory
+        ):
+            yield SimpleNamespace(
+                ao=ao, ao_ks=None, mask=mask,
+                weight=weight, coords=coords, idx=None,
+            )
+
+def _iter_block_data(mf, ni, ao_deriv, max_memory, force_cpu=False):
+    for block in _iter_ao_blocks(mf, ni, ao_deriv, max_memory, force_cpu=force_cpu):
+        yield block.ao, block.mask, block.weight, block.coords
+
 def _get_k(mf, dm, hermi=0, omega=None):
     kwargs = {"hermi": hermi}
     if omega is not None and abs(omega) > 1e-14:
@@ -224,6 +299,62 @@ def _get_k(mf, dm, hermi=0, omega=None):
                     ])
                 raise err
     return mf.get_k(mf.mol, dm, **kwargs)
+
+def _get_j(mf, dm, hermi=0):
+    dm = _asarray(dm)
+    if _is_pbc_mf(mf):
+        _ensure_gamma_df(mf)
+        if dm.ndim == 4:
+            return xp.stack([
+                _get_j(mf, dm[:, i], hermi=hermi)
+                for i in range(dm.shape[1])
+            ], axis=1)
+        with_df = getattr(mf, "with_df", None)
+        gamma_df = bool(getattr(with_df, "is_gamma_point", False))
+        if gamma_df:
+            out = with_df.get_jk(
+                dm, hermi=hermi, kpts=None, with_j=True, with_k=False,
+                exxdiv=getattr(mf, "exxdiv", None),
+            )
+            return out[0] if isinstance(out, tuple) else out
+        try:
+            return mf.get_j(mf.cell, dm, hermi=hermi, kpt=_get_gamma_kpt(mf))
+        except TypeError:
+            return mf.get_j(mf.cell, dm, hermi=hermi)
+    return mf.get_j(mf.mol, dm, hermi=hermi)
+
+def _get_jk(mf, dm, hermi=0, batch=False):
+    dm = _asarray(dm)
+    if _is_pbc_mf(mf):
+        _ensure_gamma_df(mf)
+        if dm.ndim == 4:
+            vjs, vks = [], []
+            for i in range(dm.shape[1]):
+                vj, vk = _get_jk(mf, dm[:, i], hermi=hermi, batch=False)
+                vjs.append(vj)
+                vks.append(vk)
+            return xp.stack(vjs, axis=1), xp.stack(vks, axis=1)
+        with_df = getattr(mf, "with_df", None)
+        gamma_df = bool(getattr(with_df, "is_gamma_point", False))
+        if batch and dm.ndim == 3 and not gamma_df:
+            vjs, vks = [], []
+            for dm_i in dm:
+                vj, vk = _get_jk(mf, dm_i, hermi=hermi, batch=False)
+                vjs.append(vj)
+                vks.append(vk)
+            return xp.stack(vjs), xp.stack(vks)
+        if dm.ndim == 3 and dm.shape[0] != 2 and not batch:
+            return _get_jk(mf, dm, hermi=hermi, batch=True)
+        if gamma_df:
+            return with_df.get_jk(
+                dm, hermi=hermi, kpts=None, with_j=True, with_k=True,
+                exxdiv=getattr(mf, "exxdiv", None),
+            )
+        try:
+            return mf.get_jk(mf.cell, dm, hermi=hermi, kpt=_get_gamma_kpt(mf))
+        except TypeError:
+            return mf.get_jk(mf.cell, dm, hermi=hermi)
+    return mf.get_jk(mf.mol, dm, hermi=hermi)
 
 def _is_unrestricted_mf(mf):
     cls_name = mf.__class__.__name__.upper()
@@ -260,6 +391,20 @@ def _get_hcore(mf):
     h1e = _get_hcore_gamma(mf) if _is_pbc_mf(mf) else _get_hcore_mol(mf)
     return _drop_gamma_axis(h1e)
 
+def _get_ovlp(mf):
+    if _is_pbc_mf(mf):
+        try:
+            return _drop_gamma_axis(mf.get_ovlp(mf.cell, kpt=_get_gamma_kpt(mf)))
+        except TypeError:
+            try:
+                return _drop_gamma_axis(mf.get_ovlp(mf.cell))
+            except TypeError:
+                return _drop_gamma_axis(mf.get_ovlp())
+    try:
+        return mf.get_ovlp(mf.mol)
+    except TypeError:
+        return mf.get_ovlp()
+
 def _get_veff(mf, dm):
     return _get_veff_gamma(mf, dm) if _is_pbc_mf(mf) else _get_veff_mol(mf, dm)
 
@@ -293,6 +438,25 @@ def _get_mo_fock(mf, mo_coeff, mo_occ=None, force_cpu=False):
     focka_mo = mo_coeff[0].conj().T @ (h1e + vhf[0]) @ mo_coeff[0]
     fockb_mo = mo_coeff[1].conj().T @ (h1e + vhf[1]) @ mo_coeff[1]
     return focka_mo, fockb_mo
+
+def _get_hf_mo_fock(mf, mo_coeff, mo_occ):
+    mo_coeff = _asarray(mo_coeff)
+    mo_occ = _asarray(mo_occ)
+    dm = xp.asarray([
+        (mo_coeff[s] * mo_occ[s]) @ mo_coeff[s].conj().T
+        for s in range(2)
+    ])
+    vj, vk = _get_jk(mf, dm, hermi=1)
+    vj, vk = _asarray(vj), _asarray(vk)
+    coul = vj if vj.ndim == 2 else vj[0] + vj[1]
+    if vk.ndim == 2:
+        vk = xp.stack([vk, vk])
+    vhf = coul - vk
+    h1e = _asarray(_get_hcore(mf))
+    return (
+        mo_coeff[0].conj().T @ (h1e + vhf[0]) @ mo_coeff[0],
+        mo_coeff[1].conj().T @ (h1e + vhf[1]) @ mo_coeff[1],
+    )
 
 def _spinflip_gaps(ctx, isf):
     if isf == 1:
