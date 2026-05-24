@@ -1,14 +1,12 @@
-import functools
 from types import SimpleNamespace
 
 import numpy as np
 from pyscf import ao2mo, scf, lib, dft
-from pyscf.dft import numint,numint2c,xc_deriv
+from pyscf.dft import numint,numint2c
 from pyscf.dft.gen_grid import NBINS
 from pyscf.dft.numint import _dot_ao_ao_sparse,_scale_ao_sparse,_tau_dot_sparse
 from pyscf.pbc.dft import numint as pbc_numint
 from pyscf.pbc.dft import numint2c as pbc_numint2c
-from opt_einsum import contract
 
 from XTDDFT.base import (
     XTDDFT_base,
@@ -17,6 +15,8 @@ from XTDDFT.base import (
     _get_gamma_kpt,
     _get_k,
     _get_mo_fock,
+    AldA0,
+    mcfun_eval_xc_adapter_sf,
     _is_gpu_mf,
     _is_pbc_mf,
     _make_spinflip_problem,
@@ -37,9 +37,9 @@ from XTDDFT.base import (
     cache_xc_kernel_sf_mc,
     _cache_xc_kernel_sf_gpu_mol,
     _cache_xc_kernel_sf_gpu_pbc,
-    _cache_xc_kernel_sf_mc_gpu_mol
+    _cache_xc_kernel_sf_mc_gpu_mol,
 )
-from utils.backend import _asnumpy, backend, require_cupy, set_backend, xp
+from utils.backend import _asnumpy, backend, contract, require_cupy, set_backend, xp
 from utils.unit import ha2eV
 
 try:
@@ -113,16 +113,16 @@ def add_hf_a_b2a(a_b2a, mf, orbo_b, orbv_a, nc, nv, hyb=1, omega=None):
         eri_mo = ao2mo.general(mf.mol, [orbo_b, orbo_b, orbv_a, orbv_a], compact=False)
 
     eri_mo = np.asarray(eri_mo).reshape(nc, nc, nv, nv)
-    a_b2a -= contract('ijba->iajb', eri_mo, optimize=True) * hyb
+    a_b2a -= contract('ijba->iajb', eri_mo) * hyb
     return a_b2a
 
 
 def construct_xc_b2a(ao, orbo_b, orbv_a, fxc_ab):
-    rho_v_a = contract('rp,pi->ri', ao, orbv_a, optimize=True)
-    rho_o_b = contract('rp,pi->ri', ao, orbo_b, optimize=True)
-    rho_ov_b2a = contract('ri,ra->ria', rho_o_b, rho_v_a, optimize=True)
-    w_ov = contract('ria,r->ria', rho_ov_b2a, fxc_ab, optimize=True)
-    iajb = contract('ria,rjb->iajb', rho_ov_b2a, w_ov, optimize=True)
+    rho_v_a = contract('rp,pi->ri', ao, orbv_a)
+    rho_o_b = contract('rp,pi->ri', ao, orbo_b)
+    rho_ov_b2a = contract('ri,ra->ria', rho_o_b, rho_v_a)
+    w_ov = contract('ria,r->ria', rho_ov_b2a, fxc_ab)
+    iajb = contract('ria,rjb->iajb', rho_ov_b2a, w_ov)
     return iajb
 
 def _make_rho_evaluator(ni, mf, dms, hermi, grids):
@@ -135,51 +135,10 @@ def _pair_hessian_block_b2a(occ_fock_b, vir_fock_a, tensor_block):
     nocc_b = occ_fock_b.shape[0]
     nvir_a = vir_fock_a.shape[0]
     return (
-        contract('ij,ab->iajb', np.eye(nocc_b), vir_fock_a, optimize=True)
-        - contract('ji,ab->iajb', occ_fock_b, np.eye(nvir_a), optimize=True)
+        contract('ij,ab->iajb', np.eye(nocc_b), vir_fock_a)
+        - contract('ji,ab->iajb', occ_fock_b, np.eye(nvir_a))
         + tensor_block.reshape(nocc_b, nvir_a, nocc_b, nvir_a)
     ).reshape(nocc_b * nvir_a, nocc_b * nvir_a)
-
-def AldA0(ni, mf, rho, weight, xctype):
-    vxc= ni.eval_xc_eff(mf.xc, rho, deriv=1, xctype=xctype)[1] # 
-    vxc_a = vxc[0,0]*weight
-    vxc_b = vxc[1,0]*weight
-    fxc_ab = (vxc_a-vxc_b)/(np.array(rho[0])-np.array(rho[1])+1e-9)
-    return fxc_ab
-
-def __mcfun_fn_eval_xc(ni, xc_code, xctype, rho, deriv):
-    evfk = ni.eval_xc_eff(xc_code, rho, deriv=deriv, xctype=xctype)
-    for order in range(1, deriv+1):
-        if evfk[order] is not None:
-            evfk[order] = xc_deriv.ud2ts(evfk[order])
-    return evfk
-
-# This function can be merged with pyscf.dft.numint2c.mcfun_eval_xc_adapter()
-# This function should be a class function in the Numint2c class.
-def mcfun_eval_xc_adapter_sf(ni, xc_code):
-    '''Wrapper to generate the eval_xc function required by mcfun
-
-    Kwargs:
-        dim: int
-            eval_xc_eff_sf is for mc collinear sf tddft/ tda case.add().
-    '''
-
-    try:
-        import mcfun
-    except ImportError:
-        raise ImportError('This feature requires mcfun library.\n'
-                          'Try install mcfun with `pip install mcfun`')
-
-    xctype = ni._xc_type(xc_code)
-    fn_eval_xc = functools.partial(__mcfun_fn_eval_xc, ni, xc_code, xctype)
-    nproc = lib.num_threads()
-
-    def eval_xc_eff(xc_code, rho, deriv=1, omega=None, xctype=None,
-                verbose=None):
-        return mcfun.eval_xc_eff_sf(
-            fn_eval_xc, rho, deriv,
-            collinear_samples=ni.collinear_samples, workers=nproc)
-    return eval_xc_eff
 
 def _cpu_xc_weighted_density(xctype, rho1sf, kernel_block, weight, method):
     if method == "alda0":
@@ -190,7 +149,7 @@ def _cpu_xc_weighted_density(xctype, rho1sf, kernel_block, weight, method):
         return rhosf * kernel_block
     if xctype == "LDA":  # 这个是为MCOL准备的
         return rho1sf * kernel_block[0, 0] * 2.0 * weight
-    return contract("bg,abg->ag", rho1sf, kernel_block * 2.0, optimize=True) * weight
+    return contract("bg,abg->ag", rho1sf, kernel_block * 2.0) * weight
 
 
 def _nr_uks_fxc_sf_tda_cpu_common(ni, mf, grids, xc_code, dms, hermi=0,
@@ -369,7 +328,7 @@ def _gpu_pbc_xc_weighted_density(xctype, rho1sf, kernel_block, weight, method):
         return rhosf * kernel_block
     if xctype == "LDA":
         return rho1sf * kernel_block[0, 0] * (2.0 * weight)
-    return contract("bg,abg->ag", rho1sf, kernel_block * 2.0, optimize=True) * weight
+    return contract("bg,abg->ag", rho1sf, kernel_block * 2.0) * weight
 
 
 def _nr_uks_fxc_sf_tda_gpu_pbc_common(ni, mf, dm1, hermi=0, kernel=None, method="alda0"):
@@ -507,7 +466,7 @@ def gen_response_sf_mc(mf, mo_coeff=None, mo_occ=None, hermi=0,
     ni.collinear_samples = collinear_samples
     ni.libxc.test_deriv_order(mf.xc, 2, raise_error=True)
     if mf.nlc or ni.libxc.is_nlc(mf.xc):
-        logger.warn(mf, 'NLC functional found in DFT object.  Its second '
+        logger.warning(mf, 'NLC functional found in DFT object.  Its second '
                     'deriviative is not available. Its contribution is '
                     'not included in the response function.')
     xctype, hybrid, omega, alpha, hyb = _xc_response_params(mf, ni)
@@ -574,10 +533,7 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
                         rho0a = make_rho(0, ao, mask, self.xctype)
                         rho0b = make_rho(1, ao, mask, self.xctype)
                         rho = (rho0a, rho0b)
-                        vxc = self.ni.eval_xc_eff(mf.xc, rho, deriv=1, omega=self.omega, xctype=self.xctype)[1]
-                        vxc_a = vxc[0, 0] * weight
-                        vxc_b = vxc[1, 0] * weight
-                        fxc_ab = (vxc_a - vxc_b) / (rho0a - rho0b + 1e-9)
+                        fxc_ab = AldA0(self.ni, mf, rho, weight, self.xctype, omega=self.omega)
                         a_b2a += construct_xc_b2a(ao, ctx.orbo_b, ctx.orbv_a, fxc_ab)
 
                 elif self.xctype == 'GGA' and not getattr(self, "collinear", False):  # 进行简化
@@ -591,12 +547,7 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
                         rhb = np.zeros((4, rho0b.size))
                         rha[0] = rho0a
                         rhb[0] = rho0b
-                        vxc = self.ni.eval_xc_eff(
-                            mf.xc, (rha, rhb), deriv=1, omega=self.omega, xctype=self.xctype
-                        )[1]
-                        vxc_a = vxc[0, 0] * weight
-                        vxc_b = vxc[1, 0] * weight
-                        fxc_ab = (vxc_a - vxc_b) / (rho0a - rho0b + 1e-9)
+                        fxc_ab = AldA0(self.ni, mf, (rha, rhb), weight, self.xctype, omega=self.omega)
                         a_b2a += construct_xc_b2a(ao, ctx.orbo_b, ctx.orbv_a, fxc_ab)
 
             else:
@@ -658,11 +609,11 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
                             p0 = p1
                             p1 += weight.shape[0]
                             wfxc = fxc[0, 0][..., p0:p1] * weight
-                            rho_o_b = contract('rp,pi->ri', ao, ctx.orbo_b, optimize=True)
-                            rho_v_a = contract('rp,pi->ri', ao, ctx.orbv_a, optimize=True)
-                            rho_ov_b2a = contract('ri,ra->ria', rho_o_b, rho_v_a, optimize=True)
-                            w_ov = contract('ria,r->ria', rho_ov_b2a, wfxc * 2.0, optimize=True)
-                            iajb = contract('ria,rjb->iajb', rho_ov_b2a, w_ov, optimize=True)
+                            rho_o_b = contract('rp,pi->ri', ao, ctx.orbo_b)
+                            rho_v_a = contract('rp,pi->ri', ao, ctx.orbv_a)
+                            rho_ov_b2a = contract('ri,ra->ria', rho_o_b, rho_v_a)
+                            w_ov = contract('ria,r->ria', rho_ov_b2a, wfxc * 2.0)
+                            iajb = contract('ria,rjb->iajb', rho_ov_b2a, w_ov)
                             a_b2a += iajb
                     elif self.xctype == 'GGA':
                         ao_deriv = 1
@@ -670,12 +621,12 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
                             p0 = p1
                             p1 += weight.shape[0]
                             wfxc = fxc[..., p0:p1] * weight
-                            rho_o_b = contract('xrp,pi->xri', ao, ctx.orbo_b, optimize=True)
-                            rho_v_a = contract('xrp,pi->xri', ao, ctx.orbv_a, optimize=True)
-                            rho_ov_b2a = contract('xri,ra->xria', rho_o_b, rho_v_a[0], optimize=True)
-                            rho_ov_b2a[1:4] += contract('ri,xra->xria', rho_o_b[0], rho_v_a[1:4], optimize=True)
-                            w_ov = contract('xyr,xria->yria', wfxc * 2.0, rho_ov_b2a, optimize=True)
-                            iajb = contract('xria,xrjb->iajb', w_ov, rho_ov_b2a, optimize=True)
+                            rho_o_b = contract('xrp,pi->xri', ao, ctx.orbo_b)
+                            rho_v_a = contract('xrp,pi->xri', ao, ctx.orbv_a)
+                            rho_ov_b2a = contract('xri,ra->xria', rho_o_b, rho_v_a[0])
+                            rho_ov_b2a[1:4] += contract('ri,xra->xria', rho_o_b[0], rho_v_a[1:4])
+                            w_ov = contract('xyr,xria->yria', wfxc * 2.0, rho_ov_b2a)
+                            iajb = contract('xria,xrjb->iajb', w_ov, rho_ov_b2a)
                             a_b2a += iajb
                     elif self.xctype == 'MGGA':
                         ao_deriv = 1
@@ -683,14 +634,14 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
                             p0 = p1
                             p1 += weight.shape[0]
                             wfxc = fxc[..., p0:p1] * weight
-                            rho_ob = contract('xrp,pi->xri', ao, ctx.orbo_b, optimize=True)
-                            rho_va = contract('xrp,pi->xri', ao, ctx.orbv_a, optimize=True)
-                            rho_ov_b2a = contract('xri,ra->xria', rho_ob, rho_va[0], optimize=True)
-                            rho_ov_b2a[1:4] += contract('ri,xra->xria', rho_ob[0], rho_va[1:4], optimize=True)
-                            tau_ov_b2a = contract('xri,xra->ria', rho_ob[1:4], rho_va[1:4], optimize=True) * 0.5
+                            rho_ob = contract('xrp,pi->xri', ao, ctx.orbo_b)
+                            rho_va = contract('xrp,pi->xri', ao, ctx.orbv_a)
+                            rho_ov_b2a = contract('xri,ra->xria', rho_ob, rho_va[0])
+                            rho_ov_b2a[1:4] += contract('ri,xra->xria', rho_ob[0], rho_va[1:4])
+                            tau_ov_b2a = contract('xri,xra->ria', rho_ob[1:4], rho_va[1:4]) * 0.5
                             rho_ov_b2a = np.vstack([rho_ov_b2a, tau_ov_b2a[np.newaxis]])
-                            w_ov = contract('xyr,xria->yria', wfxc * 2.0, rho_ov_b2a, optimize=True)
-                            iajb = contract('xria,xrjb->iajb', w_ov, rho_ov_b2a, optimize=True)
+                            w_ov = contract('xyr,xria->yria', wfxc * 2.0, rho_ov_b2a)
+                            iajb = contract('xria,xrjb->iajb', w_ov, rho_ov_b2a)
                             a_b2a += iajb
                     elif self.xctype == 'HF':
                         pass
@@ -756,3 +707,13 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
                 print(f'{100*x_cv[occ, vir]**2:3.0f}% CV(ab) '
                       f'{occ+1}a -> {vir_label}b {x_cv[occ, vir]:10.5f}')
             print(' ')
+
+    def kernel(self, nstates=1):
+        self.nstates = nstates
+        if self.davidson:
+            self.davidson_process(nstates)
+        else:
+            self.get_Amat()
+            e, v = xp.linalg.eigh(xp.asarray(_asnumpy(self.A)))
+            self.e, self.v = xp.asarray(e), xp.asarray(v)
+        return _asnumpy(self.e[:nstates] * ha2eV), self.v[:, :nstates]

@@ -1,9 +1,11 @@
 from types import SimpleNamespace
+import functools
 import numpy as np
-from opt_einsum import contract
 from pyscf import lib
+from pyscf.dft import numint, xc_deriv
+from pyscf.pbc.dft import numint as pbc_numint
 
-from utils.backend import backend, require_cupy, xp, _asarray, _asnumpy, set_backend
+from utils.backend import backend, contract, require_cupy, xp, _asarray, _asnumpy, set_backend
 from utils.unit import ha2eV
 
 try:
@@ -253,8 +255,26 @@ def _get_hcore(mf):
 def _get_veff(mf, dm):
     return _get_veff_gamma(mf, dm) if _is_pbc_mf(mf) else _get_veff_mol(mf, dm)
 
-def _get_mo_fock(mf, mo_coeff, mo_occ=None):
+def _get_mo_fock(mf, mo_coeff, mo_occ=None, force_cpu=False):
     _reject_k_method(mf)
+    if force_cpu:
+        mo_coeff = np.asarray(_asnumpy(mo_coeff))
+        if mo_occ is None:
+            dm = mf.make_rdm1()
+        else:
+            mo_occ = np.asarray(_asnumpy(mo_occ))
+            dm = np.asarray([
+                (mo_coeff[s] * mo_occ[s]) @ mo_coeff[s].conj().T
+                for s in range(2)
+            ])
+        vhf = np.asarray(_asnumpy(_drop_gamma_axis(_get_veff(mf, dm))))
+        if vhf.ndim == 2:
+            vhf = np.stack([vhf, vhf])
+        h1e = np.asarray(_asnumpy(_get_hcore(mf)))
+        focka_mo = mo_coeff[0].conj().T @ (h1e + vhf[0]) @ mo_coeff[0]
+        fockb_mo = mo_coeff[1].conj().T @ (h1e + vhf[1]) @ mo_coeff[1]
+        return focka_mo, fockb_mo
+
     mo_coeff = _asarray(mo_coeff)
     if mo_occ is None:
         dm = mf.make_rdm1()
@@ -273,8 +293,8 @@ def _xc_ao_deriv(xctype, with_lapl=False):
         return 2 if with_lapl else 1
     return 0
 
-def _iter_ao_blocks(mf, ni, ao_deriv, max_memory=None, mol=None, nao=None, kpt=None):
-    if _is_gpu_mf(mf):
+def _iter_ao_blocks(mf, ni, ao_deriv, max_memory=None, mol=None, nao=None, kpt=None, force_cpu=False):
+    if not force_cpu and _is_gpu_mf(mf):
         if _is_pbc_mf(mf):
             _ensure_gamma_df(mf)
             kpt = _get_gamma_kpt(mf) if kpt is None else kpt
@@ -313,9 +333,48 @@ def _iter_ao_blocks(mf, ni, ao_deriv, max_memory=None, mol=None, nao=None, kpt=N
             )
 
 
-def _iter_block_data(mf, ni, ao_deriv, max_memory):
-    for block in _iter_ao_blocks(mf, ni, ao_deriv, max_memory):
+def _iter_block_data(mf, ni, ao_deriv, max_memory, force_cpu=False):
+    for block in _iter_ao_blocks(mf, ni, ao_deriv, max_memory, force_cpu=force_cpu):
         yield block.ao, block.mask, block.weight, block.coords
+
+def AldA0(ni, mf, rho, weight, xctype, omega=None):
+    vxc = ni.eval_xc_eff(mf.xc, rho, deriv=1, omega=omega, xctype=xctype)[1]
+    vxc_a = vxc[0, 0] * weight
+    vxc_b = vxc[1, 0] * weight
+    if xctype == "LDA":
+        denom = np.asarray(rho[0]) - np.asarray(rho[1])
+    else:
+        denom = np.asarray(rho[0][0]) - np.asarray(rho[1][0])
+    return (vxc_a - vxc_b) / (denom + 1e-9)
+
+def __mcfun_fn_eval_xc(ni, xc_code, xctype, rho, deriv):
+    evfk = ni.eval_xc_eff(xc_code, rho, deriv=deriv, xctype=xctype)
+    for order in range(1, deriv + 1):
+        if evfk[order] is not None:
+            evfk[order] = xc_deriv.ud2ts(evfk[order])
+    return evfk
+
+def mcfun_eval_xc_adapter_sf(ni, xc_code):
+    try:
+        import mcfun
+    except ImportError:
+        raise ImportError(
+            "This feature requires mcfun library.\n"
+            "Try install mcfun with `pip install mcfun`"
+        )
+
+    xctype = ni._xc_type(xc_code)
+    fn_eval_xc = functools.partial(__mcfun_fn_eval_xc, ni, xc_code, xctype)
+    nproc = lib.num_threads()
+
+    def eval_xc_eff(xc_code, rho, deriv=1, omega=None, xctype=None, verbose=None):
+        del xc_code, omega, xctype, verbose
+        return mcfun.eval_xc_eff_sf(
+            fn_eval_xc, rho, deriv,
+            collinear_samples=ni.collinear_samples,
+            workers=nproc,
+        )
+    return eval_xc_eff
 
 def cache_xc_kernel_sf(mf, mo_coeff, mo_occ, spin=1,max_memory=2000): # for ALDA0
     '''Compute the fxc_sf, which can be used in SF-TDDFT/TDA
@@ -533,16 +592,14 @@ def _make_spinflip_vind(problem, vresp):
         dmov = contract(
             'xov,qv,po->xpq',
             zs, problem.orbv.conj(), problem.orbo,
-            optimize=True,
         )
         v1ao = xp.asarray(vresp(dmov))
         vs = contract(
             'xpq,po,qv->xov',
             v1ao, problem.orbo.conj(), problem.orbv,
-            optimize=True,
         )  # 转化为分子轨道，这里是对轨道做变换
-        vs += contract('ab,xib->xia', problem.vir_block, zs, optimize=True)
-        vs -= contract('ij,xja->xia', problem.occ_block, zs, optimize=True)
+        vs += contract('ab,xib->xia', problem.vir_block, zs)
+        vs -= contract('ij,xja->xia', problem.occ_block, zs)
         return vs.reshape(zs.shape[0], -1)
     return vind
 
@@ -635,13 +692,3 @@ class XTDDFT_base:
     
     def davidson_process(self, nstates):
         raise NotImplementedError
-    
-    def kernel(self, nstates=1):
-        self.nstates = nstates
-        if self.davidson:
-            self.davidson_process(nstates)
-        else:
-            self.get_Amat()
-            e, v = xp.linalg.eigh(xp.asarray(_asnumpy(self.A)))
-            self.e, self.v = xp.asarray(e), xp.asarray(v)
-        return _asnumpy(self.e[:nstates] * ha2eV), self.v[:, :nstates]

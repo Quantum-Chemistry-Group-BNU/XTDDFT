@@ -13,6 +13,7 @@ from types import ModuleType
 from typing import Any
 
 import numpy as np
+from opt_einsum import contract as _opt_einsum_contract
 
 
 def _optional_import(name: str) -> tuple[ModuleType | None, Exception | None]:
@@ -205,6 +206,13 @@ def asarray(array: Any, dtype: Any | None = None, order: str | None = None, gpu:
     """Convert to the active array module, or force CPU/GPU with *gpu*."""
 
     return backend.asarray(array, dtype=dtype, order=order, gpu=gpu)
+
+
+def contract(*args: Any, optimize: Any = True, **kwargs: Any) -> Any:
+    """opt_einsum.contract with optimized contraction paths enabled by default."""
+
+    kwargs["optimize"] = optimize
+    return _opt_einsum_contract(*args, **kwargs)
 
 
 def to_cpu(obj: Any) -> Any:
