@@ -1,10 +1,4 @@
-import os
-import sys
-import time
 import numpy as np
-from threading import Thread
-
-from psutil import Process
 
 def get_cov(mf):
     # get nc, nv, no(if open shell)
@@ -45,18 +39,25 @@ def get_cov(mf):
 
 
 def order_pyscf2my(nc, no, nv):
-    # Note: only for open shell sTDA
-    # nc and nv is the value before selecting activate space
-    order = np.indices(((nc+no)*nv+nc*(no+nv), )).squeeze()
+    # # nc and nv is the value before selecting activate space
+    # order = np.indices(((nc+no)*nv+nc*(no+nv), )).squeeze()
     # # my order to pyscf order
     # for oi in range(nc*no):
     #     order = np.insert(order, (nc_old+no)*nv_old+oi*nv_old+nc_old*no, (nc_old+no)*nv_old+oi)
     #     order = np.delete(order, (nc_old+no)*nv_old)
-    # # pyscf order to my order
+
+    # pyscf order to my order
+    order = np.indices(((nc + no) * nv + nc * (no + nv),)).squeeze()
     for oi in range(nc):
         for noi in range(no):
-            order = np.insert(order, (nc+no)*nv+no*oi+noi, (nc+no)*nv+oi*(no+nv)+noi)
-            order = np.delete(order, (nc+no)*nv+oi*(no+nv)+noi+1)
+            order = np.insert(order, (nc+no)*nv+no*oi+noi, (nc+no)*nv+oi*nv+no*oi+noi)
+            order = np.delete(order, (nc+no)*nv+oi*nv+no*oi+noi+1)
+
+    # # transform pyscf order to my order (only for spin=1)
+    # order = np.indices(((nc + no) * nv + nc * (no + nv),)).squeeze()
+    # for oi in range(nc * no):
+    #    order = np.insert(order, (nc + no) * nv + oi, (nc + no) * nv + oi * nv + oi)
+    #    order = np.delete(order, (nc + no) * nv + oi * nv + oi + 1)
     return order
 
 
@@ -118,62 +119,33 @@ def st2so(eigvec, nc=None, no=None, nv=None, lcva=None, lova=None, lcob=None, lc
     return eigvec_so
 
 
-# copy from joblib website
-class MemoryMonitor(Thread):
-    """Monitor the memory usage in MB in a separate thread.
+def exchange_ov_co(v, nc, no, nv):
+    return np.concatenate((
+        v[:nc*nv, :],
+        v[(nc+no)*nv:(nc+no)*nv+nc*no, :],
+        v[nc*nv:(nc+no)*nv, :],
+        v[(nc+no)*nv+nc*no:, :]
+    ), axis=0)
 
-    Note that this class is good enough to highlight the memory profile of
-    Parallel in this example, but is not a general purpose profiler fit for
-    all cases.
 
-    Usage:
-        monitor = MemoryMonitor()
-
-        ......  # some code
-
-        # Report memory usage
-        monitor.join()
-        peak = max(monitor.memory_buffer) / 1e6
+def print_table(data, N):
     """
+    打印一个 N×N 的表格，第一行和第一列是 1~N 的标号
+    data: 二维列表，data[i][j] 是第 i 行第 j 列的数据
+    """
+    # 计算每个单元格需要的宽度（取所有内容里最长的）
+    width = 8  # 你可以根据数据大小调整
 
-    def __init__(self):
-        super().__init__()
-        self.stop = False
-        self.memory_buffer = []
-        self.start()
+    # 打印表头（第一行标号）
+    header = " " * width  # 左上角空着
+    for j in range(1, N + 1):
+        header += f"{j:>{width}}"
+    print(header)
+    print("-" * len(header))
 
-    def get_memory(self):
-        "Get memory of a process and its children."
-        p = Process()
-        memory = p.memory_info().rss
-        for c in p.children():
-            memory += c.memory_info().rss
-        return memory
-
-    def run(self):
-        memory_start = self.get_memory()
-        while not self.stop:
-            self.memory_buffer.append(self.get_memory() - memory_start)
-            time.sleep(0.01)
-
-    def join(self):
-        self.stop = True
-        super().join()
-
-
-# copy from pyscf code
-#Fixme, the standard resource module gives wrong number when objects are released
-# http://fa.bianp.net/blog/2013/different-ways-to-get-memory-consumption-or-lessons-learned-from-memory_profiler/#fn:1
-#or use slow functions as memory_profiler._get_memory did
-CLOCK_TICKS = os.sysconf("SC_CLK_TCK")
-PAGESIZE = os.sysconf("SC_PAGE_SIZE")
-def current_memory():
-    '''Return the size of used memory and allocated virtual memory (in MB)'''
-    #import resource
-    #return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1000
-    if sys.platform.startswith('linux'):
-        with open("/proc/%s/statm" % os.getpid()) as f:
-            vms, rss = [int(x)*PAGESIZE for x in f.readline().split()[:2]]
-            return rss/1e6, vms/1e6
-    else:
-        return 0, 0
+    # 打印每一行
+    for i in range(1, N + 1):
+        row = f"{i:>{width-1}}|"  # 行标号 + 分隔线
+        for j in range(1, N + 1):
+            row += f"{data[i-1][j-1]:{width}.4f}"
+        print(row)

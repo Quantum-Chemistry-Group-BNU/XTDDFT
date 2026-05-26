@@ -1,28 +1,44 @@
 #!/usr/bin/env python
 import os, sys, time
-os.environ["OMP_NUM_THREADS"] = "4"
+os.environ["OMP_NUM_THREADS"] = "16"
 sys.path.append('/')
 sys.path.append('../../')
 import scipy
 import numpy as np
 import pandas as pd
+import Davidson
+from pyscf.tdscf import rhf as tdhf_cpu
 from pyscf import dft, gto, scf, lib, ao2mo, tddft
 from pyscf.lib import logger
 from pyscf.symm import direct_prod
+from pyscf.scf import hf, rohf, uhf
 from xtddft.utils import unit, atom, utils
-from x2c_hamiltonian.driver.tdm import TDM_SGS, TDM_S
+
+
+# from opt_einsum import contract as einsum
+
 
 class XTDA:
-    def __init__(self, mol, mf, nstates=10, savedata=False, basis='orbital', so2st=True):
+    def __init__(self, mol, mf, nstates=10, basis='orbital', so2st=True, use_Davidson=True):
         self.mol = mol
         self.mf = mf
         self.nstates = nstates
-        self.savedata = savedata
         self.basis = basis
         self.so2st = so2st
+        self.use_Davidson = use_Davidson
+        self.conv_tol = tdhf_cpu.TDBase.conv_tol
+        self.lindep = tdhf_cpu.TDBase.lindep
+        self.max_cycle = tdhf_cpu.TDBase.max_cycle
+        if isinstance(mf, rohf.ROHF):
+            self.X = True
+        elif isinstance(mf, uhf.UHF):
+            self.X = False
+        else:
+            raise ValueError
 
     def kernel(self):
         if self.basis == 'tensor':
+            print('use full diagonal method, not implement Davidson iteration')
             self.x_tda = X_TDA(self.mf)
             self.e, self.v = self.x_tda.kernel(nstates=self.nstates)
             self.syms = self.x_tda.analyze()
@@ -32,6 +48,12 @@ class XTDA:
             pass
         else:
             raise ValueError('basis must be tensor or orbital')
+        if self.use_Davidson:
+            self.Davidson()
+        else:
+            self.full_diag()
+
+    def full_diag(self):
         # Section: prepare for compute
         mo_energy = self.mf.mo_energy
         mo_coeff = self.mf.mo_coeff
@@ -80,8 +102,8 @@ class XTDA:
         hf = scf.ROHF(self.mol)
         # hf.kernel()
         veff = hf.get_veff(self.mol, dm)
-        focka2 = mo_coeff.T @ (h1e+veff[0]) @ mo_coeff
-        fockb2 = mo_coeff.T @ (h1e+veff[1]) @ mo_coeff
+        focka2 = mo_coeff.T @ (h1e + veff[0]) @ mo_coeff
+        fockb2 = mo_coeff.T @ (h1e + veff[1]) @ mo_coeff
         fab_a2 = focka2[nocc_a:, nocc_a:]
         fab_b2 = fockb2[nocc_b:, nocc_b:]
         fij_a2 = focka2[:nocc_a, :nocc_a]
@@ -132,8 +154,8 @@ class XTDA:
                 eri_aa = eri_aa.reshape(nocc_a, nmo_a, nmo_a, nmo_a)
                 eri_bb = eri_bb.reshape(nocc_b, nmo_b, nmo_b, nmo_b)
                 k_fac = alpha - hyb
-                aa -= np.einsum('ijba->iajb', eri_aa[:nocc_a,:nocc_a,nocc_a:,nocc_a:]) * k_fac
-                bb -= np.einsum('ijba->iajb', eri_bb[:nocc_b,:nocc_b,nocc_b:,nocc_b:]) * k_fac
+                aa -= np.einsum('ijba->iajb', eri_aa[:nocc_a, :nocc_a, nocc_a:, nocc_a:]) * k_fac
+                bb -= np.einsum('ijba->iajb', eri_bb[:nocc_b, :nocc_b, nocc_b:, nocc_b:]) * k_fac
 
         occ = np.zeros((2, len(mo_occ)))  # deal as uks
         occ[0][:len(occidx_a)] = 1
@@ -143,8 +165,8 @@ class XTDA:
         ni.libxc.test_deriv_order(self.mf.xc, 2, raise_error=True)
         if self.mf.do_nlc():
             logger.warn(self.mf, 'NLC functional found in DFT object.  Its second '
-                            'derivative is not available. Its contribution is '
-                            'not included in the response function.')
+                                 'derivative is not available. Its contribution is '
+                                 'not included in the response function.')
 
         xctype = ni._xc_type(self.mf.xc)
         dm0 = self.mf.make_rdm1(mo_coeff, occ)
@@ -235,9 +257,9 @@ class XTDA:
                 tau_ov_b = np.einsum('xri,xra->ria', rho_ob[1:4], rho_vb[1:4]) * .5
                 rho_ov_a = np.vstack([rho_ov_a, tau_ov_a[np.newaxis]])
                 rho_ov_b = np.vstack([rho_ov_b, tau_ov_b[np.newaxis]])
-                w_ov_aa = np.einsum('xyr,xria->yria', wfxc[0,:,0], rho_ov_a)
-                w_ov_ab = np.einsum('xyr,xria->yria', wfxc[0,:,1], rho_ov_a)
-                w_ov_bb = np.einsum('xyr,xria->yria', wfxc[1,:,1], rho_ov_b)
+                w_ov_aa = np.einsum('xyr,xria->yria', wfxc[0, :, 0], rho_ov_a)
+                w_ov_ab = np.einsum('xyr,xria->yria', wfxc[0, :, 1], rho_ov_a)
+                w_ov_bb = np.einsum('xyr,xria->yria', wfxc[1, :, 1], rho_ov_b)
 
                 iajb = lib.einsum('xria,xrjb->iajb', w_ov_aa, rho_ov_a)
                 aa += iajb
@@ -261,11 +283,11 @@ class XTDA:
         si = 0.5 * self.mol.spin
 
         # CV(aa)-CV(aa)
-        A[:nc*nv, :nc*nv] = (
-            np.einsum('ij, ab -> iajb',delta_ij_a[:nc, :nc], fock_a[nc+no:, nc+no:])
-            - np.einsum('ij, ab -> iajb',fock_a[:nc, :nc], delta_ab_a)
-            + aa[:nc, :, :nc, :]
-        ).reshape(nc*nv, nc*nv)
+        A[:nc * nv, :nc * nv] = (
+                np.einsum('ij, ab -> iajb', delta_ij_a[:nc, :nc], fock_a[nc + no:, nc + no:])
+                - np.einsum('ij, ab -> iajb', fock_a[:nc, :nc], delta_ab_a)
+                + aa[:nc, :, :nc, :]
+        ).reshape(nc * nv, nc * nv)
         # # add spin adapted correction
         # # same with below code
         # focks = fock_b2 - fock_a2
@@ -273,107 +295,107 @@ class XTDA:
         #     0.5 * (1 - np.sqrt((si + 1) / si) + 1 / (2 * si)) * np.einsum('ij, ab->iajb', delta_ij_b, focks[nc+no:, nc+no:])
         #     + 0.5 * (-1 + np.sqrt((si + 1) / si) + 1 / (2 * si)) * np.einsum('ij, ab->iajb', focks[:nc, :nc], delta_ab_a)
         # ).reshape(nc*nv, nc*nv)
-        A[:nc*nv, :nc*nv] += (
-            0.5 * (1-np.sqrt((si+1)/si)+1/(2*si)) * (
+        A[:nc * nv, :nc * nv] += (
+                0.5 * (1 - np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
                 np.einsum('ij, ab->iajb', delta_ij, fab_b2[no:, no:])
                 - np.einsum('ij, ab->iajb', delta_ij, fab_a2)
-            )
-            + 0.5 * (-1+np.sqrt((si+1)/si)+1/(2*si)) * (
-                np.einsum('ab, ij->iajb', delta_ab, fij_b2)
-                - np.einsum('ab, ij->iajb', delta_ab, fij_a2[:-no,:-no])
-            )
-        ).reshape(nc*nv, nc*nv)
+        )
+                + 0.5 * (-1 + np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
+                        np.einsum('ab, ij->iajb', delta_ab, fij_b2)
+                        - np.einsum('ab, ij->iajb', delta_ab, fij_a2[:-no, :-no])
+                )
+        ).reshape(nc * nv, nc * nv)
 
         # CV(aa)-OV(aa)
         Acvaaovaa = (
-            np.einsum('ij, ab -> iajb', delta_ij_a[:nc, nc:nc+no], fock_a[nc+no:, nc+no:])
-            - np.einsum('ij, ab -> iajb', fock_a[:nc, nc:nc+no], delta_ab_a)
-            + aa[:nc, :, nc:nc+no, :]
-        ).reshape(nc*nv, no*nv)
-        A[:nc*nv, nc*nv:(nc+no)*nv] = Acvaaovaa
+                np.einsum('ij, ab -> iajb', delta_ij_a[:nc, nc:nc + no], fock_a[nc + no:, nc + no:])
+                - np.einsum('ij, ab -> iajb', fock_a[:nc, nc:nc + no], delta_ab_a)
+                + aa[:nc, :, nc:nc + no, :]
+        ).reshape(nc * nv, no * nv)
+        A[:nc * nv, nc * nv:(nc + no) * nv] = Acvaaovaa
 
         # CV(aa)-CO(bb)
-        Acvaacobb = ab[:nc, :, :, :no].reshape(nc*nv, nc*no)
-        A[:nc*nv, (nc+no)*nv:(nc+no)*nv+nc*no] = Acvaacobb
+        Acvaacobb = ab[:nc, :, :, :no].reshape(nc * nv, nc * no)
+        A[:nc * nv, (nc + no) * nv:(nc + no) * nv + nc * no] = Acvaacobb
 
         # CV(aa)-CV(bb)
-        Acvaacvbb = ab[:nc, :, :, no:no+nv].reshape(nc*nv, nc*nv)
+        Acvaacvbb = ab[:nc, :, :, no:no + nv].reshape(nc * nv, nc * nv)
         # add spin adapted correction
         Acvaacvbb -= (
-            0.5 * 1/(2*si) * (
+                0.5 * 1 / (2 * si) * (
                 np.einsum('ij, ab->iajb', delta_ij, fab_b2[no:, no:])
                 - np.einsum('ij, ab->iajb', delta_ij, fab_a2)
                 + np.einsum('ab, ij->iajb', delta_ab, fij_b2)
                 - np.einsum('ab, ij->iajb', delta_ab, fij_a2[:-no, :-no])
-            )
-        ).reshape(nc*nv, nc*nv)
-        A[:nc*nv, (nc+no)*nv+nc*no:dim] = Acvaacvbb
+        )
+        ).reshape(nc * nv, nc * nv)
+        A[:nc * nv, (nc + no) * nv + nc * no:dim] = Acvaacvbb
 
         # OV(aa)-CV(aa)
-        A[nc*nv:(nc+no)*nv, :nc*nv] = Acvaaovaa.T
+        A[nc * nv:(nc + no) * nv, :nc * nv] = Acvaaovaa.T
 
         # OV(aa)-OV(aa)
-        A[nc*nv:(nc+no)*nv, nc*nv:(nc+no)*nv] = (
-            np.einsum('ij, ab -> iajb', delta_ij_a[nc:nc+no, nc:nc+no], fock_a[nc+no:, nc+no:])
-            - np.einsum('ij, ab -> iajb', fock_a[nc:nc+no, nc:nc+no], delta_ab_a)
-            + aa[nc:nc+no, :, nc:nc+no, :]
-        ).reshape(no*nv, no*nv)
+        A[nc * nv:(nc + no) * nv, nc * nv:(nc + no) * nv] = (
+                np.einsum('ij, ab -> iajb', delta_ij_a[nc:nc + no, nc:nc + no], fock_a[nc + no:, nc + no:])
+                - np.einsum('ij, ab -> iajb', fock_a[nc:nc + no, nc:nc + no], delta_ab_a)
+                + aa[nc:nc + no, :, nc:nc + no, :]
+        ).reshape(no * nv, no * nv)
 
         # OV(aa)-CO(bb)
-        Aovaacobb = ab[nc:nc+no, :, :, :no].reshape(no*nv, nc*no)
-        A[nc*nv:(nc+no)*nv, (nc+no)*nv:(nc+no)*nv+nc*no] = Aovaacobb
+        Aovaacobb = ab[nc:nc + no, :, :, :no].reshape(no * nv, nc * no)
+        A[nc * nv:(nc + no) * nv, (nc + no) * nv:(nc + no) * nv + nc * no] = Aovaacobb
 
         # OV(aa)-CV(bb)
-        Aovaacvbb = ab[nc:nc+no, :, :, no:no+nv].reshape(no*nv, nc*nv)
-        A[nc*nv:(nc+no)*nv, (nc+no)*nv+nc*no:dim] = Aovaacvbb
+        Aovaacvbb = ab[nc:nc + no, :, :, no:no + nv].reshape(no * nv, nc * nv)
+        A[nc * nv:(nc + no) * nv, (nc + no) * nv + nc * no:dim] = Aovaacvbb
 
         # CO(bb)-CV(aa)
-        A[(nc+no)*nv:(nc+no)*nv+nc*no, :nc*nv] = Acvaacobb.T
+        A[(nc + no) * nv:(nc + no) * nv + nc * no, :nc * nv] = Acvaacobb.T
 
         # CO(bb)-OV(aa)
-        A[(nc+no)*nv:(nc+no)*nv+nc*no, nc*nv:(nc+no)*nv] = Aovaacobb.T
+        A[(nc + no) * nv:(nc + no) * nv + nc * no, nc * nv:(nc + no) * nv] = Aovaacobb.T
 
         # CO(bb)-CO(bb)
-        A[(nc+no)*nv:(nc+no)*nv+nc*no, (nc+no)*nv:(nc+no)*nv+nc*no] = (
-            np.einsum('ij, ab -> iajb', delta_ij_b, fock_b[nc:nc+no, nc:nc+no])
-            - np.einsum('ij, ab -> iajb', fock_b[:nc, :nc], delta_ab_b[:no, :no])
-            + bb[:, :no, :, :no]
-        ).reshape(nc*no, nc*no)
+        A[(nc + no) * nv:(nc + no) * nv + nc * no, (nc + no) * nv:(nc + no) * nv + nc * no] = (
+                np.einsum('ij, ab -> iajb', delta_ij_b, fock_b[nc:nc + no, nc:nc + no])
+                - np.einsum('ij, ab -> iajb', fock_b[:nc, :nc], delta_ab_b[:no, :no])
+                + bb[:, :no, :, :no]
+        ).reshape(nc * no, nc * no)
 
         # CO(bb)-CV(bb)
         Acobbcvbb = (
-            np.einsum('ij, ab -> iajb', delta_ij_b, fock_b[nc:nc+no, nc+no:])
-            - np.einsum('ij, ab -> iajb', fock_b[:nc, :nc], delta_ab_b[:no, no:])
-            + bb[:, :no, :, no:]
-        ).reshape(nc*no, nc*nv)
-        A[(nc+no)*nv:(nc+no)*nv+nc*no, (nc+no)*nv+nc*no:dim] = Acobbcvbb
+                np.einsum('ij, ab -> iajb', delta_ij_b, fock_b[nc:nc + no, nc + no:])
+                - np.einsum('ij, ab -> iajb', fock_b[:nc, :nc], delta_ab_b[:no, no:])
+                + bb[:, :no, :, no:]
+        ).reshape(nc * no, nc * nv)
+        A[(nc + no) * nv:(nc + no) * nv + nc * no, (nc + no) * nv + nc * no:dim] = Acobbcvbb
 
         # CV(bb)-CV(aa)
-        A[(nc+no)*nv+nc*no:dim, :nc*nv] = Acvaacvbb.T
+        A[(nc + no) * nv + nc * no:dim, :nc * nv] = Acvaacvbb.T
 
         # CV(bb)-OV(aa)
-        A[(nc+no)*nv+nc*no:dim, nc*nv:(nc+no)*nv] = Aovaacvbb.T
+        A[(nc + no) * nv + nc * no:dim, nc * nv:(nc + no) * nv] = Aovaacvbb.T
 
         # CV(bb)-CO(bb)
-        A[(nc+no)*nv+nc*no:dim, (nc+no)*nv:(nc+no)*nv+nc*no] = Acobbcvbb.T
+        A[(nc + no) * nv + nc * no:dim, (nc + no) * nv:(nc + no) * nv + nc * no] = Acobbcvbb.T
 
         # CV(bb)-CV(bb)
-        A[(nc+no)*nv+nc*no:dim, (nc+no)*nv+nc*no:dim] = (
-            np.einsum('ij, ab -> iajb', delta_ij_b, fock_b[nc+no:, nc+no:])
-            - np.einsum('ij, ab -> iajb', fock_b[:nc, :nc], delta_ab_b[no:, no:])
-            + bb[:, no:, :, no:]
-        ).reshape(nc*nv, nc*nv)
+        A[(nc + no) * nv + nc * no:dim, (nc + no) * nv + nc * no:dim] = (
+                np.einsum('ij, ab -> iajb', delta_ij_b, fock_b[nc + no:, nc + no:])
+                - np.einsum('ij, ab -> iajb', fock_b[:nc, :nc], delta_ab_b[no:, no:])
+                + bb[:, no:, :, no:]
+        ).reshape(nc * nv, nc * nv)
         # add spin adapted correction
-        A[(nc+no)*nv+nc*no:dim, (nc+no)*nv+nc*no:dim] += (
-            0.5 * (-1 + np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
-            np.einsum('ij, ab->iajb', delta_ij, fab_b2[no:, no:])
-            - np.einsum('ij, ab->iajb', delta_ij, fab_a2)
-            )
-            + 0.5 * (1 - np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
-                np.einsum('ab, ij->iajb', delta_ab, fij_b2)
-                - np.einsum('ab, ij->iajb', delta_ab, fij_a2[:-no, :-no])
-            )
-        ).reshape(nc*nv, nc*nv)
+        A[(nc + no) * nv + nc * no:dim, (nc + no) * nv + nc * no:dim] += (
+                0.5 * (-1 + np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
+                np.einsum('ij, ab->iajb', delta_ij, fab_b2[no:, no:])
+                - np.einsum('ij, ab->iajb', delta_ij, fab_a2)
+        )
+                + 0.5 * (1 - np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
+                        np.einsum('ab, ij->iajb', delta_ab, fij_b2)
+                        - np.einsum('ab, ij->iajb', delta_ab, fij_a2[:-no, :-no])
+                )
+        ).reshape(nc * nv, nc * nv)
 
         self.mo_coeff = mo_coeff
         self.occidx_a = occidx_a
@@ -388,6 +410,8 @@ class XTDA:
         # for oi in range(nc * no):
         #     order = np.insert(order, (nc+no)*nv+oi, (nc+no)*nv+oi*nv+oi)
         #     order = np.delete(order, (nc+no)*nv+oi*nv+oi+1)
+        # self.order = order
+
         order = utils.order_pyscf2my(nc, no, nv)
         self.order = order
 
@@ -398,10 +422,10 @@ class XTDA:
         self.v = self.v[:, :self.nstates]
         self.xy_a = self.v.T[:, :nocc_a * nvir_a]  # V_alpha
         self.xy_b = self.v.T[:, nocc_a * nvir_a:]  # V_beta
-        self.xycv_a = self.v.T[:, :nc*nv]  # V_cv_a
-        self.xyov_a = self.v.T[:, nc*nv:(nc+no)*nv]  # V_ov_a
-        self.xyco_b = self.v.T[:, (nc+no)*nv:(nc+no)*nv+nc*no]  # V_co_b
-        self.xycv_b = self.v.T[:, (nc+no)*nv+nc*no:]  # V_cv_b
+        self.xycv_a = self.v.T[:, :nc * nv]  # V_cv_a
+        self.xyov_a = self.v.T[:, nc * nv:(nc + no) * nv]  # V_ov_a
+        self.xyco_b = self.v.T[:, (nc + no) * nv:(nc + no) * nv + nc * no]  # V_co_b
+        self.xycv_b = self.v.T[:, (nc + no) * nv + nc * no:]  # V_cv_b
         # dS2 = (np.sum(self.xycv_a*self.xycv_a) + np.sum(self.xycv_b*self.xycv_b)
         #        * np.sum(self.xyco_b*self.co_b) * np.sum(self.xycv_a*self.xycv_b))
         self.dS2 = self.deltaS2()
@@ -417,16 +441,392 @@ class XTDA:
         # logger.info(self.mf, 'deltaS2 is \n{}'.format(dS2))
         print('my XTDA result is')
         print(f'{"num":>4} {"energy":>8} {"wav_len":>8} {"osc_str":>8} {"rot_str":>8} {"deltaS2":>8}')
-        for ni, ei, wli, osi, rsi, ds2i in zip(range(self.nstates), self.e_eV, unit.eVxnm/self.e_eV, self.os, rs, self.dS2):
+        for ni, ei, wli, osi, rsi, ds2i in zip(range(self.nstates), self.e_eV, unit.eVxnm / self.e_eV, self.os, rs,
+                                               self.dS2):
             print(f'{ni:4d} {ei:8.4f} {wli:8.4f} {osi:8.4f} {rsi:8.4f} {ds2i:8.4f}')
-        if self.savedata:
-            pd.DataFrame(
-                np.concatenate((unit.eVxnm / np.expand_dims(self.e_eV, axis=1), np.expand_dims(self.os, axis=1)), axis=1)
-            ).to_csv('uvspec_data.csv', index=False, header=None)
         if self.so2st:
             print(f"Remark: the obtained CI coefficient X is under spin orbital basis!")
             print(f"        if one want to obtain X under spin tensor basis, please run xtda.analyze.")
         return self.e[:self.nstates], os, rs, self.v
+
+    def get_frozen_mask(self):
+        '''Get boolean mask for the unrestricted reference orbitals.
+
+        In the returned boolean (mask) array of frozen orbital indices, the
+        element is False if it corresponds to the frozen orbital.
+        '''
+        if self.X:
+            moidxa = None
+            moidxb = None
+            pass
+        else:
+            moidxa = np.ones(self.mf.mo_occ[0].size, dtype=bool)
+            moidxb = np.ones(self.mf.mo_occ[1].size, dtype=bool)
+
+        frozen = None
+        if frozen is None:
+            pass
+        elif isinstance(frozen, (int, np.integer)):
+            moidxa[:frozen] = False
+            moidxb[:frozen] = False
+        elif hasattr(frozen, '__len__'):
+            if len(frozen) > 0:
+                if isinstance(frozen[0], (int, np.integer)):
+                    frozen = (frozen, frozen)
+                moidxa[list(frozen[0])] = False
+                moidxb[list(frozen[1])] = False
+        else:
+            raise NotImplementedError
+        return moidxa, moidxb
+
+    def gen_response(self, mo_coeff=None, mo_occ=None,
+                     with_j=True, hermi=0, max_memory=None, with_nlc=True):
+        '''Generate a function to compute the product of UHF response function and
+        UHF density matrices.
+        '''
+        mf = self.mf
+        assert isinstance(mf, (uhf.UHF, rohf.ROHF))
+        if mo_coeff is None: mo_coeff = mf.mo_coeff
+        if mo_occ is None: mo_occ = mf.mo_occ
+        if self.X:
+            mo_coeff = (mf.mo_coeff, mf.mo_coeff)
+            mo_energy = (mf.mo_energy, mf.mo_energy)
+            mo_occ = np.zeros((2, len(mf.mo_coeff)))
+            mo_occ[0][np.where(mf.mo_occ >= 1)[0]] = 1
+            mo_occ[1][np.where(mf.mo_occ >= 2)[0]] = 1
+        mol = mf.mol
+        if isinstance(mf, hf.KohnShamDFT):
+            ni = mf._numint
+            ni.libxc.test_deriv_order(mf.xc, 2, raise_error=True)
+            omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, mol.spin)
+            hybrid = ni.libxc.is_hybrid_xc(mf.xc)
+
+            rho0, vxc, fxc = ni.cache_xc_kernel(mol, mf.grids, mf.xc, mo_coeff, mo_occ, 1)
+            dm0 = None
+
+            if not with_nlc and mf.do_nlc():
+                logger.warn(mf, "NLC contribution in gen_response is NOT included")
+
+            def vind(dm1):
+                if hermi == 2:
+                    v1 = np.zeros_like(dm1)
+                else:
+                    v1 = ni.nr_uks_fxc(mol, mf.grids, mf.xc, dm0, dm1, 0, hermi, rho0, vxc, fxc, max_memory=max_memory)
+                    if with_nlc and mf.do_nlc():
+                        from pyscf.hessian.rks import get_vnlc_resp  # Cannot import at top due to circular dependency
+                        v1 += get_vnlc_resp(mf, mol, mo_coeff, mo_occ, dm1[0] + dm1[1], max_memory)
+                if not hybrid:
+                    if with_j:
+                        vj = mf.get_j(mol, dm1, hermi=hermi)
+                        v1 += vj[0] + vj[1]
+                else:
+                    if omega == 0:
+                        vj, vk = mf.get_jk(mol, dm1, hermi, with_j=with_j)
+                        vk *= hyb
+                    elif alpha == 0:  # LR=0, only SR exchange
+                        if with_j:
+                            vj = mf.get_j(mol, dm1, hermi)
+                        vk = mf.get_k(mol, dm1, hermi, omega=-omega)
+                        vk *= hyb
+                    elif hyb == 0:  # SR=0, only LR exchange
+                        if with_j:
+                            vj = mf.get_j(mol, dm1, hermi)
+                        vk = mf.get_k(mol, dm1, hermi, omega=omega)
+                        vk *= alpha
+                    else:  # SR and LR exchange with different ratios
+                        vj, vk = mf.get_jk(mol, dm1, hermi, with_j=with_j)
+                        vk *= hyb
+                        vk += mf.get_k(mol, dm1, hermi, omega=omega) * (alpha - hyb)
+                    if with_j:
+                        v1 += vj[0] + vj[1] - vk
+                    else:
+                        v1 -= vk
+                return v1
+
+        elif with_j:
+            def vind(dm1):
+                vj, vk = mf.get_jk(mol, dm1, hermi=hermi)
+                v1 = vj[0] + vj[1] - vk
+                return v1
+
+        else:
+            def vind(dm1):
+                return -mf.get_k(mol, dm1, hermi=hermi)
+
+        return vind
+
+    def _gen_tda_operation(self, fock_ao=None, wfnsym=None):
+        assert fock_ao is None
+        mf = self.mf
+        mol = mf.mol
+        maska, maskb = self.get_frozen_mask()
+        # assert (mf.mo_coeff[0].dtype == np.double)
+        if self.X:
+            mo_coeff = (mf.mo_coeff, mf.mo_coeff)
+            mo_energy = (mf.mo_energy, mf.mo_energy)
+            mo_occ = np.zeros((2, len(mf.mo_coeff)))
+            mo_occ[0][np.where(mf.mo_occ >= 1)[0]] = 1
+            mo_occ[1][np.where(mf.mo_occ >= 2)[0]] = 1
+        else:
+            mo_coeff = (mf.mo_coeff[0][:, maska], mf.mo_coeff[1][:, maskb])
+            mo_energy = (mf.mo_energy[0][maska], mf.mo_energy[1][maskb])
+            mo_occ = (mf.mo_occ[0][maska], mf.mo_occ[1][maskb])
+        nao, nmo = mo_coeff[0].shape
+        occidxa = np.where(mo_occ[0] > 0)[0]
+        occidxb = np.where(mo_occ[1] > 0)[0]
+        viridxa = np.where(mo_occ[0] == 0)[0]
+        viridxb = np.where(mo_occ[1] == 0)[0]
+        nocca = len(occidxa)
+        noccb = len(occidxb)
+        nvira = len(viridxa)
+        nvirb = len(viridxb)
+        orboa = mo_coeff[0][:, occidxa]
+        orbob = mo_coeff[1][:, occidxb]
+        orbva = mo_coeff[0][:, viridxa]
+        orbvb = mo_coeff[1][:, viridxb]
+
+        if self.X:
+            dm = mf.make_rdm1()
+            vhf = mf.get_veff(mf.mol, dm)
+            h1e = mf.get_hcore()
+            focka_ao = h1e + vhf[0]
+            fockb_ao = h1e + vhf[1]
+            focka_mo = mo_coeff[0].T @ focka_ao @ mo_coeff[0]
+            fockb_mo = mo_coeff[1].T @ fockb_ao @ mo_coeff[1]
+            e_ia_a = focka_mo.diagonal()[viridxa] - focka_mo.diagonal()[occidxa, None]
+            e_ia_b = fockb_mo.diagonal()[viridxb] - fockb_mo.diagonal()[occidxb, None]
+        else:
+            e_ia_a = mo_energy[0][viridxa] - mo_energy[0][occidxa, None]
+            e_ia_b = mo_energy[1][viridxb] - mo_energy[1][occidxb, None]
+        e_ia = np.hstack((e_ia_a.reshape(-1), e_ia_b.reshape(-1)))
+        hdiag = e_ia
+        mem_now = lib.current_memory()[0]
+        max_memory = max(2000, mf.max_memory * .8 - mem_now)
+        vresp = self.gen_response(hermi=0, max_memory=max_memory)
+
+        if self.X:
+            hf = scf.ROHF(mol)
+            # h1e = hf.get_hcore()  # ROHF and ROKS, hcore is same, veff is different
+            veff = hf.get_veff(mol, dm)
+            focka_mo_hf = mo_coeff[0].T @ (h1e + veff[0]) @ mo_coeff[0]
+            fockb_mo_hf = mo_coeff[1].T @ (h1e + veff[1]) @ mo_coeff[1]
+            si = 0.5 * self.mol.spin
+
+        def vind(zs):
+            nz = len(zs)
+            zs = np.asarray(zs)
+
+            za = zs[:, :nocca * nvira].reshape(nz, nocca, nvira)
+            zb = zs[:, nocca * nvira:].reshape(nz, noccb, nvirb)
+            dmsa = lib.einsum('xov,pv,qo->xpq', za, orbva, orboa.conj())
+            dmsb = lib.einsum('xov,pv,qo->xpq', zb, orbvb, orbob.conj())
+
+            v1ao = vresp(np.asarray((dmsa, dmsb)))
+
+            v1a = lib.einsum('xpq,qo,pv->xov', v1ao[0], orboa, orbva.conj())
+            v1b = lib.einsum('xpq,qo,pv->xov', v1ao[1], orbob, orbvb.conj())
+            if self.X:
+                v1a += (
+                        np.einsum('xib,ab->xia', za, focka_mo[len(occidxa):, len(occidxa):])
+                        - np.einsum('xja,ij->xia', za, focka_mo[:len(occidxa), :len(occidxa)])
+                )
+
+                # for alpha block, my order is same with pyscf
+                # CV(aa)-CV(aa)
+                v1a[:, :noccb, :] += (
+                    0.5 * (1 - np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
+                        np.einsum('xib,ab->xia', za[:, :noccb, :], fockb_mo_hf[nocca:, nocca:])
+                        - np.einsum('xib,ab->xia ', za[:, :noccb, :], focka_mo_hf[nocca:, nocca:])
+                    )
+                    + 0.5 * (-1 + np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
+                        np.einsum('xja,ij->xia', za[:, :noccb, :], fockb_mo_hf[:noccb, :noccb])
+                        - np.einsum('xja,ij->xia ', za[:, :noccb, :], focka_mo_hf[:noccb, :noccb])
+                    )
+                )
+
+                # for beta block, my order is different with pyscf, so need transfer
+                # CV(aa)-CV(bb)
+                v1a[:, :noccb, :] -= (
+                    0.5 * 1 / (2 * si) * (
+                        np.einsum('xib,ab->xia', zb[:, :, -nvira:], fockb_mo_hf[nocca:, nocca:])
+                        - np.einsum('xib,ab->xia', zb[:, :, -nvira:], focka_mo_hf[nocca:, nocca:])
+                        + np.einsum('xja,ij->xia', zb[:, :, -nvira:], fockb_mo_hf[:noccb, :noccb])
+                        - np.einsum('xja,ij->xia', zb[:, :, -nvira:], focka_mo_hf[:noccb, :noccb])
+                    )
+                )
+
+                v1b += (
+                        np.einsum('xib,ab->xia', zb, fockb_mo[len(occidxb):, len(occidxb):])
+                        - np.einsum('xja,ij->xia', zb, fockb_mo[:len(occidxb), :len(occidxb)])
+                )
+
+                # CV(bb)-CV(aa)
+                v1b[:, :, -nvira:] -= (
+                    0.5 * 1 / (2 * si) * (
+                        np.einsum('xib,ab->xia', za[:, :noccb, :], fockb_mo_hf[nocca:, nocca:])
+                        - np.einsum('xib,ab->xia', za[:, :noccb, :], focka_mo_hf[nocca:, nocca:])
+                        + np.einsum('xja,ij->xia', za[:, :noccb, :], fockb_mo_hf[:noccb, :noccb])
+                        - np.einsum('xja,ij->xia', za[:, :noccb, :], focka_mo_hf[:noccb, :noccb])
+                    )
+                )
+
+                # for beta block, my order is different with pyscf, so need transfer
+                # CV(bb)-CV(bb)
+                v1b[:, :, -nvira:] += (
+                    0.5 * (-1 + np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
+                        np.einsum('xib,ab->xia', zb[:, :, -nvira:], fockb_mo_hf[nocca:, nocca:])
+                        - np.einsum('xib,ab->xia ', zb[:, :, -nvira:], focka_mo_hf[nocca:, nocca:])
+                    )
+                    + 0.5 * (1 - np.sqrt((si + 1) / si) + 1 / (2 * si)) * (
+                        np.einsum('xja,ij->xia', zb[:, :, -nvira:], fockb_mo_hf[:noccb, :noccb])
+                        - np.einsum('xja,ij->xia ', zb[:, :, -nvira:], focka_mo_hf[:noccb, :noccb])
+                    )
+                )
+            else:
+                v1a += np.einsum('xia,ia->xia', za, e_ia_a)
+                v1b += np.einsum('xia,ia->xia', zb, e_ia_b)
+
+            hx = np.hstack((v1a.reshape(nz, -1), v1b.reshape(nz, -1)))
+            return hx
+
+        return vind, hdiag
+
+    def gen_vind(self, mf=None):
+        '''Generate function to compute Ax'''
+        # assert mf is None or mf is self._scf
+        assert mf is None or mf is self.mf
+        return self._gen_tda_operation()
+
+    def get_init_guess(self, mf, nstates=None, wfnsym=None, return_symmetry=False):
+        if nstates is None: nstates = self.nstates
+        # if wfnsym is None: wfnsym = self.wfnsym
+        wfnsym = None
+
+        mol = mf.mol
+        maska, maskb = self.get_frozen_mask()
+        if self.X:
+            mo_energy = (mf.mo_energy, mf.mo_energy)
+            mo_occ = np.zeros((2, len(mf.mo_coeff)))
+            mo_occ[0][np.where(mf.mo_occ >= 1)[0]] = 1
+            mo_occ[1][np.where(mf.mo_occ >= 2)[0]] = 1
+        else:
+            mo_energy = (mf.mo_energy[0][maska], mf.mo_energy[1][maskb])
+            mo_occ = (mf.mo_occ[0][maska], mf.mo_occ[1][maskb])
+        occidxa = np.where(mo_occ[0] > 0)[0]
+        occidxb = np.where(mo_occ[1] > 0)[0]
+        viridxa = np.where(mo_occ[0] == 0)[0]
+        viridxb = np.where(mo_occ[1] == 0)[0]
+        e_ia_a = mo_energy[0][viridxa] - mo_energy[0][occidxa, None]
+        e_ia_b = mo_energy[1][viridxb] - mo_energy[1][occidxb, None]
+        nov = e_ia_a.size + e_ia_b.size
+        nstates = min(nstates, nov)
+
+        e_ia = np.append(e_ia_a.ravel(), e_ia_b.ravel())
+        # Find the nstates-th lowest energy gap
+        e_threshold = np.partition(e_ia, nstates - 1)[nstates - 1]
+        # e_threshold += self.deg_eia_thresh
+        e_threshold += 0.001  # self.deg_eia_thresh == 0.001
+
+        idx = np.where(e_ia <= e_threshold)[0]
+        x0 = np.zeros((idx.size, nov))
+        for i, j in enumerate(idx):
+            x0[i, j] = 1  # Koopmans' excitations
+        return x0
+
+    def get_precond(self, hdiag):
+        def precond(x, e, *args):
+            if isinstance(e, np.ndarray):
+                e = e[0]
+            diagd = hdiag - (e - self.mf.level_shift)
+            diagd[abs(diagd) < 1e-8] = 1e-8
+            return x / diagd
+
+        return precond
+
+    def Davidson(self, x0=None, nstates=None):
+        '''TDA diagonalization solver
+        '''
+        mf = self.mf
+        if mf.mo_energy is None:
+            mf.run()
+        if self.X:
+            mo_coeff = (mf.mo_coeff, mf.mo_coeff)
+            mo_energy = (mf.mo_energy, mf.mo_energy)
+            mo_occ = np.zeros((2, len(mf.mo_coeff)))
+            mo_occ[0][np.where(mf.mo_occ >= 1)[0]] = 1
+            mo_occ[1][np.where(mf.mo_occ >= 2)[0]] = 1
+        else:
+            mo_coeff = (mf.mo_coeff[0], mf.mo_coeff[1])
+            mo_energy = (mf.mo_energy[0], mf.mo_energy[1])
+            mo_occ = (mf.mo_occ[0], mf.mo_occ[1])
+
+        nstates = self.nstates
+        mol = self.mol
+
+        vind, hdiag = self.gen_vind(self.mf)
+        precond = self.get_precond(hdiag)
+
+        def pickeig(w, v, nroots, envs):
+            # idx = np.where(w > self.positive_eig_threshold)[0]
+            idx = np.where(w > 0.001)[0]  # self.positive_eig_threshold == 0.001
+            return w[idx], v[:, idx], idx
+        x0 = self.get_init_guess(self.mf, self.nstates, return_symmetry=False)
+
+        self.converged, self.e, x1, Davidcyc = Davidson.davidson1(
+            vind, x0, precond, tol_residual=self.conv_tol, lindep=self.lindep,
+            nroots=nstates, pick=pickeig, max_cycle=self.max_cycle)
+
+        maska, maskb = self.get_frozen_mask()
+        nmo = mo_occ[0][maska].size
+        nocca = (mo_occ[0][maska] > 0).sum()
+        noccb = (mo_occ[1][maskb] > 0).sum()
+        nvira = nmo - nocca
+        nvirb = nmo - noccb
+        xy = [((xi[:nocca * nvira].reshape(nocca, nvira),  # X_alpha
+                     xi[nocca * nvira:].reshape(noccb, nvirb)),  # X_beta
+                    (0, 0))  # (Y_alpha, Y_beta)
+                   for xi in x1]
+        v = np.empty((xy[0][0][0].reshape(-1).shape[0] + xy[0][0][1].reshape(-1).shape[0], 0))
+        for vec in xy:
+            x, y = vec
+            v = np.concatenate(
+                (v, np.expand_dims(np.concatenate((x[0].reshape(-1), x[1].reshape(-1))), axis=1)),
+                axis=1
+            )
+        self.nc = noccb
+        self.no = nocca - noccb
+        self.nv = nvira
+        self.order = utils.order_pyscf2my(noccb, nocca - noccb, nvira)
+        self.v = v[self.order, :]
+        self.xy_a = self.v.T[:, :nocca * nvira]  # V_alpha
+        self.xy_b = self.v.T[:, nocca * nvira:]  # V_beta
+        self.xycv_a = self.v.T[:, :noccb * nvira]  # V_cv_a
+        self.xyov_a = self.v.T[:, noccb * nvira:nocca * nvira]  # V_ov_a
+        self.xyco_b = self.v.T[:, nocca * nvira:nocca * nvira + noccb * (nocca - noccb)]  # V_co_b
+        self.xycv_b = self.v.T[:, nocca * nvira + noccb * (nocca - noccb):]  # V_cv_b
+        occidx_a = np.where(mf.mo_occ >= 1)[0]
+        viridx_a = np.where(mf.mo_occ == 0)[0]
+        occidx_b = np.where(mf.mo_occ >= 2)[0]
+        viridx_b = np.where(mf.mo_occ != 2)[0]
+        self.occidx_a = occidx_a
+        self.viridx_a = viridx_a
+        self.occidx_b = occidx_b
+        self.viridx_b = viridx_b
+        self.dS2 = self.deltaS2()
+        self.os = self.osc_str()  # oscillator strength
+        # before calculate rot_str, check whether mol is chiral mol
+        if gto.mole.chiral_mol(self.mol):
+            self.rs = self.rot_str()
+        else:
+            self.rs = np.zeros(self.nstates)
+        self.analyze()
+        print('my XTDA result is')
+        print(f'{"num":>4} {"energy":>8} {"wav_len":>10} {"osc_str":>8} {"rot_str":>8} {"deltaS2":>8}')
+        for ni, ei, wli, osi, rsi, ds2i in zip(
+            range(self.nstates), self.e * unit.ha2eV, unit.eVxnm / (self.e * unit.ha2eV), self.os, self.rs, self.dS2
+        ):
+            print(f'{ni:4d} {ei:8.4f} {wli:10.4f} {osi:8.4f} {rsi:8.4f} {ds2i:8.4f}')
+        return self.e
 
     def deltaS2(self):
         # refer to J. Chem. Phys. 134, 134101 (2011), ignore some term and some term cancel each other out
@@ -439,10 +839,10 @@ class XTDA:
         # oscillator strength
         # f = 2/3 \omega_{0\nu} | \langle 0|\sum_s r_s |\nu\rangle |^2  # length form
         # f = 2/3 \omega_{0\nu}^{-1} | \langle 0|\sum_s \nabla_s |\nu\rangle |^2  # velocity form
-        orbo_a = self.mo_coeff[:, self.occidx_a]
-        orbv_a = self.mo_coeff[:, self.viridx_a]
-        orbo_b = self.mo_coeff[:, self.occidx_b]
-        orbv_b = self.mo_coeff[:, self.viridx_b]
+        orbo_a = self.mf.mo_coeff[:, self.occidx_a]
+        orbv_a = self.mf.mo_coeff[:, self.viridx_a]
+        orbo_b = self.mf.mo_coeff[:, self.occidx_b]
+        orbv_b = self.mf.mo_coeff[:, self.viridx_b]
         omega = self.e[:self.nstates]
         # length form oscillator strength
         dipole_ao = self.mol.intor_symmetric("int1e_r", comp=3)  # dipole moment, comp=3 is 3 axis
@@ -461,10 +861,10 @@ class XTDA:
         # oscillator strength
         # f = 2/3 \omega_{0\nu} | \langle 0|\sum_s r_s |\nu\rangle |^2  # length form
         # f = 2/3 \omega_{0\nu}^{-1} | \langle 0|\sum_s \nabla_s |\nu\rangle |^2  # velocity form
-        orbo_a = self.mo_coeff[:, self.occidx_a]
-        orbv_a = self.mo_coeff[:, self.viridx_a]
-        orbo_b = self.mo_coeff[:, self.occidx_b]
-        orbv_b = self.mo_coeff[:, self.viridx_b]
+        orbo_a = self.mf.mo_coeff[:, self.occidx_a]
+        orbv_a = self.mf.mo_coeff[:, self.viridx_a]
+        orbo_b = self.mf.mo_coeff[:, self.occidx_b]
+        orbv_b = self.mf.mo_coeff[:, self.viridx_b]
         omega = self.e[:self.nstates]
         dip_ele_ao = self.mol.intor('int1e_ipovlp', comp=3, hermi=2)  # transition electric dipole moment
         dip_ele_mo_a = np.einsum('xpq,pi,qj->xij', dip_ele_ao, orbo_a, orbv_a)
@@ -474,12 +874,12 @@ class XTDA:
         dip_meg_mo_b = np.einsum('xpq,pi,qj->xij', dip_meg_ao, orbo_b, orbv_b)
 
         dip_ele_mo_a = dip_ele_mo_a.reshape(3, -1)
-        dip_ele_mo_b = dip_ele_mo_b.reshape(3, -1)[:, self.order[(self.nc+self.no)*self.nv:]-(self.nc+self.no)*self.nv]
+        dip_ele_mo_b = dip_ele_mo_b.reshape(3, -1)[:,self.order[(self.nc + self.no) * self.nv:] - (self.nc + self.no) * self.nv]
         trans_ele_dip_a = np.einsum('xi,yi->yx', dip_ele_mo_a, self.xy_a)
         trans_ele_dip_b = np.einsum('xi,yi->yx', dip_ele_mo_b, self.xy_b)
         trans_ele_dip = -(trans_ele_dip_a + trans_ele_dip_b)
         dip_meg_mo_a = dip_meg_mo_a.reshape(3, -1)
-        dip_meg_mo_b = dip_meg_mo_b.reshape(3, -1)[:, self.order[(self.nc+self.no)*self.nv:]-(self.nc+self.no)*self.nv]
+        dip_meg_mo_b = dip_meg_mo_b.reshape(3, -1)[:,self.order[(self.nc + self.no) * self.nv:] - (self.nc + self.no) * self.nv]
         trans_meg_dip_a = np.einsum('xi,yi->yx', dip_meg_mo_a, self.xy_a)
         trans_meg_dip_b = np.einsum('xi,yi->yx', dip_meg_mo_b, self.xy_b)
         trans_meg_dip = 0.5 * (trans_meg_dip_a + trans_meg_dip_b)
@@ -494,42 +894,47 @@ class XTDA:
         nc = self.nc
         nv = self.nv
         no = self.no
-        print(nc)
-        print(no)
-        print(nv)
         if self.so2st:
             self.v = utils.so2st(self.v, nc, no, nv)
         else:
             pass
         for nstate in range(self.nstates):
-            value = self.v[:,nstate]
-            x_cv_aa = value[:nc*nv].reshape(nc,nv)
-            x_ov_aa = value[nc*nv:(nc+no)*nv].reshape(no,nv)
-            x_co_bb = value[(nc+no)*nv:(nc+no)*nv+nc*no].reshape(nc,no)
-            x_cv_bb = value[(nc+no)*nv+nc*no:].reshape(nc, nv)
+            value = self.v[:, nstate]
+            x_cv_aa = value[:nc * nv].reshape(nc, nv)
+            x_ov_aa = value[nc * nv:(nc + no) * nv].reshape(no, nv)
+            x_co_bb = value[(nc + no) * nv:(nc + no) * nv + nc * no].reshape(nc, no)
+            x_cv_bb = value[(nc + no) * nv + nc * no:].reshape(nc, nv)
             print(
-                f'D{nstate + 1}'+r"    w:"+f'{self.e[nstate] * unit.ha2eV:10.4f} eV'
+                f'D{nstate + 1}' + r"    w:" + f'{self.e[nstate] * unit.ha2eV:10.4f} eV'
                 + r"    d<S^2>:" + f'{self.dS2[nstate]:8.4f}'
                 + r"    f:" + f'{self.os[nstate]:8.4f}'
             )
             if self.so2st:
                 for o, v in zip(*np.where(abs(x_cv_aa) > 0.1)):
-                    print(f'    CV(0) {o + 1:3d} -> {v + 1 + nc+no:3d}    c_i: {x_cv_aa[o, v]:8.5f}    Per: {100*x_cv_aa[o,v]**2:5.2f}%')
+                    print(
+                        f'    CV(0) {o + 1:3d} -> {v + 1 + nc + no:3d}    c_i: {x_cv_aa[o, v]:8.5f}    Per: {100 * x_cv_aa[o, v] ** 2:5.2f}%')
                 for o, v in zip(*np.where(abs(x_ov_aa) > 0.1)):
-                    print(f'    OV(0) {nc+o + 1:3d} -> {v + 1+nc+no:3d}    c_i: {x_ov_aa[o, v]:8.5f}    Per: {100*x_ov_aa[o,v]**2:5.2f}%')
+                    print(
+                        f'    OV(0) {nc + o + 1:3d} -> {v + 1 + nc + no:3d}    c_i: {x_ov_aa[o, v]:8.5f}    Per: {100 * x_ov_aa[o, v] ** 2:5.2f}%')
                 for o, v in zip(*np.where(abs(x_co_bb) > 0.1)):
-                    print(f'    CO(0) {o + 1:3d} -> {v + 1+nc:3d}    c_i: {x_co_bb[o, v]:8.5f}    Per: {100*x_co_bb[o,v]**2:5.2f}%')
+                    print(
+                        f'    CO(0) {o + 1:3d} -> {v + 1 + nc:3d}    c_i: {x_co_bb[o, v]:8.5f}    Per: {100 * x_co_bb[o, v] ** 2:5.2f}%')
                 for o, v in zip(*np.where(abs(x_cv_bb) > 0.1)):
-                    print(f'    CV(1) {o + 1:3d} -> {v + 1 + nc+no:3d}    c_i: {x_cv_bb[o, v]:8.5f}    Per: {100*x_cv_bb[o,v]**2:5.2f}%')
+                    print(
+                        f'    CV(1) {o + 1:3d} -> {v + 1 + nc + no:3d}    c_i: {x_cv_bb[o, v]:8.5f}    Per: {100 * x_cv_bb[o, v] ** 2:5.2f}%')
             else:
                 for o, v in zip(*np.where(abs(x_cv_aa) > 0.1)):
-                    print(f'    CV(aa) {o + 1:3d} -> {v + 1 + nc+no:3d}    c_i: {x_cv_aa[o, v]:8.5f}    Per: {100*x_cv_aa[o,v]**2:5.2f}%')
+                    print(
+                        f'    CV(aa) {o + 1:3d} -> {v + 1 + nc + no:3d}    c_i: {x_cv_aa[o, v]:8.5f}    Per: {100 * x_cv_aa[o, v] ** 2:5.2f}%')
                 for o, v in zip(*np.where(abs(x_ov_aa) > 0.1)):
-                    print(f'    OV(aa) {nc+o + 1:3d} -> {v + 1+nc+no:3d}    c_i: {x_ov_aa[o, v]:8.5f}    Per: {100*x_ov_aa[o,v]**2:5.2f}%')
+                    print(
+                        f'    OV(aa) {nc + o + 1:3d} -> {v + 1 + nc + no:3d}    c_i: {x_ov_aa[o, v]:8.5f}    Per: {100 * x_ov_aa[o, v] ** 2:5.2f}%')
                 for o, v in zip(*np.where(abs(x_co_bb) > 0.1)):
-                    print(f'    CO(bb) {o + 1:3d} -> {v + 1+nc:3d}    c_i: {x_co_bb[o, v]:8.5f}    Per: {100*x_co_bb[o,v]**2:5.2f}%')
+                    print(
+                        f'    CO(bb) {o + 1:3d} -> {v + 1 + nc:3d}    c_i: {x_co_bb[o, v]:8.5f}    Per: {100 * x_co_bb[o, v] ** 2:5.2f}%')
                 for o, v in zip(*np.where(abs(x_cv_bb) > 0.1)):
-                    print(f'    CV(bb) {o + 1:3d} -> {v + 1 + nc+no:3d}    c_i: {x_cv_bb[o, v]:8.5f}    Per: {100*x_cv_bb[o,v]**2:5.2f}%')
+                    print(
+                        f'    CV(bb) {o + 1:3d} -> {v + 1 + nc + no:3d}    c_i: {x_cv_bb[o, v]:8.5f}    Per: {100 * x_cv_bb[o, v] ** 2:5.2f}%')
 
 
 # spin-conserving spin-adapted x-tda
@@ -601,7 +1006,12 @@ class X_TDA():
         fij_b = fockb[:nocc_b, :nocc_b]
 
         if not s_tda:
-            hf = scf.ROHF(self.mol)
+            x2c_active = (hasattr(mf, 'with_x2c') and mf.with_x2c is not None)
+            if x2c_active:
+                hf = scf.ROHF(self.mol).x2c()
+            else:
+                hf = scf.ROHF(self.mol)
+            # hf = scf.ROHF(self.mol)
             veff = hf.get_veff(self.mol, dm)
             focka2 = mo_coeff[0].T @ (h1e + veff[0]) @ mo_coeff[0]
             fockb2 = mo_coeff[1].T @ (h1e + veff[1]) @ mo_coeff[1]
@@ -765,17 +1175,21 @@ class X_TDA():
 
         # CV(0)-CV(0) iajb
         A[:dim1, :dim1] += 0.5 * (
-                    aa[:-no, :, :-no, :] + bb[:, no:, :, no:] + ab[:-no, :, :, no:] + ba[:, no:, :-no, :] + \
-                    np.einsum('ij,ab -> iajb', iden_C, fab_a) - np.einsum('ji,ab->iajb', fij_a[:-no, :-no], iden_V) + \
-                    np.einsum('ij,ab-> iajb', iden_C, fab_b[no:, no:]) - np.einsum('ji,ab->iajb', fij_b, iden_V)).reshape(nc * nv, nc * nv)
+                aa[:-no, :, :-no, :] + bb[:, no:, :, no:] + ab[:-no, :, :, no:] + ba[:, no:, :-no, :] + \
+                np.einsum('ij,ab -> iajb', iden_C, fab_a) - np.einsum('ji,ab->iajb', fij_a[:-no, :-no], iden_V) + \
+                np.einsum('ij,ab-> iajb', iden_C, fab_b[no:, no:]) - np.einsum('ji,ab->iajb', fij_b, iden_V)).reshape(
+            nc * nv, nc * nv)
         # CV(0)-CO(0) iajv
-        A_cv0co0 = (1 / np.sqrt(2)) * (ab[:-no, :, :, :no] + bb[:, no:, :, :no] + np.einsum('ij,av->iajv', iden_C, fab_b[no:, :no])).reshape(nc * nv, nc * no)
+        A_cv0co0 = (1 / np.sqrt(2)) * (ab[:-no, :, :, :no] + bb[:, no:, :, :no] + np.einsum('ij,av->iajv', iden_C,
+                                                                                            fab_b[no:, :no])).reshape(
+            nc * nv, nc * no)
         A[:dim1, dim1:dim2] += A_cv0co0
         A[dim1:dim2, :dim1] += A_cv0co0.T
 
         # CV(0)-OV(0) iavb
         A_cv0ov0 = (1 / np.sqrt(2)) * (
-                    aa[:-no, :, nc:, :] + ba[:, no:, nc:, :] - np.einsum('vi,ab->iavb', fij_a[nc:, :nc], iden_V)).reshape(nc * nv, nv * no)
+                aa[:-no, :, nc:, :] + ba[:, no:, nc:, :] - np.einsum('vi,ab->iavb', fij_a[nc:, :nc], iden_V)).reshape(
+            nc * nv, nv * no)
         A[:dim1, dim2:dim3] += A_cv0ov0
         A[dim2:dim3, :dim1] += A_cv0ov0.T
 
@@ -783,21 +1197,34 @@ class X_TDA():
         si = -np.sqrt((0.5 * self.mol.spin + 1) / (0.5 * self.mol.spin))
         if self.s_tda:
             A_cv0cv1 = si * 0.5 * (
-                        aa[:-no, :, :-no, :] - bb[:, no:, :, no:] - ab[:-no, :, :, no:] + ba[:, no:, :-no, :] + \
-                        (np.einsum('ij,ab -> iajb', iden_C, fab_a) - np.einsum('ab,ij->iajb', iden_V, fij_a[:-no, :-no])) + \
-                        (-np.einsum('ij,ab-> iajb', iden_C, fab_b[no:, no:]) + np.einsum('ab,ij->iajb', iden_V, fij_b))).reshape((nc * nv, nc * nv))
+                    aa[:-no, :, :-no, :] - bb[:, no:, :, no:] - ab[:-no, :, :, no:] + ba[:, no:, :-no, :] + \
+                    (np.einsum('ij,ab -> iajb', iden_C, fab_a) - np.einsum('ab,ij->iajb', iden_V, fij_a[:-no, :-no])) + \
+                    (-np.einsum('ij,ab-> iajb', iden_C, fab_b[no:, no:]) + np.einsum('ab,ij->iajb', iden_V,
+                                                                                     fij_b))).reshape(
+                (nc * nv, nc * nv))
         else:
             A_cv0cv1 = 0.5 * (aa[:nc, :, :nc, :] - bb[:, no:, :, no:] - ab[:nc, :, :, no:] + ba[:, no:, :nc, :] + \
-                              +np.einsum('ij,ab -> iajb', iden_C, fab_a) - np.einsum('ab,ij->iajb', iden_V, fij_a[:nc, :nc]) + \
-                              -np.einsum('ij,ab-> iajb', iden_C, fab_b[no:, no:]) + np.einsum('ab,ij->iajb', iden_V,fij_b)).reshape((nc * nv, nc * nv)) + \
+                              +np.einsum('ij,ab -> iajb', iden_C, fab_a) - np.einsum('ab,ij->iajb', iden_V,
+                                                                                     fij_a[:nc, :nc]) + \
+                              -np.einsum('ij,ab-> iajb', iden_C, fab_b[no:, no:]) + np.einsum('ab,ij->iajb', iden_V,
+                                                                                              fij_b)).reshape(
+                (nc * nv, nc * nv)) + \
                        0.5 * (1 + si) * (
-                                   np.einsum('ij,ab->iajb', iden_C, fab_b2[no:, no:]) - np.einsum('ij,ab->iajb', iden_C, fab_a2) - \
-                                   np.einsum('ab,ij->iajb', iden_V, fij_b2) + np.einsum('ab,ij->iajb', iden_V, fij_a2[:-no, :-no])).reshape(nc * nv, nc * nv)
+                               np.einsum('ij,ab->iajb', iden_C, fab_b2[no:, no:]) - np.einsum('ij,ab->iajb', iden_C,
+                                                                                              fab_a2) - \
+                               np.einsum('ab,ij->iajb', iden_V, fij_b2) + np.einsum('ab,ij->iajb', iden_V,
+                                                                                    fij_a2[:-no, :-no])).reshape(
+                nc * nv, nc * nv)
         A[:dim1, dim3:] += A_cv0cv1
         A[dim3:, :dim1] += A_cv0cv1.T
 
         # CO(0)-CO(0)
-        A[dim1:dim2, dim1:dim2] += bb[:, :no, :, :no].reshape(nc * no, nc * no) + (np.einsum('ij, ab->iajb', iden_C, fab_b[:no, :no].reshape(no, no)) - np.einsum('ab,ji->iajb', iden_O.reshape(no, no), fij_b)).reshape(nc * no, nc * no)
+        A[dim1:dim2, dim1:dim2] += bb[:, :no, :, :no].reshape(nc * no, nc * no) + (
+                    np.einsum('ij, ab->iajb', iden_C, fab_b[:no, :no].reshape(no, no)) - np.einsum('ab,ji->iajb',
+                                                                                                   iden_O.reshape(no,
+                                                                                                                  no),
+                                                                                                   fij_b)).reshape(
+            nc * no, nc * no)
 
         # CO(0)-OV(0)
         A_co0ov0 = ba[:, :no, nc:, :].reshape(nc * no, nv * no)
@@ -809,36 +1236,48 @@ class X_TDA():
             si = -np.sqrt((0.5 * self.mol.spin + 1) / (0.5 * self.mol.spin))
         else:
             si = 1
-        A_co0cv1 = (1 / np.sqrt(2)) * si * (ba[:, :no, :-no, :] - bb[:, :no, :, no:] - np.einsum('ij,ub->iujb', iden_C, fab_b[:no, no:])).reshape(nc * no, nc * nv)
+        A_co0cv1 = (1 / np.sqrt(2)) * si * (ba[:, :no, :-no, :] - bb[:, :no, :, no:] - np.einsum('ij,ub->iujb', iden_C,
+                                                                                                 fab_b[:no,
+                                                                                                 no:])).reshape(nc * no,
+                                                                                                                nc * nv)
         A[dim1:dim2, dim3:] += A_co0cv1
         A[dim3:, dim1:dim2] += A_co0cv1.T
 
         # OV(0)-OV(0)
         A[dim2:dim3, dim2:dim3] += aa[nc:, :, nc:, :].reshape(nv * no, nv * no) + \
                                    (np.einsum('ji,ab->iajb', iden_O.reshape(no, no), fab_a) - \
-                                    np.einsum('ab,ji->iajb', iden_V, fij_a[nc:, nc:].reshape(no, no))).reshape(nv * no, nv * no)
+                                    np.einsum('ab,ji->iajb', iden_V, fij_a[nc:, nc:].reshape(no, no))).reshape(nv * no,
+                                                                                                               nv * no)
 
         # OV(0)-CV(1)
-        A_ov0cv1 = (1 / np.sqrt(2)) * si * (aa[nc:, :, :-no, :] - ab[nc:, :, :, no:] - np.einsum('ab,ju->uajb', iden_V, fij_a[:-no, nc:])).reshape(nv * no, nc * nv)
+        A_ov0cv1 = (1 / np.sqrt(2)) * si * (aa[nc:, :, :-no, :] - ab[nc:, :, :, no:] - np.einsum('ab,ju->uajb', iden_V,
+                                                                                                 fij_a[:-no,
+                                                                                                 nc:])).reshape(nv * no,
+                                                                                                                nc * nv)
         A[dim2:dim3, dim3:] += A_ov0cv1
         A[dim3:, dim2:dim3] += A_ov0cv1.T
 
         # CV(1)-CV(1) iajb
         if self.s_tda:
             A[dim3:, dim3:] += 0.5 * (
-                        aa[:-no, :, :-no, :] + bb[:, no:, :, no:] - ab[:-no, :, :, no:] - ba[:, no:, :-no, :] + \
-                        (1 - 1 / (0.5 * mol.spin)) * np.einsum('ij,ab->iajb', iden_C, fab_a) - \
-                        (1 + 1 / (0.5 * mol.spin)) * np.einsum('ab,ij->iajb', iden_V, fij_a[:-no, :-no]) + \
-                        (1 + 1 / (0.5 * mol.spin)) * np.einsum('ij,ab->iajb', iden_C, fab_b[no:, no:]) - \
-                        (1 - 1 / (0.5 * mol.spin)) * np.einsum('ab,ij->iajb', iden_V, fij_b)).reshape(nc * nv, nc * nv)
+                    aa[:-no, :, :-no, :] + bb[:, no:, :, no:] - ab[:-no, :, :, no:] - ba[:, no:, :-no, :] + \
+                    (1 - 1 / (0.5 * mol.spin)) * np.einsum('ij,ab->iajb', iden_C, fab_a) - \
+                    (1 + 1 / (0.5 * mol.spin)) * np.einsum('ab,ij->iajb', iden_V, fij_a[:-no, :-no]) + \
+                    (1 + 1 / (0.5 * mol.spin)) * np.einsum('ij,ab->iajb', iden_C, fab_b[no:, no:]) - \
+                    (1 - 1 / (0.5 * mol.spin)) * np.einsum('ab,ij->iajb', iden_V, fij_b)).reshape(nc * nv, nc * nv)
         else:
             A[dim3:, dim3:] += 0.5 * (
-                        aa[:-no, :, :-no, :] + bb[:, no:, :, no:] - ab[:-no, :, :, no:] - ba[:, no:, :-no, :] + \
-                        np.einsum('ij,ab->iajb', iden_C, fab_a) - np.einsum('ab,ij->iajb', iden_V, fij_a[:-no, :-no]) + \
-                        np.einsum('ij,ab->iajb', iden_C, fab_b[no:, no:]) - np.einsum('ab,ij->iajb', iden_V, fij_b)).reshape(nc * nv, nc * nv) + \
+                    aa[:-no, :, :-no, :] + bb[:, no:, :, no:] - ab[:-no, :, :, no:] - ba[:, no:, :-no, :] + \
+                    np.einsum('ij,ab->iajb', iden_C, fab_a) - np.einsum('ab,ij->iajb', iden_V, fij_a[:-no, :-no]) + \
+                    np.einsum('ij,ab->iajb', iden_C, fab_b[no:, no:]) - np.einsum('ab,ij->iajb', iden_V,
+                                                                                  fij_b)).reshape(nc * nv, nc * nv) + \
                                0.5 * (1 / (0.5 * self.mol.spin)) * (
-                                           np.einsum('ij,ab->iajb', iden_C, fab_b2[no:, no:]) - np.einsum('ij,ab->iajb', iden_C, fab_a2) + \
-                                           np.einsum('ab,ij->iajb', iden_V, fij_b2) - np.einsum('ab,ij->iajb', iden_V, fij_a2[:-no, :-no])).reshape(nc * nv, nc * nv)
+                                       np.einsum('ij,ab->iajb', iden_C, fab_b2[no:, no:]) - np.einsum('ij,ab->iajb',
+                                                                                                      iden_C, fab_a2) + \
+                                       np.einsum('ab,ij->iajb', iden_V, fij_b2) - np.einsum('ab,ij->iajb', iden_V,
+                                                                                            fij_a2[:-no,
+                                                                                            :-no])).reshape(nc * nv,
+                                                                                                            nc * nv)
         return A
 
     # def analyze_TDM(self):
@@ -900,25 +1339,26 @@ class X_TDA():
     #             tdm = TDM_S(si,XL,XR,ints_mo,n,sl)
     #             osc = (2 / 3) * (self.e[i] - self.e[j]) * (tdm[0] ** 2 + tdm[1] ** 2 + tdm[2] ** 2)
     #             print(f'{i + 1:2d} {j + 1:2d} {tdm[0]:>8.4f} {tdm[1]:>8.4f} {tdm[2]:>8.4f} {osc:>8.4f}')
-    
-    def trans_format(self,X):
+
+    def trans_format(self, X):
         cv0 = X[:self.dim1].reshape(self.nc, self.nv)
         co0 = X[self.dim1:self.dim2].reshape(self.nc, self.no)
         ov0 = X[self.dim2:self.dim3].reshape(self.no, self.nv)
         cv1 = X[self.dim3:].reshape(self.nc, self.nv)
         return cv0, co0, ov0, cv1
-    
+
     def analyze_TDM(self):
         osc = self.calculate_TDM()
         return osc
-    
+
     def calculate_TDM(self):
         def _charge_center(mol):
             charges = mol.atom_charges()
             coords = mol.atom_coords()
-            return np.einsum('z,zr->r', charges, coords)/charges.sum()
+            return np.einsum('z,zr->r', charges, coords) / charges.sum()
+
         with self.mol.with_common_orig(_charge_center(self.mol)):
-            ints = self.mol.intor_symmetric('int1e_r', comp=3) # (3,nao,nao)
+            ints = self.mol.intor_symmetric('int1e_r', comp=3)  # (3,nao,nao)
         ints_mo = np.einsum('xpq,pi,qj->xij', ints, self.mf.mo_coeff, self.mf.mo_coeff)
 
         dip_elec = -self.mf.dip_moment(unit='au')
@@ -927,35 +1367,37 @@ class X_TDA():
         dip_nuc = np.einsum('i,ix->x', nuc_charges, nuc_coords)
         gs = dip_elec + dip_nuc
 
-        si = self.mol.spin/2
+        si = self.mol.spin / 2
         print("Ground state to Excited state transition dipole moments(a.u.)")
         for i in range(len(self.e)):
-            XL = self.trans_format(self.values[:,i])
+            XL = self.trans_format(self.values[:, i])
             XR = [np.ones((1,))]
             n = (self.nc, self.no, self.nv)
-            sl = (slice(0,self.nc,1), slice(self.nc,self.nc+self.no,1), slice(self.nc+self.no,self.nc+self.no+self.nv,1))
-            tdm = TDM_SGS(si,XL,XR,ints_mo,n,sl)
-            osc = (2/3)*(self.e[i])*(tdm[0]**2 + tdm[1]**2 + tdm[2]**2)
+            sl = (slice(0, self.nc, 1), slice(self.nc, self.nc + self.no, 1),
+                  slice(self.nc + self.no, self.nc + self.no + self.nv, 1))
+            tdm = TDM_SGS(si, XL, XR, ints_mo, n, sl)
+            osc = (2 / 3) * (self.e[i]) * (tdm[0] ** 2 + tdm[1] ** 2 + tdm[2] ** 2)
             # tdm *= unit.au2D
-            print(f' {i+1:2d}     |GS⟩    {tdm[0]:>8.4f} {tdm[1]:>8.4f} {tdm[2]:>8.4f}  {osc:>8.4f} ')
+            print(f' {i + 1:2d}     |GS⟩    {tdm[0]:>8.4f} {tdm[1]:>8.4f} {tdm[2]:>8.4f}  {osc:>8.4f} ')
 
         print("\nExcited state to Excited state transition dipole moments(a.u.)")
         print("StateL StateR      X        Y        Z      f(L<-R)")
 
         for i in range(len(self.e)):
-            s0_cv0, s0_co0, s0_ov0, s0_cv1 = self.trans_format(self.values[:,i])
+            s0_cv0, s0_co0, s0_ov0, s0_cv1 = self.trans_format(self.values[:, i])
             for j in range(len(self.e)):
-                s1_cv0, s1_co0, s1_ov0, s1_cv1 = self.trans_format(self.values[:,j])
+                s1_cv0, s1_co0, s1_ov0, s1_cv1 = self.trans_format(self.values[:, j])
 
                 XL = [s0_cv0, s0_co0, s0_ov0, s0_cv1]
                 XR = [s1_cv0, s1_co0, s1_ov0, s1_cv1]
                 n = (self.nc, self.no, self.nv)
-                sl = (slice(0,self.nc,1), slice(self.nc,self.nc+self.no,1), slice(self.nc+self.no,self.nc+self.no+self.nv,1))
-                tdm = TDM_S(si,XL,XR,ints_mo,n,sl)
+                sl = (slice(0, self.nc, 1), slice(self.nc, self.nc + self.no, 1),
+                      slice(self.nc + self.no, self.nc + self.no + self.nv, 1))
+                tdm = TDM_S(si, XL, XR, ints_mo, n, sl)
                 if i == j: tdm += gs
-                osc = (2/3)*(self.e[i]-self.e[j])*(tdm[0]**2 + tdm[1]**2 + tdm[2]**2)
+                osc = (2 / 3) * (self.e[i] - self.e[j]) * (tdm[0] ** 2 + tdm[1] ** 2 + tdm[2] ** 2)
                 # tdm *= unit.au2D
-                print(f' {i+1:2d}     {j+1:2d}    {tdm[0]:>8.4f} {tdm[1]:>8.4f} {tdm[2]:>8.4f}  {osc:>8.4f} ')
+                print(f' {i + 1:2d}     {j + 1:2d}    {tdm[0]:>8.4f} {tdm[1]:>8.4f} {tdm[2]:>8.4f}  {osc:>8.4f} ')
 
     def analyze(self):
         nc = self.nc
@@ -972,21 +1414,21 @@ class X_TDA():
             x_co0 = value[dim1:dim2].reshape(nc, no)
             x_ov0 = value[dim2:dim3].reshape(no, nv)
             x_cv1 = value[dim3:].reshape(nc, nv)
-            main_pos = np.argmax(value**2)
-            if nc*nv>main_pos>=0: # cv
+            main_pos = np.argmax(value ** 2)
+            if nc * nv > main_pos >= 0:  # cv
                 orb1, orb2 = divmod(main_pos, nc)
-            elif nc*(nv+no)>main_pos>=nc*nv: # co
-                main_pos -= nc*nv
+            elif nc * (nv + no) > main_pos >= nc * nv:  # co
+                main_pos -= nc * nv
                 orb1, orb2 = divmod(main_pos, nc)
-            elif nc*(nv+no)+no*nv>main_pos>=nc*(nv+no): # ov
-                main_pos -= nc*nv + nc*no
+            elif nc * (nv + no) + no * nv > main_pos >= nc * (nv + no):  # ov
+                main_pos -= nc * nv + nc * no
                 orb1, orb2 = divmod(main_pos, no)
-            elif main_pos>=nc*(nv+no)+no*nv: # cv
-                main_pos -= nc*nv + nc*no + no*nv
+            elif main_pos >= nc * (nv + no) + no * nv:  # cv
+                main_pos -= nc * nv + nc * no + no * nv
                 orb1, orb2 = divmod(main_pos, nc)
 
             if self.mol.groupname != 'C1':
-                sym = self.calculate_irrep(orb1,orb2)
+                sym = self.calculate_irrep(orb1, orb2)
             else:
                 sym = 'A'
             self.syms.append(sym)
@@ -994,19 +1436,22 @@ class X_TDA():
             print(f'Excited state {i + 1} {self.e[i] * unit.ha2eV:12.5f} eV, symmetry={sym}')
 
             for c, v in zip(*np.where(abs(x_cv0) > 0.1)):
-                print(f'CV(0) {c + 1}b -> {v + 1 + self.nc + self.no}b {x_cv0[c, v]:10.5f} {100 * x_cv0[c, v] ** 2:2.2f}%')
+                print(
+                    f'CV(0) {c + 1}b -> {v + 1 + self.nc + self.no}b {x_cv0[c, v]:10.5f} {100 * x_cv0[c, v] ** 2:2.2f}%')
             for c, o in zip(*np.where(abs(x_co0) > 0.1)):
                 print(f'CO(0) {c + 1}b -> {o + 1 + self.nc}b {x_co0[c, o]:10.5f} {100 * x_co0[c, o] ** 2:5.2f}%')
             for o, v in zip(*np.where(abs(x_ov0) > 0.1)):
-                print(f'OV(0) {o + self.nc + 1}a -> {v + 1 + self.nc + self.no}a {x_ov0[o, v]:10.5f} {100 * x_ov0[o, v] ** 2:5.2f}%')
+                print(
+                    f'OV(0) {o + self.nc + 1}a -> {v + 1 + self.nc + self.no}a {x_ov0[o, v]:10.5f} {100 * x_ov0[o, v] ** 2:5.2f}%')
             for c, v in zip(*np.where(abs(x_cv1) > 0.1)):
-                print(f'CV(1) {c + 1}a -> {v + 1 + self.nc + self.no}a {x_cv1[c, v]:10.5f} {100 * x_cv1[c, v] ** 2:5.2f}%')
+                print(
+                    f'CV(1) {c + 1}a -> {v + 1 + self.nc + self.no}a {x_cv1[c, v]:10.5f} {100 * x_cv1[c, v] ** 2:5.2f}%')
             print(' ')
         eo = self.e * unit.ha2eV
-        print('='*60)
+        print('=' * 60)
         print(f'XTDA |So⟩ Energy: cost time {self.times:.2f}s')
-        for i in range(0,self.nstates,1):
-            print(f"No.{i:3d}  Esf={eo[i]:>10.5f} eV,  En-E1={(eo[i]-eo[0]):>10.5f} eV,  symmetry={self.syms[i]}")
+        for i in range(0, self.nstates, 1):
+            print(f"No.{i:3d}  Esf={eo[i]:>10.5f} eV,  En-E1={(eo[i] - eo[0]):>10.5f} eV,  symmetry={self.syms[i]}")
         return self.syms
 
     def kernel(self, nstates=1):
@@ -1016,13 +1461,13 @@ class X_TDA():
         self.values = v[:, :nstates]
         self.nstates = nstates
         time1 = time.time()
-        self.times = time1-time0
+        self.times = time1 - time0
         return self.e * unit.ha2eV, self.values
-    
-    def calculate_irrep(self,orb1,orb2):
+
+    def calculate_irrep(self, orb1, orb2):
         orb_sym = self.mf.get_orbsym(self.mf.mo_coeff)
         ground_sym = self.mf.get_wfnsym()
-        print('ground_irrep ',ground_sym)
+        print('ground_irrep ', ground_sym)
         if self.type_u:
             print('UKS')
             orb1_sym = np.array([orb_sym[0][orb1]])
@@ -1030,8 +1475,8 @@ class X_TDA():
         else:
             orb1_sym = np.array([orb_sym[orb1]])
             orb2_sym = np.array([orb_sym[orb2]])
-        direct_s = direct_prod(orb1_sym,orb2_sym,self.mol.groupname)
-        direct_s = direct_prod(direct_s[0],np.array(ground_sym),self.mol.groupname)
+        direct_s = direct_prod(orb1_sym, orb2_sym, self.mol.groupname)
+        direct_s = direct_prod(direct_s[0], np.array(ground_sym), self.mol.groupname)
         if direct_s[0][0] >= len(self.mol.irrep_name):
             return 'A'
         else:
@@ -1040,15 +1485,17 @@ class X_TDA():
 
 if __name__ == "__main__":
     mol = gto.M(
-        atom=atom.n2_,
-        # atom=atom.ch2o_vacuum,
-        # atom=atom.ch2o_Cyclohexane,
-        # atom=atom.ch2o_DiethylEther,
-        # atom=atom.ch2o_TetraHydroFuran,
-        basis='cc-pvdz',
-        # basis='def2-tzvpp',
+        # atom='H 0 0 0; F 0 0 1.1',
+        atom = atom.n2_,
+        # atom = atom.ttm_vacuum,
+        # atom = atom.bispytm_vacuum,
+        # atom = atom.ttm3ncz_vacuum,
+        # atom = atom.mttm2_vacuum,
+        # basis='631g',
+        # basis='def2-tzvp',
         # basis='aug-cc-pvtz',
         # basis='6-31g**',
+        basis='cc-pvdz',
         unit='A',
         # unit='B',
         charge=1,
@@ -1085,19 +1532,28 @@ if __name__ == "__main__":
     # xc = 'hf'
     mf.xc = xc
     # xc = 'bhhlyp'
-    mf.conv_tol = 1e-8
-    mf.conv_tol_grad = 1e-5
-    mf.max_cycle = 200
+    # mf.conv_tol = 1e-8
+    # mf.conv_tol_grad = 1e-5
+    # mf.max_cycle = 200
     # mf.level_shift = 0.6
-    mf.conv_check = False
+    tscf0 = time.time()
     mf.kernel()
-    xtda = XTDA(mol, mf)
-    xtda.nstates = 20
-    xtda.basis = 'orbital'
-    # tddft.TDA(mf) have no refer meaning
-    xtda.so2st = False
-    xtda.kernel()
-    # xtda.analyze()
+    tscf1 = time.time()
+    print('scf use {} s'.format(tscf1 - tscf0))
 
-    # import pandas as pd
-    # pd.DataFrame(e_eV).to_csv(xc + 'xTDA.csv')
+    xtda = XTDA(mol, mf)
+    xtda.nstates = 7
+    xtda.basis = 'orbital'
+    # xtda.basis = 'tensor'
+    # tddft.TDA(mf) have no refer meaning
+    xtda.so2st = True
+    # xtda.so2st = False
+    # xtda.full_diag()
+    # xtda.analyze()
+    t0 = time.time()
+    xtda.kernel()
+    t1 = time.time()
+    print('totel use {} s'.format(t1 - t0))
+
+    # # import pandas as pd
+    # # pd.DataFrame(e_eV).to_csv(xc + 'xTDA.csv')
