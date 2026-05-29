@@ -1,6 +1,6 @@
 import numpy as np
 
-from XTDDFT.base import (
+from .base import (
     XTDDFT_base,
     _as_cpu_ctx,
     _as_cpu_mf,
@@ -10,9 +10,9 @@ from XTDDFT.base import (
     _run_davidson,
     _system,
 )
-from XTDDFT.hxc_part import gen_response_tda
-from utils.backend import _asarray, _asnumpy, backend, contract, require_cupy, set_backend, xp
-from utils.unit import ha2eV
+from .hxc_part import gen_response_tda
+from ..utils.backend import _asarray, _asnumpy, backend, contract, require_cupy, set_backend, xp
+from ..utils.unit import ha2eV
 
 try:
     from loguru import logger

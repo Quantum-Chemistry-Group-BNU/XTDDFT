@@ -29,8 +29,9 @@ gpu = [
 
 [tool.setuptools]
 include-package-data = true
+packages = ["XTDDFT_dev", "XTDDFT_dev.XTDDFT", "XTDDFT_dev.utils"]
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["xtddft*", "x2c_hamiltonian*"]
-namespaces = true
+[tool.setuptools.package-dir]
+"XTDDFT_dev" = "."
+"XTDDFT_dev.XTDDFT" = "XTDDFT"
+"XTDDFT_dev.utils" = "utils"

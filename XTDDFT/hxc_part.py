@@ -8,7 +8,7 @@ from pyscf.dft.numint import _dot_ao_ao_sparse,_scale_ao_sparse,_tau_dot_sparse
 from pyscf.pbc.dft import numint as pbc_numint
 from pyscf.pbc.dft import numint2c as pbc_numint2c
 
-from XTDDFT.base import (
+from .base import (
     _get_gamma_kpt,
     _ensure_gamma_df,
     _as_cpu_mf,
@@ -24,7 +24,7 @@ from XTDDFT.base import (
     _is_ks_mf,
     _response_max_memory,
 )
-from utils.backend import _asarray, _asnumpy, backend, contract, require_cupy, set_backend, xp
+from ..utils.backend import _asarray, _asnumpy, backend, contract, require_cupy, set_backend, xp
 
 try:
     from loguru import logger

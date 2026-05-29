@@ -2,13 +2,13 @@ import numpy as np
 from pyscf import ao2mo
 from pyscf.dft import numint2c
 from pyscf.pbc.dft import numint2c as pbc_numint2c
-from XTDDFT.hxc_part import (
+from .hxc_part import (
     cache_xc_kernel_sf_mc,
     gen_response_sf,
     gen_response_sf_mc,
     AldA0,
 ) 
-from XTDDFT.base import (
+from .base import (
     XTDDFT_base,
     _build_initial_guess_from_gaps,
     _get_gamma_kpt,
@@ -25,8 +25,8 @@ from XTDDFT.base import (
     _make_reference_dm,
     _response_max_memory,
 )
-from utils.backend import _asnumpy, backend, contract, require_cupy, set_backend, xp
-from utils.unit import ha2eV
+from ..utils.backend import _asnumpy, backend, contract, require_cupy, set_backend, xp
+from ..utils.unit import ha2eV
 
 try:
     from loguru import logger

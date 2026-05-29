@@ -5,8 +5,8 @@ from pyscf.dft import numint, xc_deriv
 from pyscf.pbc import scf as pbc_scf
 from pyscf.pbc.dft import numint as pbc_numint
 
-from utils.backend import backend, contract, require_cupy, xp, _asarray, _asnumpy, set_backend
-from utils.unit import ha2eV
+from ..utils.backend import backend, contract, require_cupy, xp, _asarray, _asnumpy, set_backend
+from ..utils.unit import ha2eV
 
 try:
     from loguru import logger
