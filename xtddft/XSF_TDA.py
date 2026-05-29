@@ -1115,20 +1115,50 @@ class XSF_TDA():
         fockA = mo_coeff[0].T @ focka @ mo_coeff[0]
         fockB = mo_coeff[1].T @ fockb @ mo_coeff[1]
 
+        #e_ia = (mo_energy[1][viridxb,None] - mo_energy[0][occidxa]).T
+        #if self.re:
+        #    tmp_hdiag = e_ia.ravel()
+        #    oo = np.zeros((self.no*self.no)) # full oo
+        #    for i in range(self.no):
+        #        oo[i*no:(i+1)*no] = tmp_hdiag[nc*nvir+nvir*i:nc*nvir+no+nvir*i]
+        #    new_oo = np.einsum('x,xy->y',oo,self.vects)
+        #    new_hdiag = np.zeros(len(tmp_hdiag)-1)
+        #    new_hdiag[:nc*nvir] = tmp_hdiag[:nc*nvir]
+        #    for i in range(self.no-1):
+        #        new_hdiag[nc*nvir+i*nvir:nc*nvir+no+i*nvir] = new_oo[i*no:(i+1)*no]
+        #        new_hdiag[nc*nvir+no+i*nvir:nc*nvir+no+i*nvir+nv] = tmp_hdiag[nc*nvir+no+i*nvir:nc*nvir+no+nv+i*nvir]
+        #    new_hdiag[nc*nvir+(self.no-1)*nvir:nc*nvir+(self.no-1)*nvir+no-1] = new_oo[(self.no-1)*no:]
+        #    new_hdiag[nc*nvir+(self.no-1)*nvir+no-1:] = tmp_hdiag[nc*nvir+(self.no-1)*nvir+no:]
+        #    hdiag = new_hdiag
+        #else:
+        #    hdiag = e_ia.ravel()
+        
         e_ia = (mo_energy[1][viridxb,None] - mo_energy[0][occidxa]).T
+        e_ia = e_ia.reshape((nc+no,no+nv))
+        e_ia = np.hstack([
+                e_ia[:self.nc, self.no:].reshape(-1),
+                e_ia[:self.nc, :self.no].reshape(-1),
+                e_ia[self.nc:, self.no:].reshape(-1),
+                e_ia[self.nc:, :self.no].reshape(-1),
+            ])
+        
         if self.re:
             tmp_hdiag = e_ia.ravel()
-            oo = np.zeros((self.no*self.no)) # full oo
-            for i in range(self.no):
-                oo[i*no:(i+1)*no] = tmp_hdiag[nc*nvir+nvir*i:nc*nvir+no+nvir*i]
-            new_oo = np.einsum('x,xy->y',oo,self.vects)
+            #oo = np.zeros((self.no*self.no)) # full oo
+            #for i in range(self.no):
+                #oo[i*no:(i+1)*no] = tmp_hdiag[nc*nvir+nvir*i:nc*nvir+no+nvir*i] # co cv
+            oo = tmp_hdiag[nc*nv+nc*no+no*nv:]    #  cv co ov oo
+            #new_oo = np.einsum('x,xy->y',oo,self.vects)
+            new_oo = np.einsum('xy,x,xy->y',self.vects,oo,self.vects)
             new_hdiag = np.zeros(len(tmp_hdiag)-1)
-            new_hdiag[:nc*nvir] = tmp_hdiag[:nc*nvir]
-            for i in range(self.no-1):
-                new_hdiag[nc*nvir+i*nvir:nc*nvir+no+i*nvir] = new_oo[i*no:(i+1)*no]
-                new_hdiag[nc*nvir+no+i*nvir:nc*nvir+no+i*nvir+nv] = tmp_hdiag[nc*nvir+no+i*nvir:nc*nvir+no+nv+i*nvir]
-            new_hdiag[nc*nvir+(self.no-1)*nvir:nc*nvir+(self.no-1)*nvir+no-1] = new_oo[(self.no-1)*no:]
-            new_hdiag[nc*nvir+(self.no-1)*nvir+no-1:] = tmp_hdiag[nc*nvir+(self.no-1)*nvir+no:]
+            #new_hdiag[:nc*nvir] = tmp_hdiag[:nc*nvir]
+            new_hdiag[:nc*nv+nc*no+no*nv] = tmp_hdiag[:nc*nv+nc*no+no*nv]
+            new_hdiag[nc*nv+nc*no+no*nv:] = new_oo
+            #for i in range(self.no-1):
+            #    new_hdiag[nc*nvir+i*nvir:nc*nvir+no+i*nvir] = new_oo[i*no:(i+1)*no]
+            #    new_hdiag[nc*nvir+no+i*nvir:nc*nvir+no+i*nvir+nv] = tmp_hdiag[nc*nvir+no+i*nvir:nc*nvir+no+nv+i*nvir]
+            #new_hdiag[nc*nvir+(self.no-1)*nvir:nc*nvir+(self.no-1)*nvir+no-1] = new_oo[(self.no-1)*no:]
+            #new_hdiag[nc*nvir+(self.no-1)*nvir+no-1:] = tmp_hdiag[nc*nvir+(self.no-1)*nvir+no:]
             hdiag = new_hdiag
         else:
             hdiag = e_ia.ravel()
