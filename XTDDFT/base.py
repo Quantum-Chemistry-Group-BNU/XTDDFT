@@ -534,6 +534,7 @@ def _cpu_davidson(vind, hdiag, x0, nroots, positive_eig_threshold=None):
         aop, _asnumpy(x0), _asnumpy(hdiag),
         tol=1e-7, lindep=1e-14,
         nroots=nroots, max_cycle=3000, pick=pick,
+        verbose=5
     )
 
 def _gpu_davidson(vind, hdiag, x0, nroots, positive_eig_threshold=None):
@@ -562,7 +563,7 @@ def _gpu_davidson(vind, hdiag, x0, nroots, positive_eig_threshold=None):
     return lr_eigh(
         vind, x0, precond,
         tol_residual=1e-7, lindep=1e-14,
-        nroots=nroots, pick=pick, max_cycle=3000,
+        nroots=nroots, pick=pick, max_cycle=3000, verbose=5
     )[:3]
 
 def _run_davidson(mf, davidson_backend, vind, hdiag, x0, nroots,

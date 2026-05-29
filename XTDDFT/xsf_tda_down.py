@@ -16,6 +16,7 @@ from XTDDFT.base import (
     _build_initial_guess_from_gaps,
     _get_gamma_kpt,
     _get_hf_mo_fock,
+    _get_j,
     _get_jk,
     _get_mo_fock,
     _get_ovlp,
@@ -40,7 +41,7 @@ except ModuleNotFoundError:
     logger = logging.getLogger(__name__)
 
 def add_hf_a_a2b(a_a2b, mf, orbo_a, orbv_b, nocc_a, nvir_b, hyb=1, omega=None):
-    # 考虑SF_TDA_UP时，仅有CV激发，因此，只需要考虑这个空间; K矩阵中含有的精确交换部分
+    #K矩阵中含有的精确交换部分
     if abs(hyb) < 1e-14 or nocc_a == 0 or nvir_b == 0:
         return a_a2b
 
@@ -460,84 +461,116 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
 
     def _compress_removed_hdiag(self, hdiag):
         nc, no, nv = self.nc, self.no, self.nv
-        nvir = no + nv
-        oo = xp.zeros(no * no, dtype=hdiag.dtype)
-        for i in range(no):
-            oo[i * no:(i + 1) * no] = hdiag[nc * nvir + i * nvir:nc * nvir + no + i * nvir]
-        new_oo = contract("x,xy->y", oo, self.vects)
+        dim1 = nc * nv
+        dim2 = dim1 + nc * no
+        dim3 = dim2 + no * nv
+        oo = hdiag[dim3:]
+        new_oo = contract("x,xy,xy->y", oo, self.vects.conj(), self.vects)
         new_hdiag = xp.zeros(int(hdiag.size) - 1, dtype=hdiag.dtype)
-        new_hdiag[:nc * nvir] = hdiag[:nc * nvir]
-        for i in range(no - 1):
-            new_hdiag[nc * nvir + i * nvir:nc * nvir + no + i * nvir] = new_oo[i * no:(i + 1) * no]
-            new_hdiag[nc * nvir + no + i * nvir:nc * nvir + no + nv + i * nvir] = hdiag[nc * nvir + no + i * nvir:nc * nvir + no + nv + i * nvir]
-        new_hdiag[nc * nvir + (no - 1) * nvir:nc * nvir + (no - 1) * nvir + no - 1] = new_oo[(no - 1) * no:]
-        new_hdiag[nc * nvir + (no - 1) * nvir + no - 1:] = hdiag[nc * nvir + (no - 1) * nvir + no:]
+        new_hdiag[:dim3] = hdiag[:dim3]
+        new_hdiag[dim3:] = new_oo
         return new_hdiag
 
-    def _expand_removed_vectors(self, zs0):
+    def _response_j_diagonal(self, block, batch_size=64):
+        mo_coeff = _asarray(self.mo_coeff)
+        orboa = mo_coeff[0][:, self.occidx_a]
+        orbvb = mo_coeff[1][:, self.viridx_b]
         nc, no, nv = self.nc, self.no, self.nv
-        nvir = no + nv
-        oo = xp.zeros((zs0.shape[0], no * no - 1), dtype=zs0.dtype)
-        for i in range(no - 1):
-            oo[:, i * no:(i + 1) * no] = zs0[:, nc * nvir + i * nvir:nc * nvir + no + i * nvir]
-        oo[:, (no - 1) * no:] = zs0[:, nc * nvir + (no - 1) * nvir:nc * nvir + (no - 1) * nvir + no - 1]
-        new_oo = contract("xy,ny->nx", self.vects, oo)
-        full = xp.zeros((zs0.shape[0], zs0.shape[1] + 1), dtype=zs0.dtype)
-        full[:, :nc * nvir] = zs0[:, :nc * nvir]
-        for i in range(no - 1):
-            full[:, nc * nvir + i * nvir:nc * nvir + no + i * nvir] = new_oo[:, i * no:(i + 1) * no]
-            full[:, nc * nvir + no + i * nvir:nc * nvir + no + nv + i * nvir] = zs0[:, nc * nvir + no + i * nvir:nc * nvir + no + nv + i * nvir]
-        full[:, nc * nvir + (no - 1) * nvir:nc * nvir + no + (no - 1) * nvir] = new_oo[:, -no:]
-        full[:, nc * nvir + (no - 1) * nvir + no:] = zs0[:, nc * nvir + (no - 1) * nvir + no - 1:]
-        return full
 
-    def _compress_removed_vectors(self, hx):
-        nc, no, nv = self.nc, self.no, self.nv
-        nvir = no + nv
-        out = xp.zeros((hx.shape[0], hx.shape[1] - 1), dtype=hx.dtype)
-        out[:, :nc * nvir] = hx[:, :nc * nvir]
-        oo = xp.zeros((hx.shape[0], no * no), dtype=hx.dtype)
-        for i in range(no):
-            oo[:, i * no:(i + 1) * no] = hx[:, nc * nvir + i * nvir:nc * nvir + no + i * nvir]
-        new_oo = contract("xy,nx->ny", self.vects, oo)
-        for i in range(no - 1):
-            out[:, nc * nvir + i * nvir:nc * nvir + no + i * nvir] = new_oo[:, i * no:(i + 1) * no]
-            out[:, nc * nvir + no + i * nvir:nc * nvir + no + nv + i * nvir] = hx[:, nc * nvir + no + i * nvir:nc * nvir + no + nv + i * nvir]
-        out[:, nc * nvir + (no - 1) * nvir:nc * nvir + (no - 1) * nvir + no - 1] = new_oo[:, (no - 1) * no:]
-        out[:, nc * nvir + (no - 1) * nvir + no - 1:] = hx[:, nc * nvir + (no - 1) * nvir + no:]
-        return out
+        if block == "co":
+            nrow, ncol = nc, no
+            orbv = orbvb[:, :no]
+            orbo = orboa[:, :nc]
+            out_slice = (slice(None), slice(0, nc), slice(0, no))
+        elif block == "ov":
+            nrow, ncol = no, nv
+            orbv = orbvb[:, no:]
+            orbo = orboa[:, nc:nc + no]
+            out_slice = (slice(None), slice(nc, nc + no), slice(no, no + nv))
+        else:
+            raise ValueError(f"Unsupported diagonal response block {block!r}")
 
-    def _order_davidson_vectors(self):
-        data = _asnumpy(self.v)
-        nroot = data.shape[1]
-        cv = np.zeros((nroot, self.nc, self.nv))
-        co = np.zeros((nroot, self.nc, self.no))
-        ov = np.zeros((nroot, self.no, self.nv))
-        oo = np.zeros((nroot, self.no * self.no - 1 if self.re else self.no * self.no))
-        nvir = self.no + self.nv
-        passed = self.nc * nvir
-        for state in range(nroot):
-            vec = data[:, state]
-            for i in range(self.nc):
-                co[state, i] = vec[i * nvir:i * nvir + self.no]
-                cv[state, i] = vec[i * nvir + self.no:i * nvir + self.no + self.nv]
-            if self.re:
-                for i in range(self.no - 1):
-                    oo[state, i * self.no:(i + 1) * self.no] = vec[passed + i * nvir:passed + i * nvir + self.no]
-                    ov[state, i] = vec[passed + i * nvir + self.no:passed + i * nvir + self.no + self.nv]
-                oo[state, (self.no - 1) * self.no:] = vec[passed + (self.no - 1) * nvir:passed + (self.no - 1) * nvir + self.no - 1]
-                ov[state, self.no - 1] = vec[passed + (self.no - 1) * nvir + self.no - 1:]
-            else:
-                for i in range(self.no):
-                    oo[state, i * self.no:(i + 1) * self.no] = vec[passed + i * nvir:passed + i * nvir + self.no]
-                    ov[state, i] = vec[passed + i * nvir + self.no:passed + i * nvir + self.no + self.nv]
-        ordered = np.hstack([
-            cv.reshape(nroot, -1),
-            co.reshape(nroot, -1),
-            ov.reshape(nroot, -1),
-            oo.reshape(nroot, -1),
+        total = nrow * ncol
+        diag = xp.zeros(total, dtype=mo_coeff.dtype)
+        for p0 in range(0, total, batch_size):
+            p1 = min(p0 + batch_size, total)
+            nb = p1 - p0
+            trial = xp.zeros((nb, total), dtype=mo_coeff.dtype)
+            trial[xp.arange(nb), xp.arange(p0, p1)] = 1
+            trial = trial.reshape(nb, nrow, ncol)
+            dm = contract("xov,qv,po->xpq", trial, orbv.conj(), orbo)
+            vj = _get_j(self.mf, dm, hermi=0)
+            vj_mo = contract("xpq,po,qv->xov", vj, orboa.conj(), orbvb)
+            block_mo = vj_mo[out_slice].reshape(nb, total)
+            diag[p0:p1] = block_mo[xp.arange(nb), xp.arange(p0, p1)]
+        return diag.reshape(nrow, ncol)
+
+    def _build_preconditioner_hdiag(self, fockA, fockB, fglobal=1.0,
+                                    fockA_hf=None, fockB_hf=None):
+        nc, no = self.nc, self.no
+        si = no / 2.0
+        diag_a = fockA.diagonal()
+        diag_b = fockB.diagonal()
+        hdiag = diag_b[self.nocc_b:, None].T - diag_a[:self.nocc_a, None]
+
+        use_delta_a = (
+            self.SA > 0
+            and not self.type_u
+            and fockA_hf is not None
+            and fockB_hf is not None
+        )
+        if use_delta_a:
+            fockS = (fockB_hf - fockA_hf) * 0.5
+            diag_s = fockS.diagonal()
+            hdiag[:nc, no:] += fglobal * (
+                diag_s[nc + no:] + diag_s[:nc, None]
+            ) / si
+            co_j = self._response_j_diagonal("co")
+            ov_j = self._response_j_diagonal("ov")
+            hdiag[:nc, :no] += fglobal * (
+                2.0 * diag_s[:nc, None] - co_j
+            ) / (2 * si - 1)
+            hdiag[nc:, no:] += fglobal * (
+                2.0 * diag_s[nc + no:] - ov_j
+            ) / (2 * si - 1)
+
+        return xp.hstack([
+            hdiag[:nc, no:].reshape(-1),
+            hdiag[:nc, :no].reshape(-1),
+            hdiag[nc:, no:].reshape(-1),
+            hdiag[nc:, :no].reshape(-1),
         ])
-        return xp.asarray(ordered.T)
+
+    def _split_block_vectors(self, data, expand_oo=True):
+        data = xp.asarray(data)
+        if data.ndim == 1:
+            data = data.reshape(1, -1)
+        nc, no, nv = self.nc, self.no, self.nv
+        dim1 = nc * nv
+        dim2 = dim1 + nc * no
+        dim3 = dim2 + no * nv
+
+        cv = data[:, :dim1].reshape(data.shape[0], nc, nv)
+        co = data[:, dim1:dim2].reshape(data.shape[0], nc, no)
+        ov = data[:, dim2:dim3].reshape(data.shape[0], no, nv)
+        oo = data[:, dim3:]
+        if self.re and expand_oo:
+            oo = contract("xy,ny->nx", self.vects, oo)
+        oo = oo.reshape(data.shape[0], no, no)
+        return cv, co, ov, oo
+
+    def _join_block_vectors(self, cv, co, ov, oo, compress_oo=True):
+        if compress_oo is None:
+            compress_oo = self.re
+        oo = oo.reshape(oo.shape[0], -1)
+        if compress_oo:
+            oo = contract("xy,nx->ny", self.vects, oo)
+        return xp.hstack([
+            cv.reshape(cv.shape[0], -1),
+            co.reshape(co.shape[0], -1),
+            ov.reshape(ov.shape[0], -1),
+            oo,
+        ])
 
     def gen_response_sf_delta_A(self, hermi=0, max_memory=None):
         del max_memory
@@ -563,10 +596,6 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         orboa = mo_coeff[0][:, self.occidx_a]
         orbvb = mo_coeff[1][:, self.viridx_b]
         fockA, fockB = self._get_fock_mo()
-        hdiag = xp.asarray(_spinflip_gaps(self.ctx, self.isf))
-        if self.re:
-            self.vects = xp.asarray(self.get_vect())
-            hdiag = self._compress_removed_hdiag(hdiag)
 
         vresp = (
             gen_response_sf_mc(
@@ -581,135 +610,192 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         if use_delta_a:
             vresp_hf = self.gen_response_sf_delta_A(hermi=0)
             fockA_hf, fockB_hf = _get_hf_mo_fock(self.mf, mo_coeff, mo_occ)
+            fockS_hf = (fockB_hf - fockA_hf) * 0.5
             factor1 = xp.sqrt((2 * si + 1) / (2 * si)) - 1
             factor2 = xp.sqrt((2 * si + 1) / (2 * si - 1))
             factor3 = xp.sqrt((2 * si) / (2 * si - 1)) - 1
             factor4 = 1 / xp.sqrt(2 * si * (2 * si - 1))
             iden_O = xp.eye(no)
+            fs_cc = fockS_hf[:nc, :nc]
+            fs_vv = fockS_hf[nc + no:, nc + no:]
+            fs_cv = fockS_hf[:nc, nc + no:]
+
+        hdiag = self._build_preconditioner_hdiag(
+            fockA, fockB, fglobal=fglobal,
+            fockA_hf=fockA_hf if use_delta_a else None,
+            fockB_hf=fockB_hf if use_delta_a else None,
+        )
+        if self.re:
+            self.vects = xp.asarray(self.get_vect())
+            hdiag = self._compress_removed_hdiag(hdiag)
+
+        orbca = orboa[:, :nc]
+        orboa_open = orboa[:, nc:nc + no]
+        orbbo = orbvb[:, :no]
+        orbvv = orbvb[:, no:]
+        fa_cc = fockA[:nc, :nc]
+        fa_co = fockA[:nc, nc:nc + no]
+        fa_oc = fockA[nc:nc + no, :nc]
+        fa_oo = fockA[nc:nc + no, nc:nc + no]
+        fb_oo = fockB[nc:nc + no, nc:nc + no]
+        fb_ov = fockB[nc:nc + no, nc + no:]
+        fb_vo = fockB[nc + no:, nc:nc + no]
+        fb_vv = fockB[nc + no:, nc + no:]
+
+        def project_response_blocks(v1ao):
+            return (
+                contract("xpq,pi,qa->xia", v1ao, orbca.conj(), orbvv),
+                contract("xpq,pi,qu->xiu", v1ao, orbca.conj(), orbbo),
+                contract("xpq,pu,qa->xua", v1ao, orboa_open.conj(), orbvv),
+                contract("xpq,pu,qv->xuv", v1ao, orboa_open.conj(), orbbo),
+            )
 
         def vind(zs0):
             zs0 = xp.asarray(zs0)
-            full_zs0 = self._expand_removed_vectors(zs0) if self.re else zs0.copy()
-            zs = full_zs0.reshape(-1, nocc, nvir)
+            cv, co, ov, oo = self._split_block_vectors(zs0)
 
-            dmov = contract("xov,qv,po->xpq", zs, orbvb.conj(), orboa)
-            v1ao = vresp(dmov)
-            vs = contract("xpq,po,qv->xov", v1ao, orboa.conj(), orbvb)
-            vs += contract("ab,xib->xia", fockB[self.nocc_b:, self.nocc_b:], zs)
-            vs -= contract("ij,xja->xia", fockA[:self.nocc_a, :self.nocc_a], zs)
+            dmov = (
+                contract("xia,qa,pi->xpq", cv, orbvv.conj(), orbca)
+                + contract("xiu,qu,pi->xpq", co, orbbo.conj(), orbca)
+                + contract("xua,qa,pu->xpq", ov, orbvv.conj(), orboa_open)
+                + contract("xuv,qv,pu->xpq", oo, orbbo.conj(), orboa_open)
+            ) # 转成AO基的vector
+            v1ao = vresp(dmov)  # 获得ao基下的响应函数。也就是K矩阵（包括交换相关和精确HF部分）
+            vs_cv, vs_co, vs_ov, vs_oo = project_response_blocks(v1ao)  # 转成MO基下的结果
+            # 分别加上前面的fock矩阵
+            vs_cv += (
+                contract("xiu,ua->xia", co, fb_ov)
+                + contract("xib,ba->xia", cv, fb_vv)
+                - contract("ij,xja->xia", fa_cc, cv)
+                - contract("iu,xua->xia", fa_co, ov)
+            )
+            vs_co += (
+                contract("xiv,vu->xiu", co, fb_oo)
+                + contract("xia,au->xiu", cv, fb_vo)
+                - contract("ij,xju->xiu", fa_cc, co)
+                - contract("iv,xvu->xiu", fa_co, oo)
+            )
+            vs_ov += (
+                contract("xuv,va->xua", oo, fb_ov)
+                + contract("xub,ba->xua", ov, fb_vv)
+                - contract("ui,xia->xua", fa_oc, cv)
+                - contract("uv,xva->xua", fa_oo, ov)
+            )
+            vs_oo += (
+                contract("xuw,wv->xuv", oo, fb_oo)
+                + contract("xua,av->xuv", ov, fb_vo)
+                - contract("ui,xiv->xuv", fa_oc, co)
+                - contract("uw,xwv->xuv", fa_oo, oo)
+            )
 
             if use_delta_a:
-                vs_dA = xp.zeros_like(vs)
-                cv1 = zs[:, :nc, no:]
-                co1 = zs[:, :nc, :no]
-                ov1 = zs[:, nc:, no:]
-                oo1 = zs[:, nc:, :no]
+                dcv = xp.zeros_like(cv)
+                dco = xp.zeros_like(co)
+                dov = xp.zeros_like(ov)
+                doo = xp.zeros_like(oo)
 
-                cv1_mo = contract("xov,qv,po->xpq", cv1, orbvb[:, no:].conj(), orboa[:, :nc])
-                co1_mo = contract("xov,qv,po->xpq", co1, orbvb[:, :no].conj(), orboa[:, :nc])
-                ov1_mo = contract("xov,qv,po->xpq", ov1, orbvb[:, no:].conj(), orboa[:, nc:nc + no])
-                oo1_mo = contract("xov,qv,po->xpq", oo1, orbvb[:, :no].conj(), orboa[:, nc:nc + no])
+                cv1_mo = contract("xia,qa,pi->xpq", cv, orbvv.conj(), orbca)
+                co1_mo = contract("xiu,qu,pi->xpq", co, orbbo.conj(), orbca)
+                ov1_mo = contract("xua,qa,pu->xpq", ov, orbvv.conj(), orboa_open)
+                oo1_mo = contract("xuv,qv,pu->xpq", oo, orbbo.conj(), orboa_open)
 
-                _, v1_cv_k = vresp_hf(cv1_mo)
-                v1_co_j, v1_co_k = vresp_hf(co1_mo)
-                v1_ov_j, v1_ov_k = vresp_hf(ov1_mo)
-                _, v1_oo_k = vresp_hf(oo1_mo)
+                batch = cv1_mo.shape[0]
+                dm_hf = xp.concatenate([cv1_mo, co1_mo, ov1_mo, oo1_mo], axis=0)
+                v1_j, v1_k = vresp_hf(dm_hf)
+                v1_cv_k = v1_k[:batch]
+                v1_co_j = v1_j[batch:2 * batch]
+                v1_co_k = v1_k[batch:2 * batch]
+                v1_ov_j = v1_j[2 * batch:3 * batch]
+                v1_ov_k = v1_k[2 * batch:3 * batch]
+                v1_oo_k = v1_k[3 * batch:]
 
-                v1_co_j = contract("xpq,po,qv->xov", v1_co_j, orboa.conj(), orbvb)
-                v1_ov_j = contract("xpq,po,qv->xov", v1_ov_j, orboa.conj(), orbvb)
-                v1_cv_k = contract("xpq,po,qv->xov", v1_cv_k, orboa.conj(), orbvb)
-                v1_co_k = contract("xpq,po,qv->xov", v1_co_k, orboa.conj(), orbvb)
-                v1_ov_k = contract("xpq,po,qv->xov", v1_ov_k, orboa.conj(), orbvb)
-                v1_oo_k = contract("xpq,po,qv->xov", v1_oo_k, orboa.conj(), orbvb)
+                cv_co_j, co_co_j, ov_co_j, oo_co_j = project_response_blocks(v1_co_j)
+                cv_ov_j, co_ov_j, ov_ov_j, oo_ov_j = project_response_blocks(v1_ov_j)
+                cv_cv_k, co_cv_k, ov_cv_k, oo_cv_k = project_response_blocks(v1_cv_k)
+                cv_co_k, co_co_k, ov_co_k, oo_co_k = project_response_blocks(v1_co_k)
+                cv_ov_k, co_ov_k, ov_ov_k, oo_ov_k = project_response_blocks(v1_ov_k)
+                cv_oo_k, co_oo_k, ov_oo_k, oo_oo_k = project_response_blocks(v1_oo_k)
 
-                vs_dA[:, :nc, no:] += (
-                    contract("ab,xib->xia", fockB_hf[nc + no:, nc + no:], zs[:, :nc, no:])
-                    - contract("ab,xib->xia", fockA_hf[nc + no:, nc + no:], zs[:, :nc, no:])
-                    + contract("ji,xja->xia", fockB_hf[:nc, :nc], zs[:, :nc, no:])
-                    - contract("ji,xja->xia", fockA_hf[:nc, :nc], zs[:, :nc, no:])
-                ) / (2 * si)
-                vs_dA[:, :nc, :no] += -v1_co_j[:, :nc, :no] / (2 * si - 1) + (
-                    contract("ji,xju->xiu", fockB_hf[:nc, :nc], zs[:, :nc, :no])
-                    - contract("ji,xju->xiu", fockA_hf[:nc, :nc], zs[:, :nc, :no])
+                dcv += (
+                    contract("ab,xib->xia", fs_vv, cv)
+                    + contract("ji,xja->xia", fs_cc, cv)
+                ) / si
+                dco += -co_co_j / (2 * si - 1) + (
+                    2.0 * contract("ji,xju->xiu", fs_cc, co)
                 ) / (2 * si - 1)
-                vs_dA[:, nc:, no:] += -v1_ov_j[:, nc:, no:] / (2 * si - 1) + (
-                    contract("ab,xub->xua", fockB_hf[nc + no:, nc + no:], zs[:, nc:, no:])
-                    - contract("ab,xub->xua", fockA_hf[nc + no:, nc + no:], zs[:, nc:, no:])
+                dov += -ov_ov_j / (2 * si - 1) + (
+                    2.0 * contract("ab,xub->xua", fs_vv, ov)
                 ) / (2 * si - 1)
 
                 if self.SA > 1:
-                    vs_dA[:, :nc, no:] += factor1 * (
-                        -v1_co_k[:, :nc, no:]
-                        + contract("av,xiv->xia", fockB_hf[nc + no:, nc:nc + no], zs[:, :nc, :no])
+                    dcv += factor1 * (
+                        -cv_co_k
+                        + contract("av,xiv->xia", fockB_hf[nc + no:, nc:nc + no], co)
                     )
-                    vs_dA[:, :nc, :no] += factor1 * (
-                        -v1_cv_k[:, :nc, :no]
-                        + contract("av,xja->xjv", fockB_hf[nc + no:, nc:nc + no], zs[:, :nc, no:])
+                    dco += factor1 * (
+                        -co_cv_k
+                        + contract("av,xja->xjv", fockB_hf[nc + no:, nc:nc + no], cv)
                     )
-                    vs_dA[:, :nc, no:] += factor1 * (
-                        -v1_ov_k[:, :nc, no:]
-                        - contract("vi,xva->xia", fockA_hf[nc:nc + no, :nc], zs[:, nc:, no:])
+                    dcv += factor1 * (
+                        -cv_ov_k
+                        - contract("vi,xva->xia", fockA_hf[nc:nc + no, :nc], ov)
                     )
-                    vs_dA[:, nc:, no:] += factor1 * (
-                        -v1_cv_k[:, nc:, no:]
-                        - contract("vi,xib->xvb", fockA_hf[nc:nc + no, :nc], zs[:, :nc, no:])
+                    dov += factor1 * (
+                        -ov_cv_k
+                        - contract("vi,xib->xvb", fockA_hf[nc:nc + no, :nc], cv)
                     )
-                    vs_dA[:, :nc, :no] += (v1_ov_j[:, :nc, :no] - v1_ov_k[:, :nc, :no]) / (2 * si - 1)
-                    vs_dA[:, nc:, no:] += (v1_co_j[:, nc:, no:] - v1_co_k[:, nc:, no:]) / (2 * si - 1)
+                    dco += (co_ov_j - co_ov_k) / (2 * si - 1)
+                    dov += (ov_co_j - ov_co_k) / (2 * si - 1)
 
                 if self.SA > 2:
-                    vs_dA[:, :nc, no:] += foo * (
-                        -(factor2 - 1) * v1_oo_k[:, :nc, no:]
-                        + (factor2 / (2 * si)) * (
-                            contract("ia,xvv->xia", fockB_hf[:nc, nc + no:], zs[:, nc:, :no])
-                            - contract("ia,xvv->xia", fockA_hf[:nc, nc + no:], zs[:, nc:, :no])
-                        )
+                    dcv += foo * (
+                        -(factor2 - 1) * cv_oo_k
+                        + (factor2 / si) * contract("ia,xvv->xia", fs_cv, oo)
                     )
-                    vs_dA[:, nc:, :no] += foo * (
-                        -(factor2 - 1) * v1_cv_k[:, nc:, :no]
-                        + (factor2 / (2 * si)) * (
-                            contract("vw,ia,xia->xvw", iden_O, fockB_hf[:nc, nc + no:], zs[:, :nc, no:])
-                            - contract("vw,ia,xia->xvw", iden_O, fockA_hf[:nc, nc + no:], zs[:, :nc, no:])
-                        )
+                    doo += foo * (
+                        -(factor2 - 1) * oo_cv_k
+                        + (factor2 / si) * contract("vw,ia,xia->xvw", iden_O, fs_cv, cv)
                     )
-                    vs_dA[:, :nc, :no] += foo * (
+                    dco += foo * (
                         factor3 * (
-                            -v1_oo_k[:, :nc, :no]
-                            - contract("iw,xwu->xiu", fockA_hf[:nc, nc:nc + no], zs[:, nc:, :no])
+                            -co_oo_k
+                            - contract("iw,xwu->xiu", fockA_hf[:nc, nc:nc + no], oo)
                         )
-                        + factor4 * contract("vw,iu,xvw->xiu", iden_O, fockB_hf[:nc, nc:nc + no], zs[:, nc:, :no])
+                        + factor4 * contract("vw,iu,xvw->xiu", iden_O, fockB_hf[:nc, nc:nc + no], oo)
                     )
-                    vs_dA[:, nc:, :no] += foo * (
+                    doo += foo * (
                         factor3 * (
-                            -v1_co_k[:, nc:, :no]
-                            - contract("iw,xiv->xwv", fockA_hf[:nc, nc:nc + no], zs[:, :nc, :no])
+                            -oo_co_k
+                            - contract("iw,xiv->xwv", fockA_hf[:nc, nc:nc + no], co)
                         )
-                        + factor4 * contract("vw,iu,xiu->xvw", iden_O, fockB_hf[:nc, nc:nc + no], zs[:, :nc, :no])
+                        + factor4 * contract("vw,iu,xiu->xvw", iden_O, fockB_hf[:nc, nc:nc + no], co)
                     )
-                    vs_dA[:, nc:, no:] += foo * (
+                    dov += foo * (
                         factor3 * (
-                            -v1_oo_k[:, nc:, no:]
-                            + contract("av,xuv->xua", fockB_hf[nc + no:, nc:nc + no], zs[:, nc:, :no])
+                            -ov_oo_k
+                            + contract("av,xuv->xua", fockB_hf[nc + no:, nc:nc + no], oo)
                         )
-                        - factor4 * contract("vw,au,xvw->xua", iden_O, fockA_hf[nc + no:, nc:nc + no], zs[:, nc:, :no])
+                        - factor4 * contract("vw,au,xvw->xua", iden_O, fockA_hf[nc + no:, nc:nc + no], oo)
                     )
-                    vs_dA[:, nc:, :no] += foo * (
+                    doo += foo * (
                         factor3 * (
-                            -v1_ov_k[:, nc:, :no]
-                            + contract("av,xwa->xwv", fockB_hf[nc + no:, nc:nc + no], zs[:, nc:, no:])
+                            -oo_ov_k
+                            + contract("av,xwa->xwv", fockB_hf[nc + no:, nc:nc + no], ov)
                         )
-                        - factor4 * contract("vw,au,xua->xwv", iden_O, fockA_hf[nc + no:, nc:nc + no], zs[:, nc:, no:])
+                        - factor4 * contract("vw,au,xua->xwv", iden_O, fockA_hf[nc + no:, nc:nc + no], ov)
                     )
-                vs += fglobal * vs_dA
+                vs_cv += fglobal * dcv
+                vs_co += fglobal * dco
+                vs_ov += fglobal * dov
+                vs_oo += fglobal * doo
 
-            hx = vs.reshape(zs.shape[0], -1)
-            return self._compress_removed_vectors(hx) if self.re else hx
+            return self._join_block_vectors(vs_cv, vs_co, vs_ov, vs_oo)
 
         return vind, hdiag
 
     def init_guess(self, nstates, hdiag=None):
         if hdiag is None:
-            hdiag = _spinflip_gaps(self.ctx, self.isf)
+            _, hdiag = self.gen_tda_operation_sf()
         return _build_initial_guess_from_gaps(hdiag, nstates)
 
     def davidson_process(self, nstates, foo=1.0, fglobal=1.0):
@@ -726,7 +812,6 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         self.converged = converged
         self.e = xp.asarray(e)
         self.v = xp.asarray(_asnumpy(x1)).T
-        self.v = self._order_davidson_vectors()
         logger.info('XSF_TDA_down Davidson converged: {}', converged)
         return self.e, self.v
 
@@ -781,9 +866,9 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             x_cv, _, _, x_oo = self._split_analysis_vectors(value)
             if self.SA == 0 and not self.type_u:
                 dp_ab = np.sum(x_cv * x_cv) - np.sum(x_oo * x_oo) + np.sum(np.diag(x_oo)) ** 2
-                ds2.append(-2.0 * self.ground_s + 1.0 + dp_ab)
+                ds2.append(-2.0 * self.ground_s + 1.0 + dp_ab)  # RO
             elif self.type_u:
-                ds2.append(self.deltaS2_U(nstate) - self.no + 1.0)
+                ds2.append(self.deltaS2_U(nstate) - self.no + 1.0)  # U
             else:
                 ds2.append(np.nan)
         return np.asarray(np.real_if_close(ds2), dtype=float)
