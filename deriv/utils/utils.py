@@ -39,25 +39,17 @@ def get_cov(mf):
 
 
 def order_pyscf2my(nc, no, nv):
-    # # nc and nv is the value before selecting activate space
-    # order = np.indices(((nc+no)*nv+nc*(no+nv), )).squeeze()
+    # nc and nv is the value before selecting activate space
+    order = np.indices(((nc+no)*nv+nc*(no+nv), )).squeeze()
     # # my order to pyscf order
     # for oi in range(nc*no):
     #     order = np.insert(order, (nc_old+no)*nv_old+oi*nv_old+nc_old*no, (nc_old+no)*nv_old+oi)
     #     order = np.delete(order, (nc_old+no)*nv_old)
-
-    # pyscf order to my order
-    order = np.indices(((nc + no) * nv + nc * (no + nv),)).squeeze()
+    # # pyscf order to my order
     for oi in range(nc):
         for noi in range(no):
-            order = np.insert(order, (nc+no)*nv+no*oi+noi, (nc+no)*nv+oi*nv+no*oi+noi)
-            order = np.delete(order, (nc+no)*nv+oi*nv+no*oi+noi+1)
-
-    # # transform pyscf order to my order (only for spin=1)
-    # order = np.indices(((nc + no) * nv + nc * (no + nv),)).squeeze()
-    # for oi in range(nc * no):
-    #    order = np.insert(order, (nc + no) * nv + oi, (nc + no) * nv + oi * nv + oi)
-    #    order = np.delete(order, (nc + no) * nv + oi * nv + oi + 1)
+            order = np.insert(order, (nc+no)*nv+no*oi+noi, (nc+no)*nv+oi*(no+nv)+noi)
+            order = np.delete(order, (nc+no)*nv+oi*(no+nv)+noi+1)
     return order
 
 
@@ -117,35 +109,3 @@ def st2so(eigvec, nc=None, no=None, nv=None, lcva=None, lova=None, lcob=None, lc
         raise ValueError("please input nc no nv or lcva lova lcob lcvb")
     eigvec_so = np.concatenate((cva, ova, cob, cvb), axis=0)
     return eigvec_so
-
-
-def exchange_ov_co(v, nc, no, nv):
-    return np.concatenate((
-        v[:nc*nv, :],
-        v[(nc+no)*nv:(nc+no)*nv+nc*no, :],
-        v[nc*nv:(nc+no)*nv, :],
-        v[(nc+no)*nv+nc*no:, :]
-    ), axis=0)
-
-
-def print_table(data, N):
-    """
-    打印一个 N×N 的表格，第一行和第一列是 1~N 的标号
-    data: 二维列表，data[i][j] 是第 i 行第 j 列的数据
-    """
-    # 计算每个单元格需要的宽度（取所有内容里最长的）
-    width = 8  # 你可以根据数据大小调整
-
-    # 打印表头（第一行标号）
-    header = " " * width  # 左上角空着
-    for j in range(1, N + 1):
-        header += f"{j:>{width}}"
-    print(header)
-    print("-" * len(header))
-
-    # 打印每一行
-    for i in range(1, N + 1):
-        row = f"{i:>{width-1}}|"  # 行标号 + 分隔线
-        for j in range(1, N + 1):
-            row += f"{data[i-1][j-1]:{width}.4f}"
-        print(row)
