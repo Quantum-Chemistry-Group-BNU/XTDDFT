@@ -104,6 +104,32 @@ def _add_hybrid_k(mf, v1, dm1, hybrid, hyb, omega, alpha, hermi):
     return v1 - vk
 
 def _add_spin_conserving_jk(mf, v1, dm1, hybrid, hyb, omega, alpha, hermi, with_j=True):
+    dm1 = _asarray(dm1)
+    if dm1.ndim == 4 and dm1.shape[0] == 2:
+        nset = int(dm1.shape[1])
+        if with_j:
+            vj = _asarray(_get_j(mf, dm1[0] + dm1[1], hermi=hermi))
+            if vj.ndim == 2:
+                vj = vj.reshape(1, *vj.shape)
+            coul = vj.reshape(nset, *dm1.shape[-2:])
+        else:
+            coul = 0
+
+        if hybrid:
+            flat_dm = dm1.reshape(2 * nset, *dm1.shape[-2:])
+            vk = _asarray(_get_k(mf, flat_dm, hermi=hermi))
+            if vk.ndim == 2:
+                vk = vk.reshape(1, *vk.shape)
+            vk = vk.reshape(2, nset, *dm1.shape[-2:]) * hyb
+            if abs(omega) > 1e-10:
+                vk_lr = _asarray(_get_k(mf, flat_dm, hermi=hermi, omega=omega))
+                if vk_lr.ndim == 2:
+                    vk_lr = vk_lr.reshape(1, *vk_lr.shape)
+                vk += vk_lr.reshape(2, nset, *dm1.shape[-2:]) * (alpha - hyb)
+        else:
+            vk = 0
+        return v1 + coul[None] - vk
+
     if not with_j:
         return _add_hybrid_k(mf, v1, dm1, hybrid, hyb, omega, alpha, hermi)
 

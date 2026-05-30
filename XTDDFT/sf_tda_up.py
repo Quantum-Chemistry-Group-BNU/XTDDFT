@@ -83,6 +83,9 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
         self.isf = 1
         self.davidson_backend = "cpu" if davidson_backend == "auto" else davidson_backend
 
+    def _result_method_label(self):
+        return {0: "ALDA0", 1: "MCOL"}.get(self.method, f"method{self.method}")
+
     def get_Amat_ALDA0(self):
         # Dense Amat is always built with CPU PySCF/NumPy.
         mf = _as_cpu_mf(self.mf)
@@ -347,11 +350,13 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
 
     analyze_TDM = calculate_TDM
 
-    def kernel(self, nstates=1):
+    def kernel(self, nstates=1, save=False, save_file=None):
         self.nstates = nstates
         if self.davidson:
             self.davidson_process(nstates)
         else:
             self.get_Amat()
             self._diagonalize_dense(self.A, nstates)
+        if save:
+            self.save_results(save_file)
         return _asnumpy(self.e[:nstates] * ha2eV), self.v[:, :nstates]

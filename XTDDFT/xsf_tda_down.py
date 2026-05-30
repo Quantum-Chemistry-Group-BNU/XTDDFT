@@ -112,6 +112,9 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         spin_mf = mf if hasattr(mf, "spin_square") else _as_cpu_mf(mf)
         _,dsp1 = spin_mf.spin_square()
         self.ground_s = (dsp1-1)/2
+
+    def _result_method_label(self):
+        return {0: "ALDA0", 1: "MCOL"}.get(self.method, f"method{self.method}")
     
     def get_Amat_ALDA0(self):
         mf = _as_cpu_mf(self.mf)
@@ -1051,7 +1054,8 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             print("========================================")
         return self.dS2
 
-    def kernel(self, nstates=1, remove=None, frozen=None, foo=1.0, d_lda=0.3, fglobal=None, fit=True):
+    def kernel(self, nstates=1, remove=None, frozen=None, foo=1.0, d_lda=0.3,
+               fglobal=None, fit=True, save=False, save_file=None):
         self.re = (_asnumpy(self.mf.mo_coeff).ndim != 3) if remove is None else bool(remove)
         nov = (self.nc + self.no) * (self.no + self.nv)
         effective_dim = nov - 1 if self.re else nov
@@ -1067,4 +1071,6 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         else:
             self._prepare_dense_A(foo=foo, fglobal=fglobal, frozen=frozen)
             self._diagonalize_dense(self.A, self.nstates)
+        if save:
+            self.save_results(save_file, fglobal=self.fglobal, remove=self.re)
         return _asnumpy(self.e[:self.nstates] * ha2eV), self.v[:, :self.nstates]

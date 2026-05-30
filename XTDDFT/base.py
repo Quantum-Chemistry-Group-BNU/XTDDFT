@@ -147,6 +147,58 @@ def _molecular_ground_dipole(mf):
     return elec + nuc
 
 
+def _safe_filename_part(value):
+    text = str(value).strip().replace(" ", "_")
+    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in text)
+
+
+def _default_results_filename(obj):
+    cls_name = _safe_filename_part(obj.__class__.__name__).lower()
+    if hasattr(obj, "_result_method_label"):
+        method = obj._result_method_label()
+    else:
+        method = f"method{getattr(obj, 'method', 'unknown')}"
+    parts = [cls_name, _safe_filename_part(method).lower()]
+    parts.append("davidson" if getattr(obj, "davidson", False) else "dense")
+    if hasattr(obj, "SA"):
+        parts.append(f"sa{getattr(obj, 'SA')}")
+    nstates = getattr(obj, "nstates", None)
+    if nstates is not None:
+        parts.append(f"nstates{nstates}")
+    parts.append("results")
+    return "_".join(parts) + ".npz"
+
+
+def save_excitation_results(obj, filename=None, **metadata):
+    """Save excitation energies and eigenvectors from a completed calculation."""
+    if obj.e is None or obj.v is None:
+        raise ValueError("No excitation results are available. Run kernel() before saving.")
+    if filename is None:
+        filename = _default_results_filename(obj)
+
+    data = {
+        "e_ha": _asnumpy(obj.e),
+        "e_ev": _asnumpy(obj.e) * ha2eV,
+        "vectors": _asnumpy(obj.v),
+        "class_name": np.asarray(obj.__class__.__name__),
+        "method": np.asarray(getattr(obj, "method", "")),
+        "method_label": np.asarray(
+            obj._result_method_label() if hasattr(obj, "_result_method_label") else ""
+        ),
+        "nstates": np.asarray(getattr(obj, "nstates", -1)),
+    }
+    if getattr(obj, "converged", None) is not None:
+        data["converged"] = np.asarray(_asnumpy(obj.converged))
+    if hasattr(obj, "SA"):
+        data["SA"] = np.asarray(getattr(obj, "SA"))
+    if getattr(obj, "_raw_v", None) is not None:
+        data["raw_vectors"] = _asnumpy(obj._raw_v)
+    for key, value in metadata.items():
+        data[key] = np.asarray(value)
+    np.savez_compressed(filename, **data)
+    return filename
+
+
 def _is_ks_mf(mf):
     return hasattr(mf, "_numint") and hasattr(mf, "xc")
 
@@ -353,8 +405,16 @@ def _get_j(mf, dm, hermi=0):
             return out[0] if isinstance(out, tuple) else out
         try:
             return mf.get_j(mf.cell, dm, hermi=hermi, kpt=_get_gamma_kpt(mf))
-        except TypeError:
-            return mf.get_j(mf.cell, dm, hermi=hermi)
+        except (TypeError, AssertionError) as err:
+            try:
+                return mf.get_j(mf.cell, dm, hermi=hermi)
+            except (TypeError, AssertionError):
+                if dm.ndim == 3:
+                    return xp.stack([
+                        _get_j(mf, dm_i, hermi=hermi)
+                        for dm_i in dm
+                    ])
+                raise err
     return mf.get_j(mf.mol, dm, hermi=hermi)
 
 def _get_jk(mf, dm, hermi=0, batch=False):
@@ -564,10 +624,14 @@ def _cpu_davidson(vind, hdiag, x0, nroots, positive_eig_threshold=None):
             idx = np.where(w > positive_eig_threshold)[0]
             return w[idx], v[:, idx], idx
 
+    x0 = _asnumpy(x0)
+    hdiag = _asnumpy(hdiag)
+    max_space = max(12, min(80, max(4 * nroots, x0.shape[0] + 2 * nroots)))
+
     return lib.davidson1(
-        aop, _asnumpy(x0), _asnumpy(hdiag),
+        aop, x0, hdiag,
         tol=1e-7, lindep=1e-14,
-        nroots=nroots, max_cycle=3000, pick=pick,
+        nroots=nroots, max_cycle=3000, max_space=max_space, pick=pick,
         verbose=5
     )
 
@@ -627,6 +691,7 @@ class XTDDFT_base:
         self.v = None
         self.nstates = None
         self.converged = None
+        self.result_file = None
         # 在这里先给出泛函参数
         try: # dft
             self.mfxctype = self.mf.xc
@@ -660,3 +725,8 @@ class XTDDFT_base:
     
     def davidson_process(self, nstates):
         raise NotImplementedError
+
+    def save_results(self, filename=None, **metadata):
+        filename = save_excitation_results(self, filename=filename, **metadata)
+        self.result_file = filename
+        return filename

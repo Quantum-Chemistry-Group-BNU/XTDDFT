@@ -75,6 +75,9 @@ class XTDA(XTDDFT_base):
         self.type_u = _asnumpy(self.mf.mo_coeff).ndim == 3
         self.dS2 = None
 
+    def _result_method_label(self):
+        return "spin_conserving"
+
     @property
     def _is_restricted_open_shell(self):
         return _asnumpy(self.mf.mo_coeff).ndim != 3 and self.no > 0
@@ -469,13 +472,15 @@ class XTDA(XTDDFT_base):
 
     analyze_TDM = calculate_TDM
 
-    def kernel(self, nstates=1):
+    def kernel(self, nstates=1, save=False, save_file=None):
         self.nstates = nstates
         if self.davidson:
             self.davidson_process(nstates)
         else:
             self.get_Amat()
             self._diagonalize_dense(self.A, nstates)
+        if save:
+            self.save_results(save_file)
         return _asnumpy(self.e[:nstates] * ha2eV), self.v[:, :nstates]
 
     def analyse(self, threshold=0.1):
