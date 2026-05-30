@@ -113,6 +113,40 @@ def _system(mf):
     return mf.cell if _is_pbc_mf(mf) else mf.mol
 
 
+def _charge_center(mol):
+    charges = mol.atom_charges()
+    coords = mol.atom_coords()
+    return np.einsum("z,zr->r", charges, coords) / charges.sum()
+
+
+def _molecular_dipole_integrals(mf):
+    """AO dipole integrals in the length gauge, centered at the nuclear charge center."""
+    if _is_pbc_mf(mf):
+        raise NotImplementedError(
+            "Length-gauge transition dipole moments are only implemented for molecular systems."
+        )
+    mol = mf.mol
+    with mol.with_common_orig(_charge_center(mol)):
+        return np.asarray(mol.intor_symmetric("int1e_r", comp=3))
+
+
+def _molecular_ground_dipole(mf):
+    if _is_pbc_mf(mf):
+        raise NotImplementedError(
+            "Length-gauge transition dipole moments are only implemented for molecular systems."
+        )
+    mol = mf.mol
+    origin = _charge_center(mol)
+    with mol.with_common_orig(origin):
+        dip_ao = np.asarray(mol.intor_symmetric("int1e_r", comp=3))
+    dm = _asnumpy(mf.make_rdm1())
+    if dm.ndim == 3:
+        dm = dm.sum(axis=0)
+    elec = -np.einsum("xpq,qp->x", dip_ao, dm)
+    nuc = np.einsum("z,zx->x", mol.atom_charges(), mol.atom_coords() - origin)
+    return elec + nuc
+
+
 def _is_ks_mf(mf):
     return hasattr(mf, "_numint") and hasattr(mf, "xc")
 
@@ -582,7 +616,6 @@ def _run_davidson(mf, davidson_backend, vind, hdiag, x0, nroots,
 
 class XTDDFT_base:
     def __init__(self, mf, method, davidson=True):
-        logger.info('method=0 (default) ALDA0, method=1 multicollinear, method=2 collinear')
         self.mf = backend.cast(mf)
         self.method = method
         self.davidson = davidson

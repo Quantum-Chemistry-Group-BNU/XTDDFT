@@ -8,6 +8,8 @@ from .base import (
     _get_hf_mo_fock,
     _get_mo_fock,
     _get_ovlp,
+    _molecular_dipole_integrals,
+    _molecular_ground_dipole,
     _run_davidson,
     _system,
 )
@@ -63,11 +65,13 @@ class XTDA(XTDDFT_base):
         if davidson_backend not in ("cpu", "gpu", "auto"):
             raise ValueError("davidson_backend must be 'cpu', 'gpu', or 'auto'")
         super().__init__(mf, method, davidson=davidson)
+        logger.info("XTDA spin-conserving TDA response")
         self.davidson_backend = "cpu" if davidson_backend == "auto" else davidson_backend
         self.so2st = so2st
         self.dense_batch_size = dense_batch_size
         self.order = _order_pyscf2my(self.nc, self.no, self.nv)
         self._raw_v = None
+        self._tdm_v = None
         self.type_u = _asnumpy(self.mf.mo_coeff).ndim == 3
         self.dS2 = None
 
@@ -247,6 +251,7 @@ class XTDA(XTDDFT_base):
         raw_v = xp.asarray(_asnumpy(x1)).T
         self._raw_v = raw_v
         self.v = raw_v[self.order]
+        self._tdm_v = self.v
         if self.so2st:
             self.v = xp.asarray(_so2st(_asnumpy(self.v), self.nc, self.no, self.nv))
         logger.info("XTDA Davidson converged: {}", converged)
@@ -285,6 +290,7 @@ class XTDA(XTDDFT_base):
             e, v = np.linalg.eigh(amat)
             self.e = e[:nstates]
             self.v = v[:, :nstates]
+        self._tdm_v = self.v
         if self.so2st:
             self.v = xp.asarray(_so2st(_asnumpy(self.v), self.nc, self.no, self.nv))
         return self.e, self.v
@@ -345,6 +351,123 @@ class XTDA(XTDDFT_base):
             - 2.0 * np.einsum("nia,njb,ji,ab->n", ov_a, co_b, sccba[:, nc:], svvab[:, :no])
         )
         return np.real_if_close(ds2)
+
+    def _spin_orbital_vectors(self):
+        if self._tdm_v is not None:
+            return _asnumpy(self._tdm_v)
+        if self.so2st:
+            raise NotImplementedError(
+                "Transition dipoles require spin-orbital amplitudes; rerun XTDA with so2st=False."
+            )
+        return _asnumpy(self.v)
+
+    def _dipole_mo_blocks(self):
+        mf = _as_cpu_mf(self.mf)
+        ctx = _as_cpu_ctx(mf, self.ctx)
+        dip_ao = _molecular_dipole_integrals(mf)
+        mo_coeff = _asnumpy(ctx.mo_coeff)
+        ints_aa = np.asarray(contract("xpq,pi,qj->xij", dip_ao, mo_coeff[0].conj(), mo_coeff[0]))
+        ints_bb = np.asarray(contract("xpq,pi,qj->xij", dip_ao, mo_coeff[1].conj(), mo_coeff[1]))
+        return ints_aa, ints_bb, ctx, mf
+
+    def transition_dipoles_ground(self):
+        """Ground-state to excited-state transition dipoles in a.u."""
+        ints_aa, ints_bb, ctx, _mf = self._dipole_mo_blocks()
+        occ_a = _asnumpy(ctx.occidx_a)
+        vir_a = _asnumpy(ctx.viridx_a)
+        occ_b = _asnumpy(ctx.occidx_b)
+        vir_b = _asnumpy(ctx.viridx_b)
+
+        r_ov_a = ints_aa[:, occ_a][:, :, vir_a]
+        r_ov_b = ints_bb[:, occ_b][:, :, vir_b]
+        r_cv_a = r_ov_a[:, :self.nc, :].reshape(3, -1)
+        r_ov_a = r_ov_a[:, self.nc:, :].reshape(3, -1)
+        r_co_b = r_ov_b[:, :, :self.no].reshape(3, -1)
+        r_cv_b = r_ov_b[:, :, self.no:].reshape(3, -1)
+        dip_ordered = np.hstack([r_cv_a, r_ov_a, r_co_b, r_cv_b])
+
+        vectors = self._spin_orbital_vectors()
+        nstates = min(self.nstates, vectors.shape[1])
+        return np.einsum("xd,ds->sx", dip_ordered, vectors[:, :nstates], optimize=True)
+
+    def osc_str(self):
+        trans_dip = self.transition_dipoles_ground()
+        energies = _asnumpy(self.e)[:trans_dip.shape[0]]
+        return (2.0 / 3.0) * energies * np.einsum("sx,sx->s", trans_dip, trans_dip)
+
+    def _full_spin_conserving_amplitudes(self, vectors):
+        cv_a, ov_a, co_b, cv_b = self._split_analysis_vectors(vectors)
+        amps_a = []
+        amps_b = []
+        for istate in range(cv_a.shape[0]):
+            xa = np.zeros((self.nc + self.no, self.nv))
+            xb = np.zeros((self.nc, self.no + self.nv))
+            xa[:self.nc, :] = cv_a[istate]
+            xa[self.nc:, :] = ov_a[istate]
+            xb[:, :self.no] = co_b[istate]
+            xb[:, self.no:] = cv_b[istate]
+            amps_a.append(xa)
+            amps_b.append(xb)
+        return amps_a, amps_b
+
+    def transition_dipole_matrix(self, include_ground_dipole=False):
+        """Excited-state to excited-state transition dipole matrix in a.u."""
+        ints_aa, ints_bb, ctx, mf = self._dipole_mo_blocks()
+        occ_a = _asnumpy(ctx.occidx_a)
+        vir_a = _asnumpy(ctx.viridx_a)
+        occ_b = _asnumpy(ctx.occidx_b)
+        vir_b = _asnumpy(ctx.viridx_b)
+        r_oo_a = ints_aa[:, occ_a][:, :, occ_a]
+        r_vv_a = ints_aa[:, vir_a][:, :, vir_a]
+        r_oo_b = ints_bb[:, occ_b][:, :, occ_b]
+        r_vv_b = ints_bb[:, vir_b][:, :, vir_b]
+
+        vectors = self._spin_orbital_vectors()
+        nstates = min(self.nstates, vectors.shape[1])
+        amps_a, amps_b = self._full_spin_conserving_amplitudes(vectors[:, :nstates])
+        tdm = np.zeros((nstates, nstates, 3))
+        for i, (a0, b0) in enumerate(zip(amps_a, amps_b)):
+            for j, (a1, b1) in enumerate(zip(amps_a, amps_b)):
+                tdm[i, j] = (
+                    np.einsum("ia,xab,ib->x", a0, r_vv_a, a1, optimize=True)
+                    - np.einsum("ia,xij,ja->x", a0, r_oo_a, a1, optimize=True)
+                    + np.einsum("ia,xab,ib->x", b0, r_vv_b, b1, optimize=True)
+                    - np.einsum("ia,xij,ja->x", b0, r_oo_b, b1, optimize=True)
+                )
+        if include_ground_dipole:
+            gs = _molecular_ground_dipole(mf)
+            for i in range(nstates):
+                tdm[i, i] += gs
+        return tdm
+
+    def calculate_TDM(self, include_ground_dipole=True):
+        gs_tdm = self.transition_dipoles_ground()
+        gs_osc = self.osc_str()
+        print("Ground state to Excited state transition dipole moments(a.u.)")
+        print("State      X        Y        Z      OSC.")
+        for i, dip in enumerate(gs_tdm):
+            print(
+                f" {i + 1:2d}     |GS>    "
+                f"{dip[0]:>8.4f} {dip[1]:>8.4f} {dip[2]:>8.4f}  {gs_osc[i]:>8.4f} "
+            )
+
+        tdm = self.transition_dipole_matrix(include_ground_dipole=include_ground_dipole)
+        energies = _asnumpy(self.e)[:tdm.shape[0]]
+        osc = (2.0 / 3.0) * (
+            (energies[:, None] - energies[None, :]) * np.einsum("ijx,ijx->ij", tdm, tdm)
+        )
+        print("\nExcited state to Excited state transition dipole moments(a.u.)")
+        print("StateL StateR      X        Y        Z      f(L<-R)")
+        for i in range(tdm.shape[0]):
+            for j in range(tdm.shape[1]):
+                print(
+                    f" {i + 1:2d}     {j + 1:2d}    "
+                    f"{tdm[i, j, 0]:>8.4f} {tdm[i, j, 1]:>8.4f} {tdm[i, j, 2]:>8.4f}  "
+                    f"{osc[i, j]:>8.4f} "
+                )
+        return {"gs_tdm": gs_tdm, "gs_osc": gs_osc, "tdm": tdm, "osc": osc}
+
+    analyze_TDM = calculate_TDM
 
     def kernel(self, nstates=1):
         self.nstates = nstates

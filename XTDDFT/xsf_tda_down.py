@@ -23,6 +23,7 @@ from .base import (
     _is_pbc_mf,
     _iter_block_data,
     _make_rohf_reference_mf,
+    _molecular_dipole_integrals,
     _run_davidson,
     _spinflip_gaps,
     _as_cpu_mf,
@@ -102,6 +103,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         if davidson_backend not in ("cpu", "gpu", "auto"):
             raise ValueError("davidson_backend must be 'cpu', 'gpu', or 'auto'")
         super().__init__(mf, method, davidson=davidson)
+        logger.info("XSF_TDA_down method=0 ALDA0, method=1 multicollinear")
         self.isf = -1
         self.type_u = _asnumpy(self.mf.mo_coeff).ndim == 3
         self.davidson_backend = "cpu" if davidson_backend == "auto" else davidson_backend
@@ -912,6 +914,117 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             else:
                 ds2.append(np.nan)
         return np.asarray(np.real_if_close(ds2), dtype=float)
+
+    def _dipole_mo_integrals(self):
+        mf = _as_cpu_mf(self.mf)
+        ctx = _as_cpu_ctx(mf, self.ctx)
+        dip_ao = _molecular_dipole_integrals(mf)
+        mo_coeff = _asnumpy(ctx.mo_coeff)
+        if self.type_u:
+            ints_aa = contract("xpq,pi,qj->xij", dip_ao, mo_coeff[0].conj(), mo_coeff[0])
+            ints_bb = contract("xpq,pi,qj->xij", dip_ao, mo_coeff[1].conj(), mo_coeff[1])
+            return np.asarray(ints_aa), np.asarray(ints_bb), ctx
+
+        mo_order = np.concatenate([_asnumpy(ctx.occidx_a), _asnumpy(ctx.viridx_a)])
+        mo = mo_coeff[0][:, mo_order]
+        ints_mo = contract("xpq,pi,qj->xij", dip_ao, mo.conj(), mo)
+        return np.asarray(ints_mo), ctx
+
+    def _transition_dipole_matrix_u(self):
+        ints_aa, ints_bb, ctx = self._dipole_mo_integrals()
+        occ_a = _asnumpy(ctx.occidx_a)
+        vir_b = _asnumpy(ctx.viridx_b)
+        r_oo_a = ints_aa[:, occ_a][:, :, occ_a]
+        r_vv_b = ints_bb[:, vir_b][:, :, vir_b]
+
+        nstates = min(self.nstates, _asnumpy(self.v).shape[1])
+        amps = []
+        for istate in range(nstates):
+            cv, co, ov, oo = self._split_analysis_vectors(_asnumpy(self.v[:, istate]))
+            c = np.zeros((self.nc + self.no, self.no + self.nv))
+            c[:self.nc, self.no:] = cv
+            c[:self.nc, :self.no] = co
+            c[self.nc:, self.no:] = ov
+            c[self.nc:, :self.no] = oo
+            amps.append(c)
+
+        tdm = np.zeros((nstates, nstates, 3))
+        for i, c0 in enumerate(amps):
+            for j, c1 in enumerate(amps):
+                tdm[i, j] = (
+                    np.einsum("ia,xab,ib->x", c0, r_vv_b, c1, optimize=True)
+                    - np.einsum("ia,xij,ja->x", c0, r_oo_a, c1, optimize=True)
+                )
+        return tdm
+
+    def _transition_dipole_matrix_r(self):
+        ints_mo, _ctx = self._dipole_mo_integrals()
+        nc, no, nv = self.nc, self.no, self.nv
+        c = slice(0, nc)
+        o = slice(nc, nc + no)
+        v = slice(nc + no, nc + no + nv)
+        si = self.ground_s
+        if self.SA == 0:
+            factor1, factor2, factor3 = 1.0, 1.0, 0.0
+        else:
+            factor1 = math.sqrt((2 * si + 1) / (2 * si))
+            factor2 = math.sqrt((2 * si) / (2 * si - 1))
+            factor3 = 1.0 / math.sqrt(2 * si * (2 * si - 1))
+
+        nstates = min(self.nstates, _asnumpy(self.v).shape[1])
+        amps = [
+            self._split_analysis_vectors(_asnumpy(self.v[:, istate]))
+            for istate in range(nstates)
+        ]
+        tdm = np.zeros((nstates, nstates, 3))
+        for i, (cv0, co0, ov0, oo0) in enumerate(amps):
+            for j, (cv1, co1, ov1, oo1) in enumerate(amps):
+                rij = np.zeros(3)
+                rij += contract("ia,xab,ib->x", cv0, ints_mo[:, v, v], cv1)
+                rij -= contract("ia,xij,ja->x", cv0, ints_mo[:, c, c], cv1)
+                rij += factor1 * contract("ia,xav,iv->x", cv0, ints_mo[:, v, o], co1)
+                rij += factor1 * contract("iu,xbu,ib->x", co0, ints_mo[:, v, o], cv1)
+                rij -= factor1 * contract("ia,xiv,va->x", cv0, ints_mo[:, c, o], ov1)
+                rij -= factor1 * contract("ua,xju,ja->x", ov0, ints_mo[:, c, o], cv1)
+                rij += contract("iu,xuv,iv->x", co0, ints_mo[:, o, o], co1)
+                rij -= contract("iu,xij,ju->x", co0, ints_mo[:, c, c], co1)
+                rij -= factor2 * contract("iu,xiv,vu->x", co0, ints_mo[:, c, o], oo1)
+                rij += factor3 * contract("iu,xiu,vv->x", co0, ints_mo[:, c, o], oo1)
+                rij -= factor2 * contract("ut,xju,jt->x", oo0, ints_mo[:, c, o], co1)
+                rij += factor3 * contract("uu,xjv,jv->x", oo0, ints_mo[:, c, o], co1)
+                rij += contract("ua,xab,ub->x", ov0, ints_mo[:, v, v], ov1)
+                rij -= contract("ua,xuv,va->x", ov0, ints_mo[:, o, o], ov1)
+                rij += factor2 * contract("ua,xaw,uw->x", ov0, ints_mo[:, v, o], oo1)
+                rij -= factor3 * contract("ua,xua,vv->x", ov0, ints_mo[:, o, v], oo1)
+                rij += factor2 * contract("ut,xbt,ub->x", oo0, ints_mo[:, v, o], ov1)
+                rij -= factor3 * contract("uu,xvb,vb->x", oo0, ints_mo[:, o, v], ov1)
+                rij += contract("ut,xtv,uv->x", oo0, ints_mo[:, o, o], oo1)
+                rij -= contract("ut,xuw,wt->x", oo0, ints_mo[:, o, o], oo1)
+                tdm[i, j] = rij
+        return tdm
+
+    def transition_dipole_matrix(self):
+        """Excited-state to excited-state transition dipole matrix in a.u."""
+        return self._transition_dipole_matrix_u() if self.type_u else self._transition_dipole_matrix_r()
+
+    def calculate_TDM(self):
+        tdm = self.transition_dipole_matrix()
+        energies = _asnumpy(self.e)[:tdm.shape[0]]
+        osc = (2.0 / 3.0) * (
+            (energies[:, None] - energies[None, :]) * np.einsum("ijx,ijx->ij", tdm, tdm)
+        )
+        print("Excited state to Excited state transition dipole moments(a.u.)")
+        print("StateL StateR      X        Y        Z      f(L<-R)")
+        for i in range(tdm.shape[0]):
+            for j in range(tdm.shape[1]):
+                print(
+                    f" {i + 1:2d}     {j + 1:2d}    "
+                    f"{tdm[i, j, 0]:>8.4f} {tdm[i, j, 1]:>8.4f} {tdm[i, j, 2]:>8.4f}  "
+                    f"{osc[i, j]:>8.4f} "
+                )
+        return tdm, osc
+
+    analyze_TDM = calculate_TDM
 
     def analyse(self, threshold=0.05):
         energies = _asnumpy(self.e) * ha2eV

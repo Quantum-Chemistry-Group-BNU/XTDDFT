@@ -17,6 +17,7 @@ from .base import (
     _iter_block_data,
     _make_spinflip_problem,
     _make_spinflip_vind,
+    _molecular_dipole_integrals,
     _run_davidson,
     _spinflip_gaps,
     _as_cpu_mf,
@@ -78,6 +79,7 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
         if davidson_backend not in ("cpu", "gpu", "auto"):
             raise ValueError("davidson_backend must be 'cpu', 'gpu', or 'auto'")
         super().__init__(mf, method, davidson=davidson)
+        logger.info("SF_TDA_up method=0 ALDA0, method=1 multicollinear")
         self.isf = 1
         self.davidson_backend = "cpu" if davidson_backend == "auto" else davidson_backend
 
@@ -297,6 +299,53 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
                 print(f'{100*x_cv[occ, vir]**2:3.0f}% CV(ab) '
                       f'{occ+1}a -> {vir_label}b {x_cv[occ, vir]:10.5f}')
             print(' ')
+
+    def transition_dipole_matrix(self):
+        """Excited-state to excited-state transition dipole matrix in a.u."""
+        mf = _as_cpu_mf(self.mf)
+        ctx = _as_cpu_ctx(mf, self.ctx)
+        dip_ao = _molecular_dipole_integrals(mf)
+        mo_coeff = _asnumpy(ctx.mo_coeff)
+        ints_aa = contract("xpq,pi,qj->xij", dip_ao, mo_coeff[0].conj(), mo_coeff[0])
+        ints_bb = contract("xpq,pi,qj->xij", dip_ao, mo_coeff[1].conj(), mo_coeff[1])
+        vir_a = _asnumpy(ctx.viridx_a)
+        occ_b = _asnumpy(ctx.occidx_b)
+        r_vv_a = np.asarray(ints_aa[:, vir_a][:, :, vir_a])
+        r_oo_b = np.asarray(ints_bb[:, occ_b][:, :, occ_b])
+
+        vectors = _asnumpy(self.v)
+        nstates = min(self.nstates, vectors.shape[1])
+        amps = [
+            vectors[:, istate].reshape(self.nc, self.nv)
+            for istate in range(nstates)
+        ]
+        tdm = np.zeros((nstates, nstates, 3))
+        for i, c0 in enumerate(amps):
+            for j, c1 in enumerate(amps):
+                tdm[i, j] = (
+                    np.einsum("ia,xab,ib->x", c0, r_vv_a, c1, optimize=True)
+                    - np.einsum("ia,xij,ja->x", c0, r_oo_b, c1, optimize=True)
+                )
+        return tdm
+
+    def calculate_TDM(self):
+        tdm = self.transition_dipole_matrix()
+        energies = _asnumpy(self.e)[:tdm.shape[0]]
+        osc = (2.0 / 3.0) * (
+            (energies[:, None] - energies[None, :]) * np.einsum("ijx,ijx->ij", tdm, tdm)
+        )
+        print("Excited state to Excited state transition dipole moments(a.u.)")
+        print("StateL StateR      X        Y        Z      f(L<-R)")
+        for i in range(tdm.shape[0]):
+            for j in range(tdm.shape[1]):
+                print(
+                    f" {i + 1:2d}     {j + 1:2d}    "
+                    f"{tdm[i, j, 0]:>8.4f} {tdm[i, j, 1]:>8.4f} {tdm[i, j, 2]:>8.4f}  "
+                    f"{osc[i, j]:>8.4f} "
+                )
+        return tdm, osc
+
+    analyze_TDM = calculate_TDM
 
     def kernel(self, nstates=1):
         self.nstates = nstates
