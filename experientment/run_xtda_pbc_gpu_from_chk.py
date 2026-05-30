@@ -22,7 +22,7 @@ from pyscf.pbc.scf import chkfile as pbc_chkfile
 from pyscf.pbc import dft as pbcdft
 
 from XTDDFT_dev.utils.backend import backend_info, set_backend
-from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
+from XTDDFT_dev.XTDDFT.xtda import XTDA
 
 
 def resolve_existing_file(filename, label):
@@ -98,19 +98,18 @@ def make_gpu_roks_from_chk(chk, xc, use_density_fit=True):
 chk = "roks_pbe0_ccpVDZ.chk"
 xc = "pbe0"
 nstates = 8
-SA = 3
 
 use_density_fit = True  # If GDF is problematic on the machine, try False.
 
 grid_level = 4
 grid_file = "becke_grids_ccpVDZ_level4.npz"
 
-remove = None
-foo = 1.0
-d_lda = 0.3
-fglobal = None
-fit = True
+method = 0  # XTDA currently implements method=0 spin-conserving response.
+davidson = True
 davidson_backend = "cpu"  # CPU Davidson + GPU matrix-vector product.
+so2st = False
+dense_batch_size = 64
+analyse_threshold = 0.1
 # ========================================================
 
 
@@ -135,34 +134,26 @@ def main():
     print("e_tot:", mf.e_tot)
     print("mo_coeff shape:", mf.mo_coeff.shape)
     print("mo_occ shape:", mf.mo_occ.shape)
-    print("SA:", SA)
 
-    last = None
-    for method in (0, 1):
-        print("=" * 80)
-        print(f"Running XSF_TDA_down method={method}")
-        xsf_method = XSF_TDA_down(
-            mf, method=method, SA=SA, davidson=True,
-            davidson_backend=davidson_backend,
-        )
-        ee, vv = xsf_method.kernel(
-            nstates=nstates,
-            remove=remove,
-            foo=foo,
-            d_lda=d_lda,
-            fglobal=fglobal,
-            fit=fit,
-        )
-        xsf_method.analyse()
-        cp.cuda.Stream.null.synchronize()
+    print("=" * 80)
+    print(f"Running XTDA method={method}")
+    xtda_method = XTDA(
+        mf,
+        method=method,
+        davidson=davidson,
+        davidson_backend=davidson_backend,
+        so2st=so2st,
+        dense_batch_size=dense_batch_size,
+    )
+    ee, vv = xtda_method.kernel(nstates=nstates)
+    xtda_method.analyse(threshold=analyse_threshold)
+    cp.cuda.Stream.null.synchronize()
 
-        print("converged:", xsf_method.converged)
-        print("fglobal:", getattr(xsf_method, "fglobal", None))
-        print("energies / eV:")
-        print(np.asarray(ee))
-        print("vectors shape:", vv.shape)
-        last = xsf_method, ee, vv
-    return last
+    print("converged:", getattr(xtda_method, "converged", None))
+    print("energies / eV:")
+    print(np.asarray(ee))
+    print("vectors shape:", vv.shape)
+    return xtda_method, ee, vv
 
 
 if __name__ == "__main__":

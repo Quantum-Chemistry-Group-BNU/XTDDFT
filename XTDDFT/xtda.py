@@ -4,6 +4,7 @@ from .base import (
     XTDDFT_base,
     _as_cpu_ctx,
     _as_cpu_mf,
+    _build_initial_guess_from_gaps,
     _get_hf_mo_fock,
     _get_mo_fock,
     _get_ovlp,
@@ -90,11 +91,38 @@ class XTDA(XTDDFT_base):
             return dms
         return tag_array(dms, mo1=[mo1a, mo1b], occ_coeff=[orboa, orbob])
 
-    def _hdiag_from_fock(self, ctx, focka_mo, fockb_mo):
+    def _hdiag_from_fock(self, ctx, focka_mo, fockb_mo,
+                         focka_hf=None, fockb_hf=None, spin=None):
         diag_a = focka_mo.diagonal()
         diag_b = fockb_mo.diagonal()
         e_ia_a = diag_a[ctx.viridx_a] - diag_a[ctx.occidx_a, None]
         e_ia_b = diag_b[ctx.viridx_b] - diag_b[ctx.occidx_b, None]
+
+        if (
+            focka_hf is not None
+            and fockb_hf is not None
+            and ctx.no > 0
+            and ctx.nc > 0
+            and ctx.nv > 0
+            and spin is not None
+            and abs(spin) > 1e-14
+        ):
+            si = 0.5 * spin
+            factor_a = 0.5 * (1 - xp.sqrt((si + 1) / si) + 1 / (2 * si))
+            factor_b = 0.5 * (-1 + xp.sqrt((si + 1) / si) + 1 / (2 * si))
+            delta_f = fockb_hf - focka_hf
+            diag_delta = delta_f.diagonal()
+            core_delta = diag_delta[:ctx.nc]
+            virt_delta = diag_delta[ctx.nocc_a:]
+
+            # Li-Liu finite-spin correction only changes the CVa/CVb
+            # self-block diagonals; CVa-CVb terms are off-diagonal couplings.
+            e_ia_a[:ctx.nc, :] += (
+                factor_a * virt_delta + factor_b * core_delta[:, None]
+            )
+            e_ia_b[:, -ctx.nv:] += (
+                factor_b * virt_delta + factor_a * core_delta[:, None]
+            )
         return xp.hstack([e_ia_a.reshape(-1), e_ia_b.reshape(-1)])
 
     def gen_tda_operation(self, mf=None, ctx=None):
@@ -109,7 +137,6 @@ class XTDA(XTDDFT_base):
         orbvb = mo_coeff[1][:, ctx.viridx_b]
 
         focka_mo, fockb_mo = _get_mo_fock(mf, mo_coeff, mo_occ)
-        hdiag = self._hdiag_from_fock(ctx, focka_mo, fockb_mo)
         vresp = gen_response_tda(mf, hermi=0, ctx=ctx)
 
         use_delta_a = (
@@ -126,6 +153,12 @@ class XTDA(XTDDFT_base):
                 factor_a = 0.5 * (1 - xp.sqrt((si + 1) / si) + 1 / (2 * si))
                 factor_b = 0.5 * (-1 + xp.sqrt((si + 1) / si) + 1 / (2 * si))
                 factor_ab = 0.5 / (2 * si)
+        hdiag = self._hdiag_from_fock(
+            ctx, focka_mo, fockb_mo,
+            focka_hf=focka_hf if use_delta_a else None,
+            fockb_hf=fockb_hf if use_delta_a else None,
+            spin=_system(mf).spin if use_delta_a else None,
+        )
 
         def vind(zs0):
             zs = xp.asarray(zs0)
@@ -197,24 +230,9 @@ class XTDA(XTDDFT_base):
         return vind, hdiag
 
     def init_guess(self, nstates, hdiag=None):
-        mo_energy = _asnumpy(self.ctx.mo_energy)
-        mo_occ = _asnumpy(self.ctx.mo_occ)
-        occidxa = mo_occ[0] > 0
-        occidxb = mo_occ[1] > 0
-        viridxa = mo_occ[0] == 0
-        viridxb = mo_occ[1] == 0
-        e_ia_a = mo_energy[0][viridxa] - mo_energy[0][occidxa, None]
-        e_ia_b = mo_energy[1][viridxb] - mo_energy[1][occidxb, None]
-        e_ia = np.append(e_ia_a.ravel(), e_ia_b.ravel())
-        nov = e_ia.size
-        nroots = min(nstates, nov)
-        if nroots < 1:
-            raise ValueError("No spin-conserving excitation space is available.")
-        e_threshold = np.partition(e_ia, nroots - 1)[nroots - 1] + 1e-3
-        idx = np.where(e_ia <= e_threshold)[0]
-        x0 = np.zeros((idx.size, nov))
-        x0[np.arange(idx.size), idx] = 1.0
-        return x0
+        if hdiag is None:
+            _, hdiag = self.gen_tda_operation()
+        return _build_initial_guess_from_gaps(hdiag, nstates)
 
     def davidson_process(self, nstates):
         vind, hdiag = self.gen_tda_operation()

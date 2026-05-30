@@ -31,7 +31,7 @@ from .base import (
     _make_reference_dm,
     _response_max_memory,
 )
-from ..utils.backend import _asarray, _asnumpy, contract, xp
+from ..utils.backend import _asarray, _asnumpy, backend, contract, xp
 from ..utils.unit import ha2eV
 
 try:
@@ -276,7 +276,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         if self.method == 0:
             self.get_Amat_ALDA0()
         elif self.method == 1:
-            self.get_Amat_MCOL()
+            self.get_Amat_MCOL(self.collinear_samples)
         else:
             raise NotImplementedError(f"Unsupported method={self.method!r}.")
 
@@ -471,39 +471,80 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         new_hdiag[dim3:] = new_oo
         return new_hdiag
 
-    def _response_j_diagonal(self, block, batch_size=64):
+    def _response_j_batch_size(self, total):
+        if total <= 0:
+            return 1
+        if not backend.is_gpu:
+            return min(64, total)
+        try:
+            free_mem, _ = xp.cuda.runtime.memGetInfo()
+        except Exception:
+            return min(256, total)
+
+        nao = int(self.mo_coeff.shape[-2])
+        itemsize = xp.dtype(self.mo_coeff.dtype).itemsize
+        # Keep a conservative margin for dm, J(dm), projection buffers, and
+        # GPU4PySCF temporaries.  Align to 256, matching its DF kernel blocks.
+        bytes_per_trial = itemsize * (3 * nao * nao + max(1, self.nocc_a * self.nvir_b))
+        raw = max(1, int(0.25 * free_mem / max(bytes_per_trial, 1)))
+        if raw >= 256:
+            raw = max(256, (raw // 256) * 256)
+        return min(total, raw)
+
+    def _response_j_diagonals(self, batch_size=None):
         mo_coeff = _asarray(self.mo_coeff)
-        orboa = mo_coeff[0][:, self.occidx_a]
-        orbvb = mo_coeff[1][:, self.viridx_b]
         nc, no, nv = self.nc, self.no, self.nv
+        orbca = mo_coeff[0][:, self.occidx_a[:nc]]
+        orboa_open = mo_coeff[0][:, self.occidx_a[nc:nc + no]]
+        orbbo = mo_coeff[1][:, self.viridx_b[:no]]
+        orbvv = mo_coeff[1][:, self.viridx_b[no:]]
 
-        if block == "co":
-            nrow, ncol = nc, no
-            orbv = orbvb[:, :no]
-            orbo = orboa[:, :nc]
-            out_slice = (slice(None), slice(0, nc), slice(0, no))
-        elif block == "ov":
-            nrow, ncol = no, nv
-            orbv = orbvb[:, no:]
-            orbo = orboa[:, nc:nc + no]
-            out_slice = (slice(None), slice(nc, nc + no), slice(no, no + nv))
-        else:
-            raise ValueError(f"Unsupported diagonal response block {block!r}")
+        total_co = nc * no
+        total_ov = no * nv
+        total = total_co + total_ov
+        if batch_size is None:
+            batch_size = self._response_j_batch_size(total)
 
-        total = nrow * ncol
-        diag = xp.zeros(total, dtype=mo_coeff.dtype)
+        co_j = xp.zeros(total_co, dtype=mo_coeff.dtype)
+        ov_j = xp.zeros(total_ov, dtype=mo_coeff.dtype)
+
+        def build_dm(indices, nrow, ncol, orbv, orbo):
+            nb = indices.size
+            trial = xp.zeros((nb, nrow * ncol), dtype=mo_coeff.dtype)
+            trial[xp.arange(nb), indices] = 1
+            trial = trial.reshape(nb, nrow, ncol)
+            return contract("xov,qv,po->xpq", trial, orbv.conj(), orbo)
+
         for p0 in range(0, total, batch_size):
             p1 = min(p0 + batch_size, total)
-            nb = p1 - p0
-            trial = xp.zeros((nb, total), dtype=mo_coeff.dtype)
-            trial[xp.arange(nb), xp.arange(p0, p1)] = 1
-            trial = trial.reshape(nb, nrow, ncol)
-            dm = contract("xov,qv,po->xpq", trial, orbv.conj(), orbo)
-            vj = _get_j(self.mf, dm, hermi=0)
-            vj_mo = contract("xpq,po,qv->xov", vj, orboa.conj(), orbvb)
-            block_mo = vj_mo[out_slice].reshape(nb, total)
-            diag[p0:p1] = block_mo[xp.arange(nb), xp.arange(p0, p1)]
-        return diag.reshape(nrow, ncol)
+            dms = []
+            parts = []
+
+            co0, co1 = p0, min(p1, total_co)
+            if co0 < co1:
+                idx = xp.arange(co0, co1)
+                dms.append(build_dm(idx, nc, no, orbbo, orbca))
+                parts.append(("co", idx, int(idx.size)))
+
+            ov0, ov1 = max(p0, total_co), p1
+            if ov0 < ov1:
+                idx = xp.arange(ov0 - total_co, ov1 - total_co)
+                dms.append(build_dm(idx, no, nv, orbvv, orboa_open))
+                parts.append(("ov", idx, int(idx.size)))
+
+            vj = _get_j(self.mf, xp.concatenate(dms, axis=0), hermi=0)
+            q0 = 0
+            for name, idx, nb in parts:
+                vj_part = vj[q0:q0 + nb]
+                q0 += nb
+                if name == "co":
+                    block = contract("xpq,pi,qu->xiu", vj_part, orbca.conj(), orbbo).reshape(nb, total_co)
+                    co_j[idx] = block[xp.arange(nb), idx]
+                else:
+                    block = contract("xpq,pu,qa->xua", vj_part, orboa_open.conj(), orbvv).reshape(nb, total_ov)
+                    ov_j[idx] = block[xp.arange(nb), idx]
+
+        return co_j.reshape(nc, no), ov_j.reshape(no, nv)
 
     def _build_preconditioner_hdiag(self, fockA, fockB, fglobal=1.0,
                                     fockA_hf=None, fockB_hf=None):
@@ -525,8 +566,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             hdiag[:nc, no:] += fglobal * (
                 diag_s[nc + no:] + diag_s[:nc, None]
             ) / si
-            co_j = self._response_j_diagonal("co")
-            ov_j = self._response_j_diagonal("ov")
+            co_j, ov_j = self._response_j_diagonals()
             hdiag[:nc, :no] += fglobal * (
                 2.0 * diag_s[:nc, None] - co_j
             ) / (2 * si - 1)

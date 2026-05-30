@@ -434,6 +434,140 @@ def _make_response_vxc(ni, mf, dm1, hermi, vxc, max_memory):
         vxc=vxc, max_memory=max_memory
     )
 
+def _cache_xc_kernel_tda_gpu_pbc(mf, mo_coeff, mo_occ, max_memory=2000):
+    del max_memory
+    cp = require_cupy()
+    _ensure_gamma_df(mf)
+    ni = mf._numint
+    xctype = ni._xc_type(mf.xc)
+    if xctype == "HF":
+        return None
+    if xctype not in ("LDA", "GGA", "MGGA"):
+        raise NotImplementedError(f"GPU Gamma PBC TDA response is not implemented for {xctype}.")
+
+    ao_deriv = _xc_ao_deriv(xctype)
+    mo_coeff = cp.asarray(mo_coeff)
+    mo_occ = cp.asarray(mo_occ)
+    dm = cp.asarray([
+        (mo_coeff[s] * mo_occ[s]) @ mo_coeff[s].conj().T
+        for s in range(2)
+    ])
+
+    rhoa = []
+    rhob = []
+    for block in _iter_ao_blocks(mf, ni, ao_deriv):
+        rhoa.append(ni.eval_rho(mf.cell, block.ao_ks, dm[0][None], xctype=xctype, hermi=1))
+        rhob.append(ni.eval_rho(mf.cell, block.ao_ks, dm[1][None], xctype=xctype, hermi=1))
+
+    rho = cp.stack([cp.hstack(rhoa), cp.hstack(rhob)], axis=0)
+    return ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype)[2]
+
+
+def _gpu_pbc_tda_weighted_density(xctype, rho1a, rho1b, fxc_block, weight):
+    if xctype == "LDA":
+        rho1a = rho1a.reshape(1, -1)
+        rho1b = rho1b.reshape(1, -1)
+        wv = rho1a * fxc_block[0, 0] + rho1b * fxc_block[1, 0]
+    else:
+        wv = contract("xg,xbyg->byg", rho1a, fxc_block[0])
+        wv += contract("xg,xbyg->byg", rho1b, fxc_block[1])
+    return wv * weight
+
+
+def _nr_uks_fxc_tda_gpu_pbc(ni, mf, dm1, hermi=0, fxc=None):
+    cp = require_cupy()
+    from gpu4pyscf.pbc.dft.numint import _scale_ao, _tau_dot
+
+    _ensure_gamma_df(mf)
+    xctype = ni._xc_type(mf.xc)
+    if xctype not in ("LDA", "GGA", "MGGA"):
+        raise NotImplementedError(f"GPU Gamma PBC TDA response is not implemented for {xctype}.")
+    ao_deriv = _xc_ao_deriv(xctype)
+
+    dm1 = cp.asarray(dm1)
+    dma, dmb = dm1
+    single = dma.ndim == 2
+    if single:
+        dma = dma.reshape(1, dma.shape[-2], dma.shape[-1])
+        dmb = dmb.reshape(1, dmb.shape[-2], dmb.shape[-1])
+
+    nset = int(dma.shape[0])
+    nao = int(dma.shape[-1])
+    dtype = dm1.dtype
+    vmat = cp.zeros((2, nset, nao, nao), dtype=dtype)
+    vtau = cp.zeros_like(vmat) if xctype == "MGGA" else None
+
+    p0 = p1 = 0
+    for block in _iter_ao_blocks(mf, ni, ao_deriv):
+        weight = cp.asarray(block.weight)
+        p0, p1 = p1, p1 + int(weight.size)
+        fxc_block = cp.asarray(fxc[..., p0:p1])
+
+        for i in range(nset):
+            rho1a = ni.eval_rho(mf.cell, block.ao_ks, dma[i][None], xctype=xctype, hermi=hermi)
+            rho1b = ni.eval_rho(mf.cell, block.ao_ks, dmb[i][None], xctype=xctype, hermi=hermi)
+            wv = _gpu_pbc_tda_weighted_density(xctype, rho1a, rho1b, fxc_block, weight)
+
+            if xctype == "LDA":
+                aow = _scale_ao(block.ao, wv[0, 0])
+                vmat[0, i] += block.ao.conj().T.dot(aow)
+                aow = _scale_ao(block.ao, wv[1, 0])
+                vmat[1, i] += block.ao.conj().T.dot(aow)
+            elif xctype == "GGA":
+                wv[:, 0] *= .5
+                aow = _scale_ao(block.ao[:4], wv[0, :4])
+                vmat[0, i] += block.ao[0].conj().T.dot(aow)
+                aow = _scale_ao(block.ao[:4], wv[1, :4])
+                vmat[1, i] += block.ao[0].conj().T.dot(aow)
+            elif xctype == "MGGA":
+                wv[:, [0, 4]] *= .5
+                aow = _scale_ao(block.ao[:4], wv[0, :4])
+                vmat[0, i] += block.ao[0].conj().T.dot(aow)
+                vtau[0, i] += _tau_dot(block.ao, block.ao, wv[0, 4])
+                aow = _scale_ao(block.ao[:4], wv[1, :4])
+                vmat[1, i] += block.ao[0].conj().T.dot(aow)
+                vtau[1, i] += _tau_dot(block.ao, block.ao, wv[1, 4])
+
+    if xctype in ("GGA", "MGGA"):
+        vmat = vmat + vmat.conj().swapaxes(-2, -1)
+    if vtau is not None:
+        vmat += vtau
+    return vmat[:, 0] if single else vmat
+
+
+def _gen_response_tda_gpu_pbc(mf, mo_coeff, mo_occ, hermi=0,
+                              max_memory=None, with_j=True):
+    cp = require_cupy()
+    _ensure_gamma_df(mf)
+    ni = mf._numint if _is_ks_mf(mf) else None
+    max_memory = _response_max_memory(mf, max_memory)
+
+    if _is_ks_mf(mf):
+        xctype, hybrid, omega, alpha, hyb = _xc_response_params(mf, ni)
+        fxc = None if xctype == "HF" else _cache_xc_kernel_tda_gpu_pbc(
+            mf, mo_coeff, mo_occ, max_memory
+        )
+
+        def vind(dm1):
+            dm1 = cp.asarray(dm1)
+            v1 = cp.zeros_like(dm1) if xctype == "HF" else _nr_uks_fxc_tda_gpu_pbc(
+                ni, mf, dm1, hermi=hermi, fxc=fxc
+            )
+            return _add_spin_conserving_jk(
+                mf, v1, dm1, hybrid, hyb, omega, alpha, hermi,
+                with_j=with_j,
+            )
+        return vind
+
+    def vind(dm1):
+        dm1 = cp.asarray(dm1)
+        v1 = cp.zeros_like(dm1)
+        return _add_spin_conserving_jk(
+            mf, v1, dm1, True, 1.0, 0.0, 0.0, hermi,
+            with_j=with_j,
+        )
+    return vind
+
 def gen_response_sf(mf,hermi=0,max_memory=None,ctx=None):
     if ctx is None:
         _, mo_occ, mo_coeff = mf_info(mf)
@@ -467,29 +601,10 @@ def gen_response_tda(mf, mo_coeff=None, mo_occ=None, hermi=0,
         _, mo_occ, mo_coeff = mf_info(mf)
 
     if _is_gpu_mf(mf) and _is_pbc_mf(mf):
-        cp = require_cupy()
-        mf_cpu = _as_cpu_mf(mf)
-        mo_coeff_cpu = _asnumpy(mo_coeff)
-        mo_occ_cpu = _asnumpy(mo_occ)
-        mode = backend.mode
-        set_backend("cpu")
-        try:
-            cpu_vresp = gen_response_tda(
-                mf_cpu, mo_coeff=mo_coeff_cpu, mo_occ=mo_occ_cpu,
-                hermi=hermi, max_memory=max_memory, with_j=with_j,
-            )
-        finally:
-            set_backend(mode)
-
-        def vind(dm1):
-            mode0 = backend.mode
-            set_backend("cpu")
-            try:
-                v1 = cpu_vresp(_asnumpy(dm1))
-            finally:
-                set_backend(mode0)
-            return cp.asarray(v1)
-        return vind
+        return _gen_response_tda_gpu_pbc(
+            mf, mo_coeff, mo_occ, hermi=hermi,
+            max_memory=max_memory, with_j=with_j,
+        )
 
     if _is_ks_mf(mf):
         ni = mf._numint
