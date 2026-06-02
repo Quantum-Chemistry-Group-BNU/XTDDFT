@@ -299,7 +299,7 @@ class XSF_TDA():
             sf_tda = SF_TDA_down(mf,method=self.method,davidson=self.davidson,mo_coeff=self.mo_coeff,mo_energy=self.mo_energy,mo_occ=self.mo_occ)
             sf_tda_A = sf_tda.get_Amat() 
         elif self.method == 1:
-            sf_tda_A = get_ab_sf(mf).reshape(((nc+no)*(no+nv),(nc+no)*(no+nv)))
+            sf_tda_A = get_ab_sf(mf,collinear_samples=self.collinear_samples).reshape(((nc+no)*(no+nv),(nc+no)*(no+nv)))
             sf_tda_A = convert(sf_tda_A,nc,no,nv)
         Amat = np.zeros_like(sf_tda_A)
         dim1 = nc*nv
