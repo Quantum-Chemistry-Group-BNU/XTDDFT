@@ -1,4 +1,6 @@
 import numpy as np
+from opt_einsum import contract as _opt_einsum_contract
+
 
 def get_cov(mf):
     # get nc, nv, no(if open shell)
@@ -149,3 +151,9 @@ def print_table(data, N):
         for j in range(1, N + 1):
             row += f"{data[i-1][j-1]:{width}.4f}"
         print(row)
+
+def contract(*args: Any, optimize: Any = True, **kwargs: Any) -> Any:
+    """opt_einsum.contract with optimized contraction paths enabled by default."""
+
+    kwargs["optimize"] = optimize
+    return _opt_einsum_contract(*args, **kwargs)
