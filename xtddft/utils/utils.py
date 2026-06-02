@@ -1,4 +1,5 @@
 import numpy as np
+from typing import Any
 from opt_einsum import contract as _opt_einsum_contract
 
 
