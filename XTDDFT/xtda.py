@@ -336,22 +336,22 @@ class XTDA(XTDDFT_base):
 
         nc, no = self.nc, self.no
         ds2 = (
-            np.einsum("nia,nja,ki,jk->n", cv_a, cv_a, sccba[:, :nc], sccba.T[:nc, :])
-            + np.einsum("nia,nja,ki,jk->n", ov_a, ov_a, sccba[:, nc:], sccba.T[nc:, :])
-            + np.einsum("nia,nja,ki,jk->n", ov_a, cv_a, sccba[:, nc:], sccba.T[:nc, :])
-            + np.einsum("nia,nja,ki,jk->n", cv_a, ov_a, sccba[:, :nc], sccba.T[nc:, :])
-            - np.einsum("nia,nib,ak,kb->n", cv_a, cv_a, svcab, svcab.T)
-            - np.einsum("nia,nib,ak,kb->n", ov_a, ov_a, svcab, svcab.T)
-            + np.einsum("nia,nja,ki,jk->n", cv_b, cv_b, sccab, sccab.T)
-            + np.einsum("nia,nja,ki,jk->n", co_b, co_b, sccab, sccab.T)
-            - np.einsum("nia,nib,ak,kb->n", co_b, co_b, svcba[:no, :], svcba.T[:, :no])
-            - np.einsum("nia,nib,ak,kb->n", cv_b, cv_b, svcba[no:, :], svcba.T[:, no:])
-            - np.einsum("nia,nib,ak,kb->n", co_b, cv_b, svcba[:no, :], svcba.T[:, no:])
-            - np.einsum("nia,nib,ak,kb->n", cv_b, co_b, svcba[no:, :], svcba.T[:, :no])
-            - 2.0 * np.einsum("nia,njb,ji,ab->n", cv_a, cv_b, sccba[:, :nc], svvab[:, no:])
-            - 2.0 * np.einsum("nia,njb,ji,ab->n", cv_a, co_b, sccba[:, :nc], svvab[:, :no])
-            - 2.0 * np.einsum("nia,njb,ji,ab->n", ov_a, cv_b, sccba[:, nc:], svvab[:, no:])
-            - 2.0 * np.einsum("nia,njb,ji,ab->n", ov_a, co_b, sccba[:, nc:], svvab[:, :no])
+            contract("nia,nja,ki,jk->n", cv_a, cv_a, sccba[:, :nc], sccba.T[:nc, :])
+            + contract("nia,nja,ki,jk->n", ov_a, ov_a, sccba[:, nc:], sccba.T[nc:, :])
+            + contract("nia,nja,ki,jk->n", ov_a, cv_a, sccba[:, nc:], sccba.T[:nc, :])
+            + contract("nia,nja,ki,jk->n", cv_a, ov_a, sccba[:, :nc], sccba.T[nc:, :])
+            - contract("nia,nib,ak,kb->n", cv_a, cv_a, svcab, svcab.T)
+            - contract("nia,nib,ak,kb->n", ov_a, ov_a, svcab, svcab.T)
+            + contract("nia,nja,ki,jk->n", cv_b, cv_b, sccab, sccab.T)
+            + contract("nia,nja,ki,jk->n", co_b, co_b, sccab, sccab.T)
+            - contract("nia,nib,ak,kb->n", co_b, co_b, svcba[:no, :], svcba.T[:, :no])
+            - contract("nia,nib,ak,kb->n", cv_b, cv_b, svcba[no:, :], svcba.T[:, no:])
+            - contract("nia,nib,ak,kb->n", co_b, cv_b, svcba[:no, :], svcba.T[:, no:])
+            - contract("nia,nib,ak,kb->n", cv_b, co_b, svcba[no:, :], svcba.T[:, :no])
+            - 2.0 * contract("nia,njb,ji,ab->n", cv_a, cv_b, sccba[:, :nc], svvab[:, no:])
+            - 2.0 * contract("nia,njb,ji,ab->n", cv_a, co_b, sccba[:, :nc], svvab[:, :no])
+            - 2.0 * contract("nia,njb,ji,ab->n", ov_a, cv_b, sccba[:, nc:], svvab[:, no:])
+            - 2.0 * contract("nia,njb,ji,ab->n", ov_a, co_b, sccba[:, nc:], svvab[:, :no])
         )
         return np.real_if_close(ds2)
 
@@ -483,14 +483,15 @@ class XTDA(XTDDFT_base):
             self.save_results(save_file)
         return _asnumpy(self.e[:nstates] * ha2eV), self.v[:, :nstates]
 
-    def analyse(self, threshold=0.1):
+    def analyse(self, threshold=0.1, compute_s2=True):
         energies = _asnumpy(self.e) * ha2eV
         cv_a, ov_a, co_b, cv_b = self._split_analysis_vectors()
-        self.dS2 = _asnumpy(self.deltaS2())
+        self.dS2 = _asnumpy(self.deltaS2()) if compute_s2 else None
         for istate in range(min(self.nstates, cv_a.shape[0])):
+            ds2_text = f"{self.dS2[istate]:8.4f}" if self.dS2 is not None else "     n/a"
             print(
                 f"D{istate + 1}    w:{energies[istate]:10.4f} eV"
-                f"    d<S^2>:{self.dS2[istate]:8.4f}"
+                f"    d<S^2>:{ds2_text}"
             )
             for c, v in zip(*np.where(abs(cv_a[istate]) > threshold)):
                 amp = cv_a[istate, c, v]
