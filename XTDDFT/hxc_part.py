@@ -95,13 +95,23 @@ def _xc_response_params(mf, ni, xc_code=None):
     omega, alpha, hyb = ni.rsh_and_hybrid_coeff(xc_code, _system(mf).spin)
     return xctype, ni.libxc.is_hybrid_xc(xc_code), omega, alpha, hyb
 
-def _add_hybrid_k(mf, v1, dm1, hybrid, hyb, omega, alpha, hermi):
-    if not hybrid:
-        return v1
+def _use_short_range_k(omega, alpha, hyb):
+    return abs(omega) > 1e-10 and abs(alpha) < 1e-12 and abs(hyb) > 1e-12
+
+
+def _hybrid_k(mf, dm1, hyb, omega, alpha, hermi):
+    if _use_short_range_k(omega, alpha, hyb):
+        return _get_k(mf, dm1, hermi=hermi, omega=-omega) * hyb
     vk = _get_k(mf, dm1, hermi=hermi) * hyb
     if abs(omega) > 1e-10:
         vk += _get_k(mf, dm1, hermi=hermi, omega=omega) * (alpha - hyb)
-    return v1 - vk
+    return vk
+
+
+def _add_hybrid_k(mf, v1, dm1, hybrid, hyb, omega, alpha, hermi):
+    if not hybrid:
+        return v1
+    return v1 - _hybrid_k(mf, dm1, hyb, omega, alpha, hermi)
 
 def _add_spin_conserving_jk(mf, v1, dm1, hybrid, hyb, omega, alpha, hermi, with_j=True):
     dm1 = _asarray(dm1)
@@ -117,15 +127,10 @@ def _add_spin_conserving_jk(mf, v1, dm1, hybrid, hyb, omega, alpha, hermi, with_
 
         if hybrid:
             flat_dm = dm1.reshape(2 * nset, *dm1.shape[-2:])
-            vk = _asarray(_get_k(mf, flat_dm, hermi=hermi))
+            vk = _asarray(_hybrid_k(mf, flat_dm, hyb, omega, alpha, hermi))
             if vk.ndim == 2:
                 vk = vk.reshape(1, *vk.shape)
-            vk = vk.reshape(2, nset, *dm1.shape[-2:]) * hyb
-            if abs(omega) > 1e-10:
-                vk_lr = _asarray(_get_k(mf, flat_dm, hermi=hermi, omega=omega))
-                if vk_lr.ndim == 2:
-                    vk_lr = vk_lr.reshape(1, *vk_lr.shape)
-                vk += vk_lr.reshape(2, nset, *dm1.shape[-2:]) * (alpha - hyb)
+            vk = vk.reshape(2, nset, *dm1.shape[-2:])
         else:
             vk = 0
         return v1 + coul[None] - vk
@@ -134,10 +139,14 @@ def _add_spin_conserving_jk(mf, v1, dm1, hybrid, hyb, omega, alpha, hermi, with_
         return _add_hybrid_k(mf, v1, dm1, hybrid, hyb, omega, alpha, hermi)
 
     if hybrid:
-        vj, vk = _get_jk(mf, dm1, hermi=hermi)
-        vk = _asarray(vk) * hyb
-        if abs(omega) > 1e-10:
-            vk += _get_k(mf, dm1, hermi=hermi, omega=omega) * (alpha - hyb)
+        if _use_short_range_k(omega, alpha, hyb):
+            vj = _get_j(mf, dm1, hermi=hermi)
+            vk = _hybrid_k(mf, dm1, hyb, omega, alpha, hermi)
+        else:
+            vj, vk = _get_jk(mf, dm1, hermi=hermi)
+            vk = _asarray(vk) * hyb
+            if abs(omega) > 1e-10:
+                vk += _get_k(mf, dm1, hermi=hermi, omega=omega) * (alpha - hyb)
     else:
         vj = _get_j(mf, dm1, hermi=hermi)
         vk = 0

@@ -604,7 +604,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         oo = oo.reshape(data.shape[0], no, no)
         return cv, co, ov, oo
 
-    def _join_block_vectors(self, cv, co, ov, oo, compress_oo=True):
+    def _join_block_vectors(self, cv, co, ov, oo, compress_oo=None):
         if compress_oo is None:
             compress_oo = self.re
         oo = oo.reshape(oo.shape[0], -1)
