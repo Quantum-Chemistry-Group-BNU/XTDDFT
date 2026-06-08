@@ -876,44 +876,52 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             x_oo = value[dim3:].reshape(no, no)
         return x_cv, x_co, x_ov, x_oo
 
-    def deltaS2_U(self, nstate):
+    def _deltaS2_U_overlaps(self):
         mf = _as_cpu_mf(self.mf)
         ctx = _as_cpu_ctx(mf, self.ctx)
         mo_coeff = _asnumpy(ctx.mo_coeff)
         occidx_a = _asnumpy(ctx.occidx_a)
         occidx_b = _asnumpy(ctx.occidx_b)
-        viridx_a = _asnumpy(ctx.viridx_a)
         viridx_b = _asnumpy(ctx.viridx_b)
 
         mooa = mo_coeff[0][:, occidx_a]
         moob = mo_coeff[1][:, occidx_b]
-        mova = mo_coeff[0][:, viridx_a]
         movb = mo_coeff[1][:, viridx_b]
         ovlp = _asnumpy(_get_ovlp(mf))
 
-        sab_oo = mooa.conj().T @ ovlp @ moob
+        sab_oo = contract("pi,pq,qj->ij", mooa.conj(), ovlp, moob)
         sba_oo = sab_oo.conj().T
-        sba_vo = movb.conj().T @ ovlp @ mooa
+        sba_vo = contract("pa,pq,qi->ai", movb.conj(), ovlp, mooa)
+        return sba_oo, sba_vo
 
+    def _deltaS2_U_from_overlaps(self, nstate, sba_oo, sba_vo):
         x_cv, x_co, x_ov, x_oo = self._split_analysis_vectors(_asnumpy(self.v[:, nstate]))
         x_ba = np.concatenate([np.hstack([x_co, x_cv]), np.hstack([x_oo, x_ov])], axis=0).T
+        sba_vo_overlap = contract("ai,ai->", x_ba.conj(), sba_vo)
         ds2 = (
-            np.einsum("ai,aj,jk,ki", x_ba.conj(), x_ba, sba_oo.T.conj(), sba_oo)
-            - np.einsum("ai,bi,kb,ak", x_ba.conj(), x_ba, sba_vo.T.conj(), sba_vo)
-            + np.einsum("ai,bj,jb,ai", x_ba.conj(), x_ba, sba_vo.T.conj(), sba_vo)
+            contract("ai,aj,jk,ki", x_ba.conj(), x_ba, sba_oo.T.conj(), sba_oo)
+            - contract("ai,bi,kb,ak", x_ba.conj(), x_ba, sba_vo.T.conj(), sba_vo)
+            + abs(sba_vo_overlap) ** 2
         )
         return np.real_if_close(ds2)
 
+    def deltaS2_U(self, nstate):
+        return self._deltaS2_U_from_overlaps(nstate, *self._deltaS2_U_overlaps())
+
     def deltaS2(self):
         ds2 = []
+        if self.type_u:
+            sba_oo, sba_vo = self._deltaS2_U_overlaps()
+            for nstate in range(self.nstates):
+                ds2.append(self._deltaS2_U_from_overlaps(nstate, sba_oo, sba_vo) - self.no + 1.0)  # U
+            return np.asarray(np.real_if_close(ds2), dtype=float)
+
         for nstate in range(self.nstates):
             value = _asnumpy(self.v[:, nstate])
             x_cv, _, _, x_oo = self._split_analysis_vectors(value)
             if self.SA == 0 and not self.type_u:
                 dp_ab = np.sum(x_cv * x_cv) - np.sum(x_oo * x_oo) + np.sum(np.diag(x_oo)) ** 2
                 ds2.append(-2.0 * self.ground_s + 1.0 + dp_ab)  # RO
-            elif self.type_u:
-                ds2.append(self.deltaS2_U(nstate) - self.no + 1.0)  # U
             else:
                 ds2.append(np.nan)
         return np.asarray(np.real_if_close(ds2), dtype=float)
