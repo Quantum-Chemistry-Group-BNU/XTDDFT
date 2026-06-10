@@ -14,6 +14,7 @@ from .base import (
     XTDDFT_base,
     _ao2mo_full_gamma,
     _build_initial_guess_from_gaps,
+    _df_ao2mo_pbc,
     _get_gamma_kpt,
     _get_hf_mo_fock,
     _get_j,
@@ -47,12 +48,10 @@ def add_hf_a_a2b(a_a2b, mf, orbo_a, orbv_b, nocc_a, nvir_b, hyb=1, omega=None):
         return a_a2b
 
     if _is_pbc_mf(mf):
-        kpt = _get_gamma_kpt(mf)
-        if omega is None or abs(omega) < 1e-14:
-            eri_mo = mf.with_df.ao2mo([orbo_a, orbo_a, orbv_b, orbv_b], kpt, compact=False)
-        else:
-            with mf.with_df.range_coulomb(omega) as rsh_df:
-                eri_mo = rsh_df.ao2mo([orbo_a, orbo_a, orbv_b, orbv_b], kpt, compact=False)
+        eri_mo = _df_ao2mo_pbc(
+            mf, [orbo_a, orbo_a, orbv_b, orbv_b],
+            omega=omega, compact=False,
+        )
     else:
         if omega is not None and abs(omega) >= 1e-14:
             raise NotImplementedError("Range-separated molecular HF exchange is not implemented in SF_TDA_up.")
@@ -93,7 +92,7 @@ def _convert_a2b_to_cv_co_ov_oo(amat, nc, no, nv):
 
 class XSF_TDA_down(XTDDFT_base): # just for ROKS
     def __init__(self, mf, method, davidson=True, SA = None, davidson_backend="cpu",
-                 collinear_samples=60):
+                 collinear_samples=60, df_cache=None):
         """SA=0: SF-TDA
            SA=1: only add diagonal block for dA
            SA=2: add all dA except for OO block
@@ -102,7 +101,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         davidson_backend = davidson_backend.lower()
         if davidson_backend not in ("cpu", "gpu", "auto"):
             raise ValueError("davidson_backend must be 'cpu', 'gpu', or 'auto'")
-        super().__init__(mf, method, davidson=davidson)
+        super().__init__(mf, method, davidson=davidson, df_cache=df_cache)
         logger.info("XSF_TDA_down method=0 ALDA0, method=1 multicollinear")
         self.isf = -1
         self.type_u = _asnumpy(self.mf.mo_coeff).ndim == 3

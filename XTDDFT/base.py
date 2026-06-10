@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from types import SimpleNamespace
 import numpy as np
 from pyscf import ao2mo, lib, scf
@@ -7,6 +8,10 @@ from pyscf.pbc.dft import numint as pbc_numint
 
 from ..utils.backend import backend, contract, require_cupy, xp, _asarray, _asnumpy, set_backend
 from ..utils.unit import ha2eV
+from .df_cderi_cache import (
+    normalize_df_cderi_cache_config,
+    prepare_pbc_gamma_df_cderi_cache,
+)
 
 try:
     from loguru import logger
@@ -221,7 +226,7 @@ def _get_gamma_kpt(mf):
         raise NotImplementedError("XTDDFT currently supports molecular and Gamma-point PBC calculations only.")
     return kpt
 
-def _ensure_gamma_df(mf):
+def _ensure_gamma_df(mf, prepare_cache=True):
     """Select gpu4pyscf's real Gamma-point GDF path before CDERI is built."""
     _get_gamma_kpt(mf)
     with_df = getattr(mf, "with_df", None)
@@ -236,6 +241,63 @@ def _ensure_gamma_df(mf):
         )
         with_df.reset(mf.cell)
         with_df.is_gamma_point = True
+    if prepare_cache:
+        _prepare_pbc_gamma_df_cache(mf)
+
+def _is_gpu4pyscf_df(with_df):
+    return with_df is not None and with_df.__class__.__module__.startswith("gpu4pyscf")
+
+def _get_df_cache_config(mf):
+    return getattr(mf, "_xtddft_df_cderi_cache_config", None)
+
+def _set_df_cache_config_on_mf(mf, df_cache):
+    if df_cache is None and hasattr(mf, "_xtddft_df_cderi_cache_config"):
+        return getattr(mf, "_xtddft_df_cderi_cache_config")
+    config = normalize_df_cderi_cache_config(df_cache)
+    setattr(mf, "_xtddft_df_cderi_cache_config", config)
+    return config
+
+def _prepare_pbc_gamma_df_cache(mf, omega=None):
+    config = _get_df_cache_config(mf)
+    if config is None or getattr(config, "mode", "off") == "off":
+        return None
+    if not _is_pbc_mf(mf):
+        return None
+    with_df = getattr(mf, "with_df", None)
+    if not _is_gpu4pyscf_df(with_df):
+        return None
+    if not getattr(with_df, "is_gamma_point", False):
+        return None
+    actual_omega = getattr(with_df, "_omega", 0.0) if omega is None else omega
+    return prepare_pbc_gamma_df_cderi_cache(with_df, config, omega=actual_omega)
+
+@contextmanager
+def _cached_range_coulomb(with_df, omega, df_cache_config=None):
+    with with_df.range_coulomb(omega) as rsh_df:
+        if df_cache_config is not None and getattr(df_cache_config, "mode", "off") != "off":
+            try:
+                mf_like = SimpleNamespace(cell=getattr(with_df, "cell", None), with_df=rsh_df)
+                setattr(mf_like, "_xtddft_df_cderi_cache_config", df_cache_config)
+                rsh_df.is_gamma_point = True
+                _prepare_pbc_gamma_df_cache(mf_like, omega=getattr(rsh_df, "_omega", omega))
+            except AttributeError:
+                pass
+        yield rsh_df
+
+def _df_ao2mo_pbc(mf, mo_coeffs, omega=None, compact=False):
+    kpt = _get_gamma_kpt(mf)
+    if omega is not None and abs(omega) >= 1e-14:
+        _ensure_gamma_df(mf, prepare_cache=False)
+        with _cached_range_coulomb(mf.with_df, omega, _get_df_cache_config(mf)) as rsh_df:
+            try:
+                return rsh_df.ao2mo(mo_coeffs, kpt, compact=compact)
+            except TypeError:
+                return rsh_df.ao2mo(mo_coeffs, [kpt] * 4, compact=compact)
+    _ensure_gamma_df(mf)
+    try:
+        return mf.with_df.ao2mo(mo_coeffs, kpt, compact=compact)
+    except TypeError:
+        return mf.with_df.ao2mo(mo_coeffs, [kpt] * 4, compact=compact)
 
 def _get_veff_gamma(mf, dm):
     _ensure_gamma_df(mf)
@@ -312,12 +374,7 @@ def _ao2mo_full_gamma(mf, mo_coeff):
     mo_coeff = _asnumpy(mo_coeff)
     nmo = mo_coeff.shape[1]
     if _is_pbc_mf(mf):
-        _ensure_gamma_df(mf)
-        kpt = _get_gamma_kpt(mf)
-        try:
-            eri = mf.with_df.ao2mo([mo_coeff] * 4, kpt, compact=False)
-        except TypeError:
-            eri = mf.with_df.ao2mo([mo_coeff] * 4, [kpt] * 4, compact=False)
+        eri = _df_ao2mo_pbc(mf, [mo_coeff] * 4, compact=False)
     else:
         eri = ao2mo.general(mf.mol, [mo_coeff] * 4, compact=False)
     return _asnumpy(eri).reshape(nmo, nmo, nmo, nmo)
@@ -370,8 +427,18 @@ def _get_k(mf, dm, hermi=0, omega=None):
     if omega is not None and abs(omega) > 1e-14:
         kwargs["omega"] = omega
     if _is_pbc_mf(mf):
-        _ensure_gamma_df(mf)
         dm = _asarray(dm)
+        with_df = getattr(mf, "with_df", None)
+        gamma_df = bool(getattr(with_df, "is_gamma_point", False))
+        if omega is not None and abs(omega) > 1e-14 and gamma_df:
+            _ensure_gamma_df(mf, prepare_cache=False)
+            with _cached_range_coulomb(with_df, omega, _get_df_cache_config(mf)) as rsh_df:
+                out = rsh_df.get_jk(
+                    dm, hermi=hermi, kpts=None, with_j=False, with_k=True,
+                    exxdiv=getattr(mf, "exxdiv", None),
+                )
+                return out[1] if isinstance(out, tuple) else out
+        _ensure_gamma_df(mf)
         try:
             return mf.get_k(mf.cell, dm, kpt=_get_gamma_kpt(mf), **kwargs)
         except (TypeError, AssertionError) as err:
@@ -679,8 +746,9 @@ def _run_davidson(mf, davidson_backend, vind, hdiag, x0, nroots,
     )
 
 class XTDDFT_base:
-    def __init__(self, mf, method, davidson=True):
+    def __init__(self, mf, method, davidson=True, df_cache=None):
         self.mf = backend.cast(mf)
+        self.df_cache_config = _set_df_cache_config_on_mf(self.mf, df_cache)
         self.method = method
         self.davidson = davidson
         self.ctx = _build_sf_context(self.mf)

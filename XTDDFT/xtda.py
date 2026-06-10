@@ -58,13 +58,13 @@ class XTDA(XTDDFT_base):
     """
 
     def __init__(self, mf, method=0, davidson=True, davidson_backend="cpu",
-                 so2st=False, dense_batch_size=64):
+                 so2st=False, dense_batch_size=64, df_cache=None):
         if method != 0:
             raise NotImplementedError("XTDA currently implements method=0 spin-conserving response only.")
         davidson_backend = davidson_backend.lower()
         if davidson_backend not in ("cpu", "gpu", "auto"):
             raise ValueError("davidson_backend must be 'cpu', 'gpu', or 'auto'")
-        super().__init__(mf, method, davidson=davidson)
+        super().__init__(mf, method, davidson=davidson, df_cache=df_cache)
         logger.info("XTDA spin-conserving TDA response")
         self.davidson_backend = "cpu" if davidson_backend == "auto" else davidson_backend
         self.so2st = so2st

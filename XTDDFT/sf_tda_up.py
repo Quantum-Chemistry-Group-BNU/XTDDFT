@@ -11,6 +11,7 @@ from .hxc_part import (
 from .base import (
     XTDDFT_base,
     _build_initial_guess_from_gaps,
+    _df_ao2mo_pbc,
     _get_gamma_kpt,
     _get_mo_fock,
     _is_pbc_mf,
@@ -41,12 +42,10 @@ def add_hf_a_b2a(a_b2a, mf, orbo_b, orbv_a, nc, nv, hyb=1, omega=None):
         return a_b2a
 
     if _is_pbc_mf(mf):
-        kpt = _get_gamma_kpt(mf)
-        if omega is None or abs(omega) < 1e-14:
-            eri_mo = mf.with_df.ao2mo([orbo_b, orbo_b, orbv_a, orbv_a], kpt, compact=False)
-        else:
-            with mf.with_df.range_coulomb(omega) as rsh_df:
-                eri_mo = rsh_df.ao2mo([orbo_b, orbo_b, orbv_a, orbv_a], kpt, compact=False)
+        eri_mo = _df_ao2mo_pbc(
+            mf, [orbo_b, orbo_b, orbv_a, orbv_a],
+            omega=omega, compact=False,
+        )
     else:
         if omega is not None and abs(omega) >= 1e-14:
             raise NotImplementedError("Range-separated molecular HF exchange is not implemented in SF_TDA_up.")
@@ -74,11 +73,11 @@ def _pair_hessian_block_b2a(occ_fock_b, vir_fock_a, tensor_block):
     ).reshape(nocc_b * nvir_a, nocc_b * nvir_a)
 
 class SF_TDA_up(XTDDFT_base): # just for ROKS
-    def __init__(self, mf, method, davidson=True, davidson_backend="cpu"):
+    def __init__(self, mf, method, davidson=True, davidson_backend="cpu", df_cache=None):
         davidson_backend = davidson_backend.lower()
         if davidson_backend not in ("cpu", "gpu", "auto"):
             raise ValueError("davidson_backend must be 'cpu', 'gpu', or 'auto'")
-        super().__init__(mf, method, davidson=davidson)
+        super().__init__(mf, method, davidson=davidson, df_cache=df_cache)
         logger.info("SF_TDA_up method=0 ALDA0, method=1 multicollinear")
         self.isf = 1
         self.davidson_backend = "cpu" if davidson_backend == "auto" else davidson_backend
