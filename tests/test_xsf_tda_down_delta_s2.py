@@ -106,6 +106,22 @@ class XsfTdaDownDeltaS2Test(unittest.TestCase):
         self.assertNotIn(" @ ", source)
         self.assertIn("contract(", source)
 
+    def test_delta_a_jk_response_batches_density_matrices(self):
+        method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
+        method.delta_a_jk_batch_size = 2
+        dm_hf = np.arange(5 * 2 * 2, dtype=float).reshape(5, 2, 2)
+        batch_sizes = []
+
+        def vresp_hf(batch):
+            batch_sizes.append(batch.shape[0])
+            return batch + 10.0, batch + 20.0
+
+        v1_j, v1_k = method._apply_delta_a_jk_response(vresp_hf, dm_hf)
+
+        self.assertEqual(batch_sizes, [2, 2, 1])
+        self.assertTrue(np.allclose(v1_j, dm_hf + 10.0))
+        self.assertTrue(np.allclose(v1_k, dm_hf + 20.0))
+
 
 if __name__ == "__main__":
     unittest.main()

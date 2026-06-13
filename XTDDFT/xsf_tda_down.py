@@ -92,7 +92,7 @@ def _convert_a2b_to_cv_co_ov_oo(amat, nc, no, nv):
 
 class XSF_TDA_down(XTDDFT_base): # just for ROKS
     def __init__(self, mf, method, davidson=True, SA = None, davidson_backend="cpu",
-                 collinear_samples=60, df_cache=None):
+                 collinear_samples=60, delta_a_jk_batch_size=None, df_cache=None):
         """SA=0: SF-TDA
            SA=1: only add diagonal block for dA
            SA=2: add all dA except for OO block
@@ -107,6 +107,9 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         self.type_u = _asnumpy(self.mf.mo_coeff).ndim == 3
         self.davidson_backend = "cpu" if davidson_backend == "auto" else davidson_backend
         self.collinear_samples = collinear_samples
+        if delta_a_jk_batch_size is not None and delta_a_jk_batch_size < 1:
+            raise ValueError("delta_a_jk_batch_size must be a positive integer or None")
+        self.delta_a_jk_batch_size = delta_a_jk_batch_size
         self.SA = (0 if self.type_u else 3) if SA is None else SA
         spin_mf = mf if hasattr(mf, "spin_square") else _as_cpu_mf(mf)
         _,dsp1 = spin_mf.spin_square()
@@ -624,6 +627,20 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
 
         return vind
 
+    def _apply_delta_a_jk_response(self, vresp_hf, dm_hf):
+        batch_size = self.delta_a_jk_batch_size
+        if batch_size is None or dm_hf.shape[0] <= batch_size:
+            return vresp_hf(dm_hf)
+
+        vj_blocks = []
+        vk_blocks = []
+        for start in range(0, dm_hf.shape[0], batch_size):
+            stop = min(start + batch_size, dm_hf.shape[0])
+            vj_block, vk_block = vresp_hf(dm_hf[start:stop])
+            vj_blocks.append(vj_block)
+            vk_blocks.append(vk_block)
+        return xp.concatenate(vj_blocks, axis=0), xp.concatenate(vk_blocks, axis=0)
+
     def gen_tda_operation_sf(self, foo=1.0, fglobal=1.0):
         nc, no, nv = self.nc, self.no, self.nv
         nvir = no + nv
@@ -745,7 +762,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
 
                 batch = cv1_mo.shape[0]
                 dm_hf = xp.concatenate([cv1_mo, co1_mo, ov1_mo, oo1_mo], axis=0)
-                v1_j, v1_k = vresp_hf(dm_hf)
+                v1_j, v1_k = self._apply_delta_a_jk_response(vresp_hf, dm_hf)
                 v1_cv_k = v1_k[:batch]
                 v1_co_j = v1_j[batch:2 * batch]
                 v1_co_k = v1_k[batch:2 * batch]

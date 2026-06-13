@@ -127,7 +127,7 @@ analyse_threshold = 0.1
 run_analyse = False
 analyse_delta_s2 = False
 save_results = True
-save_file = None
+save_file = f"utda_method{method}_spin_conserving_{'davidson' if davidson else 'dense'}_nstates{nstates}_results.npz"
 # ========================================================
 
 
