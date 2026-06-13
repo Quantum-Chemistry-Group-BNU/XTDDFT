@@ -957,6 +957,124 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         ints_mo = contract("xpq,pi,qj->xij", dip_ao, mo.conj(), mo)
         return np.asarray(ints_mo), ctx
 
+    def _checked_state_index(self, state):
+        nstates = min(self.nstates, _asnumpy(self.v).shape[1])
+        state = int(state)
+        if state < 0:
+            state += nstates
+        if state < 0 or state >= nstates:
+            raise IndexError(f"state index {state} out of range for {nstates} states")
+        return state
+
+    def _state_analysis_blocks(self, state):
+        state = self._checked_state_index(state)
+        return self._split_analysis_vectors(_asnumpy(self.v[:, state]))
+
+    def _spinflip_amplitude_matrix_u(self, state):
+        cv, co, ov, oo = self._state_analysis_blocks(state)
+        dtype = np.result_type(cv, co, ov, oo)
+        amps = np.zeros((self.nc + self.no, self.no + self.nv), dtype=dtype)
+        amps[:self.nc, self.no:] = cv
+        amps[:self.nc, :self.no] = co
+        amps[self.nc:, self.no:] = ov
+        amps[self.nc:, :self.no] = oo
+        return amps
+
+    def _transition_density_matrix_u(self, state_f, state_i):
+        ctx = self.ctx
+        occidx_a = _asnumpy(getattr(ctx, "occidx_a", np.arange(self.nc + self.no))).astype(int)
+        viridx_b = _asnumpy(getattr(ctx, "viridx_b", np.arange(self.no + self.nv))).astype(int)
+        mo_coeff = getattr(ctx, "mo_coeff", None)
+        if mo_coeff is not None:
+            mo_coeff = _asnumpy(mo_coeff)
+            nmo_a = int(mo_coeff[0].shape[1])
+            nmo_b = int(mo_coeff[1].shape[1])
+        else:
+            nmo_a = int(occidx_a.max() + 1) if occidx_a.size else self.nc + self.no
+            nmo_b = int(viridx_b.max() + 1) if viridx_b.size else self.no + self.nv
+
+        amp_f = self._spinflip_amplitude_matrix_u(state_f)
+        amp_i = self._spinflip_amplitude_matrix_u(state_i)
+        gamma = np.zeros((nmo_a + nmo_b, nmo_a + nmo_b), dtype=np.result_type(amp_f, amp_i))
+        gamma[np.ix_(occidx_a, occidx_a)] -= contract("ia,ja->ij", amp_f.conj(), amp_i)
+        beta = nmo_a
+        gamma[np.ix_(beta + viridx_b, beta + viridx_b)] += contract("ia,ib->ab", amp_f.conj(), amp_i)
+        return gamma
+
+    def _transition_density_matrix_r(self, state_f, state_i):
+        cv_f, co_f, ov_f, oo_f = self._state_analysis_blocks(state_f)
+        cv_i, co_i, ov_i, oo_i = self._state_analysis_blocks(state_i)
+        nmo = self.nc + self.no + self.nv
+        gamma = np.zeros(
+            (nmo, nmo),
+            dtype=np.result_type(cv_f, co_f, ov_f, oo_f, cv_i, co_i, ov_i, oo_i),
+        )
+        c = slice(0, self.nc)
+        o = slice(self.nc, self.nc + self.no)
+        v = slice(self.nc + self.no, nmo)
+        si = self.ground_s
+        if self.SA == 0:
+            factor1, factor2, factor3 = 1.0, 1.0, 0.0
+        else:
+            factor1 = math.sqrt((2 * si + 1) / (2 * si))
+            factor2 = math.sqrt((2 * si) / (2 * si - 1))
+            factor3 = 1.0 / math.sqrt(2 * si * (2 * si - 1))
+
+        cv_f = cv_f.conj()
+        co_f = co_f.conj()
+        ov_f = ov_f.conj()
+        oo_f = oo_f.conj()
+        tr_oo_f = np.trace(oo_f)
+        tr_oo_i = np.trace(oo_i)
+
+        gamma[v, v] += contract("ia,ib->ab", cv_f, cv_i)
+        gamma[c, c] -= contract("ia,ja->ij", cv_f, cv_i)
+        gamma[v, o] += factor1 * contract("ia,iv->av", cv_f, co_i)
+        gamma[v, o] += factor1 * contract("iu,ib->bu", co_f, cv_i)
+        gamma[c, o] -= factor1 * contract("ia,va->iv", cv_f, ov_i)
+        gamma[c, o] -= factor1 * contract("ua,ja->ju", ov_f, cv_i)
+        gamma[o, o] += contract("iu,iv->uv", co_f, co_i)
+        gamma[c, c] -= contract("iu,ju->ij", co_f, co_i)
+        gamma[c, o] -= factor2 * contract("iu,vu->iv", co_f, oo_i)
+        gamma[c, o] += factor3 * co_f * tr_oo_i
+        gamma[c, o] -= factor2 * contract("ut,jt->ju", oo_f, co_i)
+        gamma[c, o] += factor3 * tr_oo_f * co_i
+        gamma[v, v] += contract("ua,ub->ab", ov_f, ov_i)
+        gamma[o, o] -= contract("ua,va->uv", ov_f, ov_i)
+        gamma[v, o] += factor2 * contract("ua,uw->aw", ov_f, oo_i)
+        gamma[o, v] -= factor3 * ov_f * tr_oo_i
+        gamma[v, o] += factor2 * contract("ut,ub->bt", oo_f, ov_i)
+        gamma[o, v] -= factor3 * tr_oo_f * ov_i
+        gamma[o, o] += contract("ut,uv->tv", oo_f, oo_i)
+        gamma[o, o] -= contract("ut,wt->uw", oo_f, oo_i)
+        return gamma
+
+    def transition_density_matrix(self, state_f=1, state_i=0):
+        """Spin-free transition density matrix for state_f <- state_i.
+
+        Restricted references return the MO order C|O|V.  Unrestricted
+        references return a block-diagonal spin-MO matrix in alpha|beta order.
+        """
+        if self.type_u:
+            return self._transition_density_matrix_u(state_f, state_i)
+        return self._transition_density_matrix_r(state_f, state_i)
+
+    def nto(self, state_f=1, state_i=0, nroots=None):
+        """Natural transition orbitals from the spin-free transition density.
+
+        Returns singular values, hole NTOs, and particle NTOs.  The columns of
+        the NTO matrices are ordered by descending singular value.
+        """
+        gamma = self.transition_density_matrix(state_f, state_i)
+        particles, singular_values, holes_h = np.linalg.svd(gamma, full_matrices=False)
+        holes = holes_h.conj().T
+        if nroots is not None:
+            nroots = min(int(nroots), singular_values.size)
+            singular_values = singular_values[:nroots]
+            holes = holes[:, :nroots]
+            particles = particles[:, :nroots]
+        return singular_values, holes, particles
+
     def _transition_dipole_matrix_u(self):
         ints_aa, ints_bb, ctx = self._dipole_mo_integrals()
         occ_a = _asnumpy(ctx.occidx_a)
@@ -979,8 +1097,8 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         for i, c0 in enumerate(amps):
             for j, c1 in enumerate(amps):
                 tdm[i, j] = (
-                    np.einsum("ia,xab,ib->x", c0, r_vv_b, c1, optimize=True)
-                    - np.einsum("ia,xij,ja->x", c0, r_oo_a, c1, optimize=True)
+                    contract("ia,xab,ib->x", c0, r_vv_b, c1)
+                    - contract("ia,xij,ja->x", c0, r_oo_a, c1)
                 )
         return tdm
 
