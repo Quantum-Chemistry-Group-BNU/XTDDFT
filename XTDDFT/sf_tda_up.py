@@ -81,6 +81,7 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
         logger.info("SF_TDA_up method=0 ALDA0, method=1 multicollinear")
         self.isf = 1
         self.davidson_backend = "cpu" if davidson_backend == "auto" else davidson_backend
+        self.type_u = True
 
     def _result_method_label(self):
         return {0: "ALDA0", 1: "MCOL"}.get(self.method, f"method{self.method}")
@@ -329,6 +330,63 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
                     - np.einsum("ia,xij,ja->x", c0, r_oo_b, c1, optimize=True)
                 )
         return tdm
+
+    def _checked_state_index(self, state):
+        nstates = min(self.nstates, _asnumpy(self.v).shape[1])
+        state = int(state)
+        if state < 0:
+            state += nstates
+        if state < 0 or state >= nstates:
+            raise IndexError(f"state index {state} out of range for {nstates} states")
+        return state
+
+    def _state_amplitude(self, state):
+        state = self._checked_state_index(state)
+        return _asnumpy(self.v[:, state]).reshape(self.nc, self.nv)
+
+    def _empty_transition_density_matrix(self, dtype=float):
+        ctx = self.ctx
+        mo_coeff = _asnumpy(ctx.mo_coeff)
+        nmo_a = int(mo_coeff[0].shape[1])
+        nmo_b = int(mo_coeff[1].shape[1])
+        return np.zeros((nmo_a + nmo_b, nmo_a + nmo_b), dtype=dtype)
+
+    def transition_density_matrix(self, state_f=0, state_i=0):
+        """Spin-MO transition density matrix for S+1 SF-TDA-UP states.
+
+        ``state_i=None`` or ``state_f=None`` denotes the reference determinant.
+        The spin-independent one-body operator does not connect the reference
+        to SF-UP states, so those transition densities are zero.
+        """
+        if state_f is None and state_i is None:
+            raise ValueError("At least one of state_f/state_i must be an excited-state index")
+        if state_f is None or state_i is None:
+            return self._empty_transition_density_matrix()
+
+        amp_f = self._state_amplitude(state_f)
+        amp_i = self._state_amplitude(state_i)
+        gamma = self._empty_transition_density_matrix(dtype=np.result_type(amp_f, amp_i))
+        ctx = self.ctx
+        vir_a = _asnumpy(ctx.viridx_a).astype(int)
+        occ_b = _asnumpy(ctx.occidx_b).astype(int)
+        nmo_a = int(_asnumpy(ctx.mo_coeff)[0].shape[1])
+
+        gamma[np.ix_(vir_a, vir_a)] += contract("ia,ib->ab", amp_f.conj(), amp_i)
+        beta = nmo_a
+        gamma[np.ix_(beta + occ_b, beta + occ_b)] -= contract("ia,ja->ij", amp_f.conj(), amp_i)
+        return gamma
+
+    def nto(self, state_f=0, state_i=0, nroots=None):
+        """Natural transition orbitals from the SF-TDA-UP transition density."""
+        gamma = self.transition_density_matrix(state_f=state_f, state_i=state_i)
+        particles, singular_values, holes_h = np.linalg.svd(gamma, full_matrices=False)
+        holes = holes_h.conj().T
+        if nroots is not None:
+            nroots = min(int(nroots), singular_values.size)
+            singular_values = singular_values[:nroots]
+            holes = holes[:, :nroots]
+            particles = particles[:, :nroots]
+        return singular_values, holes, particles
 
     def calculate_TDM(self):
         tdm = self.transition_dipole_matrix()

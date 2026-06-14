@@ -580,17 +580,50 @@ class XTDA(XTDDFT_base):
         ints_mo, _ints_bb, _ctx, mf = self._dipole_mo_blocks()
         vectors = _asnumpy(self.v)
         nstates = min(self.nstates, vectors.shape[1])
-        tdm = np.zeros((nstates, nstates, 3))
-        for i in range(nstates):
-            for j in range(nstates):
-                gamma = self.transition_density_matrix(i, j)
-                tdm[i, j] = contract("mn,xmn->x", gamma, ints_mo)
+        c = slice(0, self.nc)
+        o = slice(self.nc, self.nc + self.no)
+        v = slice(self.nc + self.no, self.nc + self.no + self.nv)
+        rcc = ints_mo[:, c, c]
+        roo = ints_mo[:, o, o]
+        rvv = ints_mo[:, v, v]
+        rco = ints_mo[:, c, o]
+        roc = ints_mo[:, o, c]
+        rov = ints_mo[:, o, v]
+        rvo = ints_mo[:, v, o]
+
+        cv0, co0, ov0, cv1 = self._split_analysis_vectors(vectors[:, :nstates])
+        cv0_f = cv0.conj()
+        co0_f = co0.conj()
+        ov0_f = ov0.conj()
+        cv1_f = cv1.conj()
+        si = _system(self.mf).spin / 2.0
+        eta = np.sqrt((si + 1.0) / (2.0 * si)) if abs(si) > 1.0e-14 else 0.0
+        factor = 1.0 / np.sqrt(2.0)
+
+        tdm = (
+            contract("sia,xab,tib->stx", cv0_f, rvv, cv0)
+            - contract("sia,xji,tja->stx", cv0_f, rcc, cv0)
+            + contract("siu,xuv,tiv->stx", co0_f, roo, co0)
+            - contract("siu,xji,tju->stx", co0_f, rcc, co0)
+            + contract("sua,xab,tub->stx", ov0_f, rvv, ov0)
+            - contract("sva,xuv,tua->stx", ov0_f, roo, ov0)
+            + contract("sia,xab,tib->stx", cv1_f, rvv, cv1)
+            - contract("sia,xji,tja->stx", cv1_f, rcc, cv1)
+            + factor * contract("sia,xau,tiu->stx", cv0_f, rvo, co0)
+            + factor * contract("siu,xua,tia->stx", co0_f, rov, cv0)
+            - factor * contract("sia,xui,tua->stx", cv0_f, roc, ov0)
+            - factor * contract("sua,xiu,tia->stx", ov0_f, rco, cv0)
+            + eta * contract("siu,xub,tib->stx", co0_f, rov, cv1)
+            + eta * contract("sib,xbu,tiu->stx", cv1_f, rvo, co0)
+            + eta * contract("sua,xiu,tia->stx", ov0_f, rco, cv1)
+            + eta * contract("sia,xui,tua->stx", cv1_f, roc, ov0)
+        )
 
         if include_ground_dipole:
             gs = _molecular_ground_dipole(mf)
             for i in range(nstates):
                 tdm[i, i] += gs
-        return tdm
+        return np.asarray(tdm)
 
     def transition_dipole_matrix(self, include_ground_dipole=False):
         """Excited-state to excited-state transition dipole matrix in a.u."""
