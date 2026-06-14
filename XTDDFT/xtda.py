@@ -39,22 +39,28 @@ def _order_pyscf2my(nc, no, nv):
 
 
 def _so2st(eigvec, nc, no, nv):
+    """Convert CVa|OVa|COb|CVb vectors to CV(0)|CO(0)|OV(0)|CV(1)."""
     cva = eigvec[:nc * nv]
     ova = eigvec[nc * nv:(nc + no) * nv]
     cob = eigvec[(nc + no) * nv:(nc + no) * nv + nc * no]
     cvb = eigvec[(nc + no) * nv + nc * no:]
     cv0 = np.sqrt(0.5) * (cva + cvb)
     cv1 = np.sqrt(0.5) * (cva - cvb)
-    return np.vstack([cv0, ova, cob, cv1])
+    return np.vstack([cv0, cob, ova, cv1])
+
+
+def _so2st_matrix(nc, no, nv):
+    dim = 2 * nc * nv + nc * no + no * nv
+    return _so2st(np.eye(dim), nc, no, nv)
 
 
 class XTDA(XTDDFT_base):
     """Spin-conserving open-shell TDA.
 
-    The working vector follows PySCF TDA order during Davidson:
-    alpha occupied-to-virtual excitations followed by beta excitations.  Stored
-    eigenvectors are reordered to CVa|OVa|COb|CVb, matching the reference XTDA
-    analysis order.
+    Davidson still uses PySCF alpha|beta working vectors internally.  For
+    restricted open-shell references, stored eigenvectors and post-processing
+    use the spin-tensor order CV(0)|CO(0)|OV(0)|CV(1).  Unrestricted references
+    keep the spin-orbital order CVa|OVa|COb|CVb.
     """
 
     def __init__(self, mf, method=0, davidson=True, davidson_backend="cpu",
@@ -71,7 +77,6 @@ class XTDA(XTDDFT_base):
         self.dense_batch_size = dense_batch_size
         self.order = _order_pyscf2my(self.nc, self.no, self.nv)
         self._raw_v = None
-        self._tdm_v = None
         self.type_u = _asnumpy(self.mf.mo_coeff).ndim == 3
         self.dS2 = None
 
@@ -253,10 +258,11 @@ class XTDA(XTDDFT_base):
         self.e = xp.asarray(e)
         raw_v = xp.asarray(_asnumpy(x1)).T
         self._raw_v = raw_v
-        self.v = raw_v[self.order]
-        self._tdm_v = self.v
-        if self.so2st:
-            self.v = xp.asarray(_so2st(_asnumpy(self.v), self.nc, self.no, self.nv))
+        ordered_v = raw_v[self.order]
+        if self.type_u:
+            self.v = ordered_v
+        else:
+            self.v = xp.asarray(_so2st(_asnumpy(ordered_v), self.nc, self.no, self.nv))
         logger.info("XTDA Davidson converged: {}", converged)
         return self.e, self.v
 
@@ -276,7 +282,12 @@ class XTDA(XTDDFT_base):
             amat = np.vstack(cols).T
             order = _order_pyscf2my(ctx.nc, ctx.no, ctx.nv)
             amat = amat[np.ix_(order, order)]
-            self.A = np.asarray((amat + amat.T) * 0.5)
+            amat = np.asarray((amat + amat.T) * 0.5)
+            if not self.type_u:
+                transform = _so2st_matrix(ctx.nc, ctx.no, ctx.nv)
+                amat = transform @ amat @ transform.T
+                amat = np.asarray((amat + amat.T) * 0.5)
+            self.A = amat
         finally:
             set_backend(mode)
         logger.info("XTDA dense A dimension: {}", self.A.shape[0])
@@ -293,31 +304,35 @@ class XTDA(XTDDFT_base):
             e, v = np.linalg.eigh(amat)
             self.e = e[:nstates]
             self.v = v[:, :nstates]
-        self._tdm_v = self.v
-        if self.so2st:
-            self.v = xp.asarray(_so2st(_asnumpy(self.v), self.nc, self.no, self.nv))
         return self.e, self.v
 
     def _split_analysis_vectors(self, data=None):
         data = _asnumpy(self.v if data is None else data)
         dim1 = self.nc * self.nv
-        dim2 = dim1 + self.no * self.nv
-        dim3 = dim2 + self.nc * self.no
+        if self.type_u:
+            dim2 = dim1 + self.no * self.nv
+            dim3 = dim2 + self.nc * self.no
+            return (
+                data[:dim1].T.reshape(data.shape[1], self.nc, self.nv),
+                data[dim1:dim2].T.reshape(data.shape[1], self.no, self.nv),
+                data[dim2:dim3].T.reshape(data.shape[1], self.nc, self.no),
+                data[dim3:].T.reshape(data.shape[1], self.nc, self.nv),
+            )
+        dim2 = dim1 + self.nc * self.no
+        dim3 = dim2 + self.no * self.nv
         return (
             data[:dim1].T.reshape(data.shape[1], self.nc, self.nv),
-            data[dim1:dim2].T.reshape(data.shape[1], self.no, self.nv),
-            data[dim2:dim3].T.reshape(data.shape[1], self.nc, self.no),
+            data[dim1:dim2].T.reshape(data.shape[1], self.nc, self.no),
+            data[dim2:dim3].T.reshape(data.shape[1], self.no, self.nv),
             data[dim3:].T.reshape(data.shape[1], self.nc, self.nv),
         )
 
     def deltaS2(self):
-        cv_a, ov_a, co_b, cv_b = self._split_analysis_vectors()
         if not self.type_u:
-            return (
-                np.einsum("nij,nij->n", cv_a, cv_a)
-                + np.einsum("nij,nij->n", cv_b, cv_b)
-                - 2.0 * np.einsum("nij,nij->n", cv_a, cv_b)
-            )
+            _cv0, _co0, _ov0, cv1 = self._split_analysis_vectors()
+            return 2.0 * np.einsum("nij,nij->n", cv1, cv1)
+
+        cv_a, ov_a, co_b, cv_b = self._split_analysis_vectors()
 
         mf = _as_cpu_mf(self.mf)
         ctx = _as_cpu_ctx(mf, self.ctx)
@@ -355,15 +370,6 @@ class XTDA(XTDDFT_base):
         )
         return np.real_if_close(ds2)
 
-    def _spin_orbital_vectors(self):
-        if self._tdm_v is not None:
-            return _asnumpy(self._tdm_v)
-        if self.so2st:
-            raise NotImplementedError(
-                "Transition dipoles require spin-orbital amplitudes; rerun XTDA with so2st=False."
-            )
-        return _asnumpy(self.v)
-
     def _dipole_mo_blocks(self):
         mf = _as_cpu_mf(self.mf)
         ctx = _as_cpu_ctx(mf, self.ctx)
@@ -373,9 +379,166 @@ class XTDA(XTDDFT_base):
         ints_bb = np.asarray(contract("xpq,pi,qj->xij", dip_ao, mo_coeff[1].conj(), mo_coeff[1]))
         return ints_aa, ints_bb, ctx, mf
 
+    def _checked_state_index(self, state):
+        nstates = min(self.nstates, _asnumpy(self.v).shape[1])
+        state = int(state)
+        if state < 0:
+            state += nstates
+        if state < 0 or state >= nstates:
+            raise IndexError(f"state index {state} out of range for {nstates} states")
+        return state
+
+    def _state_blocks(self, state):
+        state = self._checked_state_index(state)
+        return self._split_analysis_vectors(_asnumpy(self.v[:, state:state + 1]))
+
+    def _transition_density_matrix_restricted_ground(self, state):
+        cv0, co0, ov0, _cv1 = [block[0] for block in self._state_blocks(state)]
+        nmo = self.nc + self.no + self.nv
+        gamma = np.zeros((nmo, nmo), dtype=np.result_type(cv0, co0, ov0))
+        c = slice(0, self.nc)
+        o = slice(self.nc, self.nc + self.no)
+        v = slice(self.nc + self.no, nmo)
+        gamma[v, c] += np.sqrt(2.0) * cv0.conj().T
+        gamma[o, c] += co0.conj().T
+        gamma[v, o] += ov0.conj().T
+        return gamma
+
+    def _transition_density_matrix_restricted_excited(self, state_f, state_i):
+        cv0_f, co0_f, ov0_f, cv1_f = [block[0].conj() for block in self._state_blocks(state_f)]
+        cv0_i, co0_i, ov0_i, cv1_i = [block[0] for block in self._state_blocks(state_i)]
+        nmo = self.nc + self.no + self.nv
+        gamma = np.zeros(
+            (nmo, nmo),
+            dtype=np.result_type(cv0_f, co0_f, ov0_f, cv1_f, cv0_i, co0_i, ov0_i, cv1_i),
+        )
+        c = slice(0, self.nc)
+        o = slice(self.nc, self.nc + self.no)
+        v = slice(self.nc + self.no, nmo)
+        si = _system(self.mf).spin / 2.0
+        eta = np.sqrt((si + 1.0) / (2.0 * si)) if abs(si) > 1.0e-14 else 0.0
+
+        gamma[v, v] += contract("ia,ib->ab", cv0_f, cv0_i)
+        gamma[c, c] -= contract("ia,ja->ji", cv0_f, cv0_i)
+        gamma[o, o] += contract("iu,iv->uv", co0_f, co0_i)
+        gamma[c, c] -= contract("iu,ju->ji", co0_f, co0_i)
+        gamma[v, v] += contract("ua,ub->ab", ov0_f, ov0_i)
+        gamma[o, o] -= contract("va,ua->uv", ov0_f, ov0_i)
+        gamma[v, v] += contract("ia,ib->ab", cv1_f, cv1_i)
+        gamma[c, c] -= contract("ia,ja->ji", cv1_f, cv1_i)
+
+        factor = 1.0 / np.sqrt(2.0)
+        gamma[v, o] += factor * contract("ia,iu->au", cv0_f, co0_i)
+        gamma[o, v] += factor * contract("iu,ia->ua", co0_f, cv0_i)
+        gamma[o, c] -= factor * contract("ia,ua->ui", cv0_f, ov0_i)
+        gamma[c, o] -= factor * contract("ua,ia->iu", ov0_f, cv0_i)
+        gamma[o, v] += eta * contract("iu,ib->ub", co0_f, cv1_i)
+        gamma[v, o] += eta * contract("ib,iu->bu", cv1_f, co0_i)
+        gamma[c, o] += eta * contract("ua,ia->iu", ov0_f, cv1_i)
+        gamma[o, c] += eta * contract("ia,ua->ui", cv1_f, ov0_i)
+        return gamma
+
+    def _unrestricted_ground_amplitudes(self, state):
+        cv_a, ov_a, co_b, cv_b = [block[0] for block in self._state_blocks(state)]
+        dtype = np.result_type(cv_a, ov_a, co_b, cv_b)
+        amp_a = np.zeros((self.nc + self.no, self.nv), dtype=dtype)
+        amp_b = np.zeros((self.nc, self.no + self.nv), dtype=dtype)
+        amp_a[:self.nc, :] = cv_a
+        amp_a[self.nc:, :] = ov_a
+        amp_b[:, :self.no] = co_b
+        amp_b[:, self.no:] = cv_b
+        return amp_a, amp_b
+
+    def _transition_density_matrix_unrestricted_ground(self, state):
+        amp_a, amp_b = self._unrestricted_ground_amplitudes(state)
+        ctx = self.ctx
+        occ_a = _asnumpy(ctx.occidx_a).astype(int)
+        vir_a = _asnumpy(ctx.viridx_a).astype(int)
+        occ_b = _asnumpy(ctx.occidx_b).astype(int)
+        vir_b = _asnumpy(ctx.viridx_b).astype(int)
+        mo_coeff = _asnumpy(ctx.mo_coeff)
+        nmo_a = int(mo_coeff[0].shape[1])
+        nmo_b = int(mo_coeff[1].shape[1])
+        gamma = np.zeros((nmo_a + nmo_b, nmo_a + nmo_b), dtype=np.result_type(amp_a, amp_b))
+        gamma[np.ix_(vir_a, occ_a)] += amp_a.conj().T
+        beta = nmo_a
+        gamma[np.ix_(beta + vir_b, beta + occ_b)] += amp_b.conj().T
+        return gamma
+
+    def _transition_density_matrix_unrestricted_excited(self, state_f, state_i):
+        amp_a_f, amp_b_f = self._unrestricted_ground_amplitudes(state_f)
+        amp_a_i, amp_b_i = self._unrestricted_ground_amplitudes(state_i)
+        ctx = self.ctx
+        occ_a = _asnumpy(ctx.occidx_a).astype(int)
+        vir_a = _asnumpy(ctx.viridx_a).astype(int)
+        occ_b = _asnumpy(ctx.occidx_b).astype(int)
+        vir_b = _asnumpy(ctx.viridx_b).astype(int)
+        mo_coeff = _asnumpy(ctx.mo_coeff)
+        nmo_a = int(mo_coeff[0].shape[1])
+        nmo_b = int(mo_coeff[1].shape[1])
+        gamma = np.zeros(
+            (nmo_a + nmo_b, nmo_a + nmo_b),
+            dtype=np.result_type(amp_a_f, amp_b_f, amp_a_i, amp_b_i),
+        )
+        gamma[np.ix_(occ_a, occ_a)] -= contract("ia,ja->ij", amp_a_f.conj(), amp_a_i)
+        gamma[np.ix_(vir_a, vir_a)] += contract("ia,ib->ab", amp_a_f.conj(), amp_a_i)
+        beta = nmo_a
+        gamma[np.ix_(beta + occ_b, beta + occ_b)] -= contract("ia,ja->ij", amp_b_f.conj(), amp_b_i)
+        gamma[np.ix_(beta + vir_b, beta + vir_b)] += contract("ia,ib->ab", amp_b_f.conj(), amp_b_i)
+        return gamma
+
+    def transition_density_matrix(self, state_f=0, state_i=None):
+        """Spin-free transition density matrix for XTDA NTO analysis.
+
+        ``state_i=None`` denotes the ROHF/UKS reference determinant.  Restricted
+        references use C|O|V spatial-MO order and spin-tensor amplitudes.
+        Unrestricted references use block spin-MO order alpha|beta.
+        """
+        if state_f is None and state_i is None:
+            raise ValueError("At least one of state_f/state_i must be an excited-state index")
+        if self.type_u:
+            if state_i is None:
+                return self._transition_density_matrix_unrestricted_ground(state_f)
+            if state_f is None:
+                return self._transition_density_matrix_unrestricted_ground(state_i).conj().T
+            return self._transition_density_matrix_unrestricted_excited(state_f, state_i)
+        if state_i is None:
+            return self._transition_density_matrix_restricted_ground(state_f)
+        if state_f is None:
+            return self._transition_density_matrix_restricted_ground(state_i).conj().T
+        return self._transition_density_matrix_restricted_excited(state_f, state_i)
+
+    def nto(self, state_f=0, state_i=None, nroots=None):
+        """Natural transition orbitals from the XTDA transition density."""
+        gamma = self.transition_density_matrix(state_f=state_f, state_i=state_i)
+        particles, singular_values, holes_h = np.linalg.svd(gamma, full_matrices=False)
+        holes = holes_h.conj().T
+        if nroots is not None:
+            nroots = min(int(nroots), singular_values.size)
+            singular_values = singular_values[:nroots]
+            holes = holes[:, :nroots]
+            particles = particles[:, :nroots]
+        return singular_values, holes, particles
+
     def transition_dipoles_ground(self):
         """Ground-state to excited-state transition dipoles in a.u."""
         ints_aa, ints_bb, ctx, _mf = self._dipole_mo_blocks()
+        nstates = min(self.nstates, _asnumpy(self.v).shape[1])
+
+        if not self.type_u:
+            c = slice(0, self.nc)
+            o = slice(self.nc, self.nc + self.no)
+            v = slice(self.nc + self.no, self.nc + self.no + self.nv)
+            cv0, co0, ov0, _cv1 = self._split_analysis_vectors(_asnumpy(self.v)[:, :nstates])
+            tdm = np.zeros((nstates, 3))
+            for istate in range(nstates):
+                tdm[istate] = (
+                    np.sqrt(2.0) * contract("xai,ia->x", ints_aa[:, v, c], cv0[istate])
+                    + contract("xiu,iu->x", ints_aa[:, c, o], co0[istate])
+                    + contract("xua,ua->x", ints_aa[:, o, v], ov0[istate])
+                )
+            return tdm
+
         occ_a = _asnumpy(ctx.occidx_a)
         vir_a = _asnumpy(ctx.viridx_a)
         occ_b = _asnumpy(ctx.occidx_b)
@@ -389,8 +552,8 @@ class XTDA(XTDDFT_base):
         r_cv_b = r_ov_b[:, :, self.no:].reshape(3, -1)
         dip_ordered = np.hstack([r_cv_a, r_ov_a, r_co_b, r_cv_b])
 
-        vectors = self._spin_orbital_vectors()
-        nstates = min(self.nstates, vectors.shape[1])
+        vectors = _asnumpy(self.v)
+        nstates = min(nstates, vectors.shape[1])
         return np.einsum("xd,ds->sx", dip_ordered, vectors[:, :nstates], optimize=True)
 
     def osc_str(self):
@@ -413,8 +576,27 @@ class XTDA(XTDDFT_base):
             amps_b.append(xb)
         return amps_a, amps_b
 
+    def _transition_dipole_matrix_restricted(self, include_ground_dipole=False):
+        ints_mo, _ints_bb, _ctx, mf = self._dipole_mo_blocks()
+        vectors = _asnumpy(self.v)
+        nstates = min(self.nstates, vectors.shape[1])
+        tdm = np.zeros((nstates, nstates, 3))
+        for i in range(nstates):
+            for j in range(nstates):
+                gamma = self.transition_density_matrix(i, j)
+                tdm[i, j] = contract("mn,xmn->x", gamma, ints_mo)
+
+        if include_ground_dipole:
+            gs = _molecular_ground_dipole(mf)
+            for i in range(nstates):
+                tdm[i, i] += gs
+        return tdm
+
     def transition_dipole_matrix(self, include_ground_dipole=False):
         """Excited-state to excited-state transition dipole matrix in a.u."""
+        if not self.type_u:
+            return self._transition_dipole_matrix_restricted(include_ground_dipole=include_ground_dipole)
+
         ints_aa, ints_bb, ctx, mf = self._dipole_mo_blocks()
         occ_a = _asnumpy(ctx.occidx_a)
         vir_a = _asnumpy(ctx.viridx_a)
@@ -425,7 +607,7 @@ class XTDA(XTDDFT_base):
         r_oo_b = ints_bb[:, occ_b][:, :, occ_b]
         r_vv_b = ints_bb[:, vir_b][:, :, vir_b]
 
-        vectors = self._spin_orbital_vectors()
+        vectors = _asnumpy(self.v)
         nstates = min(self.nstates, vectors.shape[1])
         amps_a, amps_b = self._full_spin_conserving_amplitudes(vectors[:, :nstates])
         tdm = np.zeros((nstates, nstates, 3))
@@ -485,25 +667,34 @@ class XTDA(XTDDFT_base):
 
     def analyse(self, threshold=0.1, compute_s2=True):
         energies = _asnumpy(self.e) * ha2eV
-        cv_a, ov_a, co_b, cv_b = self._split_analysis_vectors()
+        block0, block1, block2, block3 = self._split_analysis_vectors()
         self.dS2 = _asnumpy(self.deltaS2()) if compute_s2 else None
-        for istate in range(min(self.nstates, cv_a.shape[0])):
+        for istate in range(min(self.nstates, block0.shape[0])):
             ds2_text = f"{self.dS2[istate]:8.4f}" if self.dS2 is not None else "     n/a"
             print(
                 f"D{istate + 1}    w:{energies[istate]:10.4f} eV"
                 f"    d<S^2>:{ds2_text}"
             )
-            for c, v in zip(*np.where(abs(cv_a[istate]) > threshold)):
-                amp = cv_a[istate, c, v]
-                print(f"    CV(aa) {c + 1:3d} -> {v + 1 + self.nc + self.no:3d}    c_i: {amp:8.5f}    Per: {100 * amp**2:5.2f}%")
-            for o, v in zip(*np.where(abs(ov_a[istate]) > threshold)):
-                amp = ov_a[istate, o, v]
-                print(f"    OV(aa) {o + 1 + self.nc:3d} -> {v + 1 + self.nc + self.no:3d}    c_i: {amp:8.5f}    Per: {100 * amp**2:5.2f}%")
-            for c, o in zip(*np.where(abs(co_b[istate]) > threshold)):
-                amp = co_b[istate, c, o]
-                print(f"    CO(bb) {c + 1:3d} -> {o + 1 + self.nc:3d}    c_i: {amp:8.5f}    Per: {100 * amp**2:5.2f}%")
-            for c, v in zip(*np.where(abs(cv_b[istate]) > threshold)):
-                amp = cv_b[istate, c, v]
-                print(f"    CV(bb) {c + 1:3d} -> {v + 1 + self.nc + self.no:3d}    c_i: {amp:8.5f}    Per: {100 * amp**2:5.2f}%")
+            if self.type_u:
+                labels = (
+                    ("CV(aa)", block0[istate], 1, self.nc + self.no + 1),
+                    ("OV(aa)", block1[istate], self.nc + 1, self.nc + self.no + 1),
+                    ("CO(bb)", block2[istate], 1, self.nc + 1),
+                    ("CV(bb)", block3[istate], 1, self.nc + self.no + 1),
+                )
+            else:
+                labels = (
+                    ("CV(0)", block0[istate], 1, self.nc + self.no + 1),
+                    ("CO(0)", block1[istate], 1, self.nc + 1),
+                    ("OV(0)", block2[istate], self.nc + 1, self.nc + self.no + 1),
+                    ("CV(1)", block3[istate], 1, self.nc + self.no + 1),
+                )
+            for label, block, occ_offset, vir_offset in labels:
+                for occ, vir in zip(*np.where(abs(block) > threshold)):
+                    amp = block[occ, vir]
+                    print(
+                        f"    {label} {occ + occ_offset:3d} -> {vir + vir_offset:3d}    "
+                        f"c_i: {amp:8.5f}    Per: {100 * amp**2:5.2f}%"
+                    )
             print(" ")
         return self.dS2
