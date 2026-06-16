@@ -210,33 +210,41 @@ def grad_elec(td_grad, singlet=True, atmlst = None,
     #Ground state: W_ij = F_ij
     im0a[:nocca,:nocca]+= fockamo[:nocca,:nocca]
     im0b[:noccb,:noccb]+= fockbmo[:noccb,:noccb]
-    #W^alpha_ij = G_ij[T+Z^S] + T_ik*F_jk - X_pi*K_pj
+    #W^alpha_ij = G_ij[T+Z^S] + T_ik*F_jk - X_pi*K_pj[X^S] -  X_pi*K_pj[X^A]
     im0a[:nocca,:nocca]+= numpy.einsum('ik,kl,lj->ij', orboa.T, veff0dooa+veff[0], orboa)
     im0a[:nocca,:nocca]+= numpy.einsum('ik,kj->ij', ta,fockamo[:nocca,:nocca])
     im0a[:nocca,:nocca]-= numpy.einsum('ai,aj->ij', x_ab, vkmop[noccb:,:nocca])
     im0a[:nocca,:nocca]-= numpy.einsum('ai,aj->ij', x_ab, vkmom[noccb:,:nocca])
     #W^beta_ij = G_ij[T+Z^S]
     im0b[:noccb,:noccb]+= numpy.einsum('ik,kl,lj->ij', orbob.T, veff0doob+veff[1], orbob)
-    #W^beta_ab = T_ac*F^beta_bc - X_aq*K_bq
+    #W^beta_ab = T_ac*F^beta_bc - X_aq*K_bq[X^S] - X_aq*K_bq[X^A]
     im0b[noccb:,noccb:] = numpy.einsum('ac,bc->ab', tb, fockbmo[noccb:,noccb:])
     im0b[noccb:,noccb:]-= numpy.einsum('ai,bi->ab', x_ab, vkmop[noccb:,:nocca])
     im0b[noccb:,noccb:]-= numpy.einsum('ai,bi->ab', x_ab, vkmom[noccb:,:nocca])
-    #W_ai和W_ia合并
+    #W_ai
     #W^alpha_ai = Z^alpha_aj*F^alpha_ij / 2
-    im0a[nocca:,:nocca] = numpy.einsum('aj,ij->ai', z1a, fockamo[:nocca,:nocca])
-    #W^beta_ai = Z^beta_aj*F^beta_ij / 2 - X_aq*K_iq
-    im0b[noccb:,:noccb]+= numpy.einsum('ac,ic->ai', tb, fockbmo[:noccb,noccb:]) * 2
-    im0b[noccb:,:noccb]+= numpy.einsum('aj,ij->ai', z1b, fockbmo[:noccb,:noccb]) 
-    im0b[noccb:,:noccb]-= numpy.einsum('aj,ij->ai', x_ab, vkmop[:noccb, :nocca]) * 2
-    im0b[noccb:,:noccb]-= numpy.einsum('aj,ij->ai', x_ab, vkmom[:noccb, :nocca]) * 2
-    im0b[nc:(nc+no),:nc]+= numpy.einsum('bt,bi->ti', zvo, fockavc)
+    im0a[nocca:,:nocca] = numpy.einsum('aj,ij->ai', z1a, fockamo[:nocca,:nocca]) / 2
+    #W^beta_ai = Z^beta_aj*F^beta_ij / 2 - X_aq*K_iq[X^S]- X_aq*K_iq[X^A]
+    im0b[noccb:,:noccb]+= numpy.einsum('ac,ic->ai', tb, fockbmo[:noccb,noccb:]) 
+    im0b[noccb:,:noccb]+= numpy.einsum('aj,ij->ai', z1b, fockbmo[:noccb,:noccb]) / 2
+    im0b[noccb:,:noccb]-= numpy.einsum('aj,ij->ai', x_ab, vkmop[:noccb, :nocca])
+    im0b[noccb:,:noccb]-= numpy.einsum('aj,ij->ai', x_ab, vkmom[:noccb, :nocca]) 
+    im0b[nc:(nc+no),:nc]+= numpy.einsum('bt,bi->ti', zvo, fockavc) / 2
+    #W_ia
+    #W^alpha_ia = G^alpha_ia[T+Z^S] + T^alpha_ij*F^alpha_aj - X_ciK_ca[X^S] - X_ciK_ca[X^A] + Z_bi*F^_ba / 2
+    im0a[:nocca,nocca:]+= numpy.einsum('ik,kl,la->ia', orboa.T, veff0dooa+veff[0], orbva)
+    im0a[:nocca,nocca:]+= numpy.einsum('ik,ak->ia', ta, fockamo[nocca:,:nocca])
+    im0a[:nocca,nocca:]+= numpy.einsum('bi,ba->ia', z1a, fockamo[nocca:,nocca:]) / 2
+    im0a[:nocca,nocca:]-= numpy.einsum('ci,ca->ia', x_ab, vkmop[noccb:,nocca:])
+    im0a[:nocca,nocca:]-= numpy.einsum('ci,ca->ia', x_ab, vkmom[noccb:,nocca:])
+    #W^beta_ia = G^beta_ia[T+Z^S] + Z_bi*F^_ba / 2
+    im0b[:noccb,noccb:]+= numpy.einsum('ik,kl,la->ia', orbob.T, veff0doob+veff[1], orbvb)
+    im0b[:noccb,noccb:]+= numpy.einsum('bi,ba->ia', z1b, fockbmo[noccb:,noccb:]) / 2
+    im0a[nc:(nc+no),(nc+no):]+= numpy.einsum('tj,aj->ta', zoc, fockbvc) / 2
 
     im0 = numpy.einsum('kp,pq,ql->kl',mo_coeff[0], im0a ,mo_coeff[0].T)
     im0+= numpy.einsum('kp,pq,ql->kl',mo_coeff[1], im0b ,mo_coeff[1].T)
     
-
-    
-
     #(T+Z^S)(ao)
     dmz1dooa = (z1ao[0] + z1ao[0].T)/2 + dmta
     dmz1doob = (z1ao[1] + z1ao[1].T)/2 + dmtb
@@ -274,7 +282,6 @@ def grad_elec(td_grad, singlet=True, atmlst = None,
         de[k] += numpy.einsum('xpq,qp->x', vhf1a[0,:,p0:p1],  oo0a[:,p0:p1])  
         de[k] += numpy.einsum('xpq,pq->x', vhf1b[0,:,p0:p1],  oo0b[p0:p1])
         de[k] += numpy.einsum('xpq,qp->x', vhf1b[0,:,p0:p1],  oo0b[:,p0:p1])
-        
         #(T+Z^S)\nabla F: (T + Z^S)*h1ao + (T_ij + Z^S_ij)*G_(\nabla i)j[D] + (T_ij + Z^S_ij)*G_i(\nabla j)[D] + D_ij*G_(\nabla i)j[T+Z^S] + D_ij*G_i(\nabla j)[T+Z^S]
         de[k] += numpy.einsum('xpq,pq->x', h1ao, dmz1dooa) 
         de[k] += numpy.einsum('xpq,pq->x', h1ao, dmz1doob)
@@ -285,9 +292,8 @@ def grad_elec(td_grad, singlet=True, atmlst = None,
         de[k] += numpy.einsum('xij,ij->x', vhf1a[1,:,p0:p1], oo0a[p0:p1]) 
         de[k] += numpy.einsum('xij,ji->x', vhf1a[1,:,p0:p1], oo0a[:,p0:p1]) 
         de[k] += numpy.einsum('xij,ij->x', vhf1b[1,:,p0:p1], oo0b[p0:p1]) 
-        de[k] += numpy.einsum('xij,ji->x', vhf1b[1,:,p0:p1], oo0b[:,p0:p1])
-
-        #(R^S*R^S + L^A*L^A)G: 2*R^S_ij*G_(\nabla i)j[R^S] + 2*R^S_ij*G_i(\nabla j)[R^S] + 2*L^A_ij*G_(\nabla i)j[L^A] + 2*L^A_ij*G_i(\nabla j)[L^A]
+        de[k] += numpy.einsum('xij,ji->x', vhf1b[1,:,p0:p1], oo0b[:,p0:p1]
+        #(R^S*R^S + L^A*L^A)G: 2*X^S_ij*K_(\nabla i)j[X^S] + 2*X^S_ij*K_i(\nabla j)[X^S] + 2*X^A_ij*K_(\nabla i)j[X^A] + 2*X^A_ij*K_i(\nabla j)[X^A]
         de[k] -= numpy.einsum('xij,ij->x', dmxvk[0,:,p0:p1], dmSx[p0:p1]) * 2  
         de[k] -= numpy.einsum('xij,ji->x', dmxvk[0,:,p0:p1], dmSx[:,p0:p1]) * 2 
         de[k] -= numpy.einsum('xij,ij->x', dmxvk[1,:,p0:p1], dmAx[p0:p1]) * 2
@@ -295,13 +301,7 @@ def grad_elec(td_grad, singlet=True, atmlst = None,
         #S*W: -W_ij*S_(\nabla i)j - W_ij*S_i(\nabla j)
         de[k] -= numpy.einsum('xpq,pq->x', s1[:,p0:p1], im0[p0:p1])
         de[k] -= numpy.einsum('xpq,qp->x', s1[:,p0:p1], im0[:,p0:p1])
-  
-
-
-  
-
-        
-
+      
         de[k] += td_grad.extra_force(ia, locals())
 
     log.timer('TDHF nuclear gradients', *time0)
