@@ -36,10 +36,10 @@ def grad_elec(td_grad, singlet=True, atmlst = None,
     mf = td_grad.base._scf
     utda = td_grad.base
     mo_coeff = mf.mo_coeff
-    occidxa = utda.occidx_a  # UTDA内置的α占据轨道索引
-    viridxa = utda.viridx_a  # UTDA内置的α虚轨道索引
-    occidxb = utda.occidx_b  # UTDA内置的β占据轨道索引
-    viridxb = utda.viridx_b  # UTDA内置的β虚轨道索引
+    occidxa = ucis.occidx_a  # UTDA内置的α占据轨道索引
+    viridxa = ucis.viridx_a  # UTDA内置的α虚轨道索引
+    occidxb = ucis.occidx_b  # UTDA内置的β占据轨道索引
+    viridxb = ucis.viridx_b  # UTDA内置的β虚轨道索引
     nocca = len(occidxa)
     noccb = len(occidxb)
     nvira = len(viridxa)
@@ -51,17 +51,18 @@ def grad_elec(td_grad, singlet=True, atmlst = None,
     nao = mo_coeff[0].shape[0]
     nmoa = nocca + nvira
     nmob = noccb + nvirb
-    nc = utda.nc  #double occupied number
-    no = utda.no  #single occupied number
-    nv = utda.nv  #virtual occupied number
+    nc = ucis.nc  #double occupied number
+    no = ucis.no  #single occupied number
+    nv = ucis.nv  #virtual occupied number
 
-    #只测TDA，不调用y
+    #get_x
+    x_vc_a = ucis.xycv_a[state_idx].reshape(nc,nv).T
+    x_vo_a = ucis.xyov_a[state_idx].reshape(no,nv).T
+    x_oc_b = ucis.xyco_b[state_idx].reshape(nc,no).T
+    x_vc_b = ucis.xycv_b[state_idx].reshape(nc,nv).T
+    x_a = numpy.hstack((x_vc_a, x_vo_a))
+    x_b = numpy.vstack((x_oc_b, x_vc_b))
     
-    x_a, x_b = utda.xy[state_idx]
-    x_a = numpy.hstack((x_a[:nc*nv].reshape(nc,nv).T,x_a[nc*nv:].reshape(no,nv).T))
-    x_b = numpy.vstack((x_b[:nc*no].reshape(nc,no).T,x_b[nc*no:].reshape(nc,nv).T))
-    
-
     fock_ao = mf.get_fock()  #fock(ao)
     focka = fock_ao[0]  #focka(ao)
     fockb = fock_ao[1]  #fockb(ao)
@@ -220,44 +221,50 @@ def grad_elec(td_grad, singlet=True, atmlst = None,
     #G[Z^S]
     veff = vresp((z1ao+z1ao.transpose(0,2,1)) * .5)
 
-
+    #W matrix
     im0a = numpy.zeros((nmoa,nmoa))
     im0b = numpy.zeros((nmob,nmob))
     #Ground state: W_ij = F_ij
     im0a[:nocca,:nocca]+= fockamo[:nocca,:nocca]
     im0b[:noccb,:noccb]+= fockbmo[:noccb,:noccb]
-    
-    
     #W_ij = G_ij[T+Z^S] + R_ai*G_aj[R^S] + L_ai*G_ai[L^A] - T_ik*F_kj
-  
     im0a[:nocca,:nocca]+= numpy.einsum('ik,kl,lj->ij', orboa.T, veff0doo[0]+veff[0], orboa)
     im0b[:noccb,:noccb]+= numpy.einsum('ik,kl,lj->ij', orbob.T, veff0doo[1]+veff[1], orbob)
-    im0a[:nocca,:nocca]+= numpy.einsum('ak,ai->ki', veff0mopa[nocca:,:nocca], x_a)
-    im0b[:noccb,:noccb]+= numpy.einsum('ak,ai->ki', veff0mopb[noccb:,:noccb], x_b)
-    im0a[:nocca,:nocca]+= numpy.einsum('ak,ai->ki', veff0moma[nocca:,:nocca], x_a)
-    im0b[:noccb,:noccb]+= numpy.einsum('ak,ai->ki', veff0momb[noccb:,:noccb], x_b)
+    im0a[:nocca,:nocca]+= numpy.einsum('ak,ai->ki', x_a, veff0mopa[nocca:,:nocca])
+    im0b[:noccb,:noccb]+= numpy.einsum('ak,ai->ki', x_b, veff0mopb[noccb:,:noccb])
+    im0a[:nocca,:nocca]+= numpy.einsum('ak,ai->ki', x_a, veff0moma[nocca:,:nocca])
+    im0b[:noccb,:noccb]+= numpy.einsum('ak,ai->ki', x_b, veff0momb[noccb:,:noccb])
     im0a[:nocca,:nocca]+= numpy.einsum('ik,kj->ij', dooa,fockamo[:nocca,:nocca])
     im0b[:noccb,:noccb]+= numpy.einsum('ik,kj->ij', doob,fockbmo[:noccb,:noccb])
-    
     #W_ab = R_ai*G_bi[R^S] + L_ai*G_bi[L^A] + T_ac*F_cb
-    im0a[nocca:,nocca:] = numpy.einsum('ci,ai->ac', veff0mopa[nocca:,:nocca], x_a)
-    im0b[noccb:,noccb:] = numpy.einsum('ci,ai->ac', veff0mopb[noccb:,:noccb], x_b)
-    im0a[nocca:,nocca:]+= numpy.einsum('ci,ai->ac', veff0moma[nocca:,:nocca], x_a)
-    im0b[noccb:,noccb:]+= numpy.einsum('ci,ai->ac', veff0momb[noccb:,:noccb], x_b)
+    im0a[nocca:,nocca:] = numpy.einsum('ai,ci->ac', x_a, veff0mopa[nocca:,:nocca])
+    im0b[noccb:,noccb:] = numpy.einsum('ai,ci->ac', x_b, veff0mopb[noccb:,:noccb])
+    im0a[nocca:,nocca:]+= numpy.einsum('ai,ci->ac', x_a, veff0moma[nocca:,:nocca])
+    im0b[noccb:,noccb:]+= numpy.einsum('ai,ci->ac', x_b, veff0momb[noccb:,:noccb])
     im0a[nocca:,nocca:]+= numpy.einsum('ac,cb->ab', dvva,fockamo[nocca:,nocca:])
     im0b[noccb:,noccb:]+= numpy.einsum('ac,cb->ab', dvvb,fockbmo[noccb:,noccb:])
-
-    #W_ai和W_ia合并
     #W_ai = R_ja*G_ji[R^S] + L_ja*G_ji[L^A] + T_ba*F_bi + Z_aj*F^_ji / 2
-    im0a[nocca:,:nocca] = numpy.einsum('ki,ai->ak', veff0mopa[:nocca,:nocca], x_a) * 2
-    im0b[noccb:,:noccb] = numpy.einsum('ki,ai->ak', veff0mopb[:noccb,:noccb], x_b) * 2
-    im0a[nocca:,:nocca]+= numpy.einsum('ki,ai->ak', veff0moma[:nocca,:nocca], x_a) * 2
-    im0b[noccb:,:noccb]+= numpy.einsum('ki,ai->ak', veff0momb[:noccb,:noccb], x_b) * 2
-    im0a[nocca:,:nocca]+= numpy.einsum('ba,bi->ai', dvva, fockamo[nocca:,:nocca]) * 2
-    im0b[noccb:,:noccb]+= numpy.einsum('ba,bi->ai', dvvb, fockbmo[noccb:,:noccb]) * 2
-    im0a[nocca:,:nocca]+= numpy.einsum('aj,ji->ai', z1a, fockamo[:nocca,:nocca])
-    im0b[noccb:,:noccb]+= numpy.einsum('aj,ji->ai', z1b, fockbmo[:noccb,:noccb])
-    im0b[nc:(nc+no),:nc]+= numpy.einsum('bt,bi->ti', zvo, fockavc) 
+    im0a[nocca:,:nocca] = numpy.einsum('ai,ki->ak', x_a, veff0mopa[:nocca,:nocca]) 
+    im0b[noccb:,:noccb] = numpy.einsum('ai,ki->ak', x_b, veff0mopb[:noccb,:noccb]) 
+    im0a[nocca:,:nocca]+= numpy.einsum('ai,ki->ak', x_a, veff0moma[:nocca,:nocca]) 
+    im0b[noccb:,:noccb]+= numpy.einsum('ai,ki->ak', x_b, veff0momb[:noccb,:noccb]) 
+    im0a[nocca:,:nocca]+= numpy.einsum('ba,bi->ai', dvva, fockamo[nocca:,:nocca]) 
+    im0b[noccb:,:noccb]+= numpy.einsum('ba,bi->ai', dvvb, fockbmo[noccb:,:noccb]) 
+    im0a[nocca:,:nocca]+= numpy.einsum('aj,ji->ai', z1a, fockamo[:nocca,:nocca]) / 2
+    im0b[noccb:,:noccb]+= numpy.einsum('aj,ji->ai', z1b, fockbmo[:noccb,:noccb]) / 2
+    im0b[nc:(nc+no),:nc]+= numpy.einsum('bt,bi->ti', zvo, fockavc) / 2
+    #W_ia = G_ia[T+Z^S] + R_bi*G_ba[R^S] + L_bi*G_ba[L^A] + T_ij*F_ja + Z_bi*F^_ba / 2
+    im0a[:nocca,nocca:]+= numpy.einsum('ik,kl,la->ia', orboa.T, veff0doo[0]+veff[0], orbva)
+    im0b[:noccb,noccb:]+= numpy.einsum('ik,kl,la->ia', orbob.T, veff0doo[1]+veff[1], orbvb)
+    im0a[:nocca,nocca:]+= numpy.einsum('bi,ba->ia', x_a, veff0mopa[nocca:,nocca:])
+    im0b[:noccb,noccb:]+= numpy.einsum('bi,ba->ia', x_b, veff0mopb[noccb:,noccb:])
+    im0a[:nocca,nocca:]+= numpy.einsum('bi,ba->ia', x_a, veff0moma[nocca:,nocca:])
+    im0b[:noccb,noccb:]+= numpy.einsum('bi,ba->ia', x_b, veff0momb[noccb:,noccb:])
+    im0a[:nocca,nocca:]+= numpy.einsum('ij,ja->ia', dooa, fockamo[:nocca,nocca:])
+    im0b[:noccb,noccb:]+= numpy.einsum('ij,ja->ia', doob, fockbmo[:noccb,noccb:])
+    im0a[:nocca,nocca:]+= numpy.einsum('bi,ba->ia', z1a, fockamo[nocca:,nocca:]) / 2
+    im0b[:noccb,noccb:]+= numpy.einsum('bi,ba->ia', z1b, fockbmo[noccb:,noccb:]) / 2
+    im0a[nc:(nc+no),(nc+no):]+= numpy.einsum('tj,aj->ta', zoc, fockbvc) / 2 
     
     im0 = im0a + im0b
 
