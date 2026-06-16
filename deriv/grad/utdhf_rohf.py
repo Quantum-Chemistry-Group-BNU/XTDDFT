@@ -270,9 +270,6 @@ def grad_elec(td_grad, singlet=True, atmlst = None,
 
     im0 = numpy.einsum('kp,pq,ql->kl',mo_coeff[0], im0 ,mo_coeff[0].T)
     
-
-    
-
     #(T+Z^S)(ao)
     dmz1dooa = (z1ao[0] + z1ao[0].T)/2 + dmzooa
     dmz1doob = (z1ao[1] + z1ao[1].T)/2 + dmzoob
