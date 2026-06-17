@@ -3,7 +3,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "experientment" / "calc_homo_lumo_cubes_from_chk.py"
+SCRIPT = ROOT / "experiment" / "molecule" / "calc_homo_lumo_cubes_from_chk.py"
 
 
 class HomoLumoCubeScriptTest(unittest.TestCase):

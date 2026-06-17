@@ -3,8 +3,8 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MOL_SCRIPT = ROOT / "experientment" / "calc_xtda_nto_mol_ground_pairs.py"
-PBC_SCRIPT = ROOT / "experientment" / "calc_xtda_nto_pbc_ground_pairs.py"
+MOL_SCRIPT = ROOT / "experiment" / "molecule" / "calc_xtda_nto_mol_ground_pairs.py"
+PBC_SCRIPT = ROOT / "experiment" / "pbc" / "calc_xtda_nto_pbc_ground_pairs.py"
 
 
 class XtdaNtoGroundPairsScriptsTest(unittest.TestCase):

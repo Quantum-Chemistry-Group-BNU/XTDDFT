@@ -3,7 +3,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "experientment" / "calc_xsf_nto_mcol_sa3_pairs_pbc.py"
+SCRIPT = ROOT / "experiment" / "pbc" / "calc_xsf_nto_mcol_sa3_pairs_pbc.py"
 
 
 class XsfNtoMcolPairsScriptTest(unittest.TestCase):

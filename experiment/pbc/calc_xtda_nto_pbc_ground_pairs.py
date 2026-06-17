@@ -4,23 +4,19 @@ import sys
 from pathlib import Path
 
 
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 os.environ.setdefault("OMP_NUM_THREADS", "16")
 os.environ.setdefault("MKL_NUM_THREADS", "16")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "16")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "16")
-os.environ.setdefault("CUPY_ACCELERATORS", "cub,cutensor")
-os.environ.setdefault("GPU4PYSCF_NUMINT_BLOCK_SIZE", "32768")
-os.environ.setdefault("GPU4PYSCF_NUMINT_BLOCK_MEM_FRACTION", "0.4")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-ROOT = SCRIPT_DIR.parent
+ROOT = SCRIPT_DIR.parents[1]
 PROJECT_PARENT = ROOT.parent
 if str(PROJECT_PARENT) not in sys.path:
     sys.path.insert(0, str(PROJECT_PARENT))
 
-import cupy as cp
 import numpy as np
+from pyscf import lib
 from pyscf.pbc.scf import chkfile as pbc_chkfile
 from pyscf.pbc import dft as pbcdft
 
@@ -30,29 +26,26 @@ from XTDDFT_dev.utils.visualize import write_nto_cubes
 from XTDDFT_dev.XTDDFT.xtda import XTDA
 
 
-# ===== Manually edit these parameters on the server =====
-chk = "pre_uks_ccpVDZ.chk"
-results_file = "utda_method0_spin_conserving_davidson_nstates8_results.npz"
-outdir = "utda_method0_spin_conserving_nstates8_nto_ground_to_state0"
-prefix = "utda_method0_ground_to_state0"
+lib.num_threads(int(os.environ["OMP_NUM_THREADS"]))
 
-xc = "pbe0"
+
+# ===== Manually edit these parameters on the server =====
+chk = "roks_b3lyp_ccpVDZ.chk"
+results_file = "xtda_spin_conserving_davidson_nstates8_results.npz"
+outdir = "xtda_spin_conserving_davidson_nstates8_nto_ground_pairs_pbc"
+prefix = "xtda_spin_conserving_pbc"
+
+xc = "b3lyp"
 use_density_fit = True
 
 method = 0
-davidson = True
-davidson_backend = "cpu"
-so2st = False
-dense_batch_size = 64
-
-state_i = None
-state_f = 0
+pairs = [(None, 0), (None, 1), (None, 2), (None, 3)]
 nroots = 5
 resolution = 0.15
 # ========================================================
 
 
-set_backend("gpu")
+set_backend("cpu")
 
 chk_path = Path(chk).expanduser()
 if not chk_path.is_absolute():
@@ -76,7 +69,7 @@ if not results_path.is_absolute():
             break
 if not results_path.exists():
     raise FileNotFoundError(
-        f"UTDA results file {results_file!r} was not found in cwd={Path.cwd()}, "
+        f"XTDA results file {results_file!r} was not found in cwd={Path.cwd()}, "
         f"chk_dir={chk_path.parent}, script_dir={SCRIPT_DIR}, or repo_root={ROOT}."
     )
 
@@ -98,82 +91,84 @@ if vectors.shape[1] != energies_ha.size:
         f"got vectors.shape={vectors.shape}, energies.shape={energies_ha.shape}"
     )
 
+max_state = max(state_f for state_i, state_f in pairs)
+if max_state >= energies_ha.size:
+    raise ValueError(
+        f"requested pair includes state {max_state}, but only "
+        f"{energies_ha.size} states were saved."
+    )
+
 print("backend:", backend_info())
 print("chk path:", chk_path.resolve())
 print("results path:", results_path.resolve())
-print("state_i -> state_f:", state_i, "->", state_f)
+print("pairs:", pairs)
 print("nroots:", nroots)
 print("resolution:", resolution)
 
 cell, scf_rec = pbc_chkfile.load_scf(str(chk_path))
 
-uks_mf = pbcdft.UKS(cell)
+mf = pbcdft.ROKS(cell)
 if use_density_fit:
-    uks_mf = uks_mf.density_fit()
-uks_mf.xc = xc
-uks_mf.converged = True
-
-mf = uks_mf.to_gpu()
+    mf = mf.density_fit()
 mf.xc = xc
-mf.mo_energy = cp.asarray(scf_rec["mo_energy"])
-mf.mo_coeff = cp.asarray(scf_rec["mo_coeff"])
-mf.mo_occ = cp.asarray(scf_rec["mo_occ"])
+mf.mo_energy = np.asarray(scf_rec["mo_energy"])
+mf.mo_coeff = np.asarray(scf_rec["mo_coeff"])
+mf.mo_occ = np.asarray(scf_rec["mo_occ"])
 mf.e_tot = scf_rec.get("e_tot", None)
 mf.converged = True
-
-if mf.mo_coeff.ndim != 3 or mf.mo_occ.ndim != 2:
-    raise ValueError(
-        "This UTDA NTO script expects a UKS checkpoint with spin-resolved "
-        "mo_coeff/mo_occ arrays. Use a UKS chk file, not ROKS/RKS."
-    )
 
 with_df = getattr(mf, "with_df", None)
 if with_df is not None and hasattr(with_df, "is_gamma_point"):
     with_df.is_gamma_point = True
-if use_density_fit and (
-    with_df is None or with_df.__class__.__name__.upper() == "FFTDF"
-):
-    raise RuntimeError(
-        "use_density_fit=True was requested, but the GPU UKS object did not "
-        "get a GDF density-fitting object."
-    )
 
-utda_method = XTDA(
+xtda_method = XTDA(
     mf,
     method=method,
-    davidson=davidson,
-    davidson_backend=davidson_backend,
-    so2st=so2st,
-    dense_batch_size=dense_batch_size,
+    davidson=True,
+    davidson_backend="cpu",
+    so2st=False,
+    dense_batch_size=64,
 )
-utda_method.v = vectors
-utda_method.e = energies_ha
-utda_method.nstates = energies_ha.size
-utda_method.converged = np.ones(energies_ha.size, dtype=bool)
+xtda_method.v = vectors
+xtda_method.e = energies_ha
+xtda_method.nstates = energies_ha.size
+xtda_method.converged = np.ones(energies_ha.size, dtype=bool)
 
-print("cell nao:", cell.nao_nr())
+print("natm:", cell.natm)
+print("nelectron:", cell.nelectron)
 print("spin:", cell.spin)
+print("mesh:", cell.mesh)
 print("e_tot:", mf.e_tot)
 print("energies / eV:", energies_ha * ha2eV)
 print("vectors shape:", vectors.shape)
+print("output root:", Path(outdir).resolve())
 
-result = write_nto_cubes(
-    utda_method,
-    state_f=state_f,
-    state_i=state_i,
-    nroots=nroots,
-    outdir=outdir,
-    prefix=prefix,
-    resolution=resolution,
-)
+for state_i, state_f in pairs:
+    pair_label = f"ground_to_state{state_f}" if state_i is None else f"state{state_i}_to_state{state_f}"
+    pair_outdir = Path(outdir) / pair_label
+    pair_prefix = f"{prefix}_{pair_label}"
 
-singular_values = result["singular_values"]
-weights = singular_values ** 2
-if np.sum(weights) > 0:
-    weights = weights / np.sum(weights)
+    print("=" * 80)
+    print("NTO pair:", state_i, "->", state_f)
+    print("pair output:", pair_outdir)
 
-print("NTO singular values:", singular_values)
-print("NTO normalized weights:", weights)
-print("Cube files:")
-for item in result["files"]:
-    print(" ", item["path"])
+    result = write_nto_cubes(
+        xtda_method,
+        state_f=state_f,
+        state_i=state_i,
+        nroots=nroots,
+        outdir=pair_outdir,
+        prefix=pair_prefix,
+        resolution=resolution,
+    )
+
+    singular_values = result["singular_values"]
+    weights = singular_values ** 2
+    if np.sum(weights) > 0:
+        weights = weights / np.sum(weights)
+
+    print("NTO singular values:", singular_values)
+    print("NTO normalized weights among printed roots:", weights)
+    print("Cube files:")
+    for item in result["files"]:
+        print(" ", item["path"])

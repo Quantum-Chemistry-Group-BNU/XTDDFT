@@ -3,7 +3,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "experientment" / "calc_utda_nto_from_saved_states.py"
+SCRIPT = ROOT / "experiment" / "pbc" / "calc_utda_nto_from_saved_states.py"
 
 
 class UtdaNtoScriptTest(unittest.TestCase):

@@ -11,18 +11,18 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "16")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "16")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-ROOT = SCRIPT_DIR.parent
+ROOT = SCRIPT_DIR.parents[1]
 PROJECT_PARENT = ROOT.parent
 if str(PROJECT_PARENT) not in sys.path:
     sys.path.insert(0, str(PROJECT_PARENT))
 
 import cupy as cp
 import numpy as np
-from pyscf.pbc import dft as pbcdft
 from pyscf.pbc.scf import chkfile as pbc_chkfile
+from pyscf.pbc import dft as pbcdft
 
 from XTDDFT_dev.utils.backend import backend_info, set_backend
-from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
+from XTDDFT_dev.XTDDFT.xtda import XTDA
 
 
 def resolve_existing_file(filename, label):
@@ -90,8 +90,8 @@ def make_gpu_uks_from_chk(chk, xc, use_density_fit=True):
 
     if mf.mo_coeff.ndim != 3 or mf.mo_occ.ndim != 2:
         raise ValueError(
-            "USF-TDA expects a UKS checkpoint with spin-resolved mo_coeff/mo_occ. "
-            "Use a UKS chk file, not ROKS/RKS."
+            "This UTDA example expects a UKS checkpoint with spin-resolved "
+            "mo_coeff/mo_occ arrays. Use a UKS chk file, not ROKS/RKS."
         )
 
     with_df = getattr(mf, "with_df", None)
@@ -102,34 +102,32 @@ def make_gpu_uks_from_chk(chk, xc, use_density_fit=True):
     ):
         raise RuntimeError(
             "use_density_fit=True was requested, but the GPU UKS object did "
-            "not get a GDF density-fitting object."
+            "not get a GDF density-fitting object. Check gpu4pyscf/PySCF PBC "
+            "density_fit support on this machine."
         )
     return cell, mf
 
 
 # ===== Manually edit these parameters on the server =====
-chk = "hse06_uks_ccpVDZ.chk"
-xc = "hse06"
+chk = "pre_uks_ccpVDZ.chk"
+xc = "pbe0"
 nstates = 8
 
-use_density_fit = True
+use_density_fit = True  # Use GDF for hybrid PBC response; set False only for FFTDF fallback.
 
 grid_level = 4
 grid_file = "becke_grids_ccpVDZ_level4.npz"
 
-method = 0  # method=0 ALDA0 spin-flip response.
-SA = 0      # USF-TDA: no finite-spin Delta A correction.
-remove = False
-foo = 1.0
-d_lda = 0.3
-fglobal = 0.0
-fit = False
+method = 0  # UKS input makes XTDA run unrestricted TDA.
+davidson = True
 davidson_backend = "cpu"  # CPU Davidson + GPU matrix-vector product.
-
+so2st = False  # Spin-tensor transformation is not used for UKS amplitudes.
+dense_batch_size = 64
+analyse_threshold = 0.1
 run_analyse = False
-analyse_threshold = 0.05
+analyse_delta_s2 = False
 save_results = True
-save_file = None
+save_file = f"utda_method{method}_spin_conserving_{'davidson' if davidson else 'dense'}_nstates{nstates}_results.npz"
 # ========================================================
 
 
@@ -142,6 +140,7 @@ def main():
     print("grid path:", grid_path)
 
     cell, mf = make_gpu_uks_from_chk(chk_path, xc, use_density_fit=use_density_fit)
+
     load_becke_grids(mf, cell, grid_path, level=grid_level)
 
     print("backend:", backend_info())
@@ -154,39 +153,36 @@ def main():
     print("e_tot:", mf.e_tot)
     print("mo_coeff shape:", mf.mo_coeff.shape)
     print("mo_occ shape:", mf.mo_occ.shape)
-    print("SA:", SA)
-    print("remove:", remove)
 
     print("=" * 80)
-    print(f"Running USF_TDA_down method={method}")
-    usf_method = XSF_TDA_down(
+    print(f"Running UTDA method={method}")
+    utda_method = XTDA(
         mf,
         method=method,
-        SA=SA,
-        davidson=True,
+        davidson=davidson,
         davidson_backend=davidson_backend,
+        so2st=so2st,
+        dense_batch_size=dense_batch_size,
     )
-    ee, vv = usf_method.kernel(
+    ee, vv = utda_method.kernel(
         nstates=nstates,
-        remove=remove,
-        foo=foo,
-        d_lda=d_lda,
-        fglobal=fglobal,
-        fit=fit,
         save=save_results,
         save_file=save_file,
     )
     cp.cuda.Stream.null.synchronize()
 
-    print("converged:", usf_method.converged)
-    print("result file:", getattr(usf_method, "result_file", None))
+    print("converged:", getattr(utda_method, "converged", None))
+    print("result file:", getattr(utda_method, "result_file", None))
     print("energies / eV:")
     print(np.asarray(ee))
     print("vectors shape:", vv.shape)
 
     if run_analyse:
-        usf_method.analyse(threshold=analyse_threshold)
-    return usf_method, ee, vv
+        utda_method.analyse(
+            threshold=analyse_threshold,
+            compute_s2=analyse_delta_s2,
+        )
+    return utda_method, ee, vv
 
 
 if __name__ == "__main__":

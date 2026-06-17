@@ -11,15 +11,15 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "16")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "16")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-ROOT = SCRIPT_DIR.parent
+ROOT = SCRIPT_DIR.parents[1]
 PROJECT_PARENT = ROOT.parent
 if str(PROJECT_PARENT) not in sys.path:
     sys.path.insert(0, str(PROJECT_PARENT))
 
 import cupy as cp
 import numpy as np
-from pyscf.pbc.scf import chkfile as pbc_chkfile
 from pyscf.pbc import dft as pbcdft
+from pyscf.pbc.scf import chkfile as pbc_chkfile
 
 from XTDDFT_dev.utils.backend import backend_info, set_backend
 from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
@@ -71,16 +71,16 @@ def load_becke_grids(mf, cell, filename, level=4):
     return mf.grids
 
 
-def make_gpu_roks_from_chk(chk, xc, use_density_fit=True):
+def make_gpu_uks_from_chk(chk, xc, use_density_fit=True):
     cell, scf_rec = pbc_chkfile.load_scf(chk)
 
-    roks_mf = pbcdft.ROKS(cell)
+    uks_mf = pbcdft.UKS(cell)
     if use_density_fit:
-        roks_mf = roks_mf.density_fit()
-    roks_mf.xc = xc
-    roks_mf.converged = True
+        uks_mf = uks_mf.density_fit()
+    uks_mf.xc = xc
+    uks_mf.converged = True
 
-    mf = roks_mf.to_gpu()
+    mf = uks_mf.to_gpu()
     mf.xc = xc
     mf.mo_energy = cp.asarray(scf_rec["mo_energy"])
     mf.mo_coeff = cp.asarray(scf_rec["mo_coeff"])
@@ -88,29 +88,48 @@ def make_gpu_roks_from_chk(chk, xc, use_density_fit=True):
     mf.e_tot = scf_rec.get("e_tot", None)
     mf.converged = True
 
+    if mf.mo_coeff.ndim != 3 or mf.mo_occ.ndim != 2:
+        raise ValueError(
+            "USF-TDA expects a UKS checkpoint with spin-resolved mo_coeff/mo_occ. "
+            "Use a UKS chk file, not ROKS/RKS."
+        )
+
     with_df = getattr(mf, "with_df", None)
     if with_df is not None and hasattr(with_df, "is_gamma_point"):
         with_df.is_gamma_point = True
+    if use_density_fit and (
+        with_df is None or with_df.__class__.__name__.upper() == "FFTDF"
+    ):
+        raise RuntimeError(
+            "use_density_fit=True was requested, but the GPU UKS object did "
+            "not get a GDF density-fitting object."
+        )
     return cell, mf
 
 
 # ===== Manually edit these parameters on the server =====
-chk = "roks_pbe0_ccpVDZ.chk"
-xc = "pbe0"
+chk = "hse06_uks_ccpVDZ.chk"
+xc = "hse06"
 nstates = 8
-SA = 3
 
-use_density_fit = True  # If GDF is problematic on the machine, try False.
+use_density_fit = True
 
 grid_level = 4
 grid_file = "becke_grids_ccpVDZ_level4.npz"
 
-remove = None
+method = 0  # method=0 ALDA0 spin-flip response.
+SA = 0      # USF-TDA: no finite-spin Delta A correction.
+remove = False
 foo = 1.0
 d_lda = 0.3
-fglobal = None
-fit = True
+fglobal = 0.0
+fit = False
 davidson_backend = "cpu"  # CPU Davidson + GPU matrix-vector product.
+
+run_analyse = False
+analyse_threshold = 0.05
+save_results = True
+save_file = None
 # ========================================================
 
 
@@ -122,13 +141,13 @@ def main():
     print("chk path:", chk_path)
     print("grid path:", grid_path)
 
-    cell, mf = make_gpu_roks_from_chk(chk_path, xc, use_density_fit=use_density_fit)
-
+    cell, mf = make_gpu_uks_from_chk(chk_path, xc, use_density_fit=use_density_fit)
     load_becke_grids(mf, cell, grid_path, level=grid_level)
 
     print("backend:", backend_info())
     print("CUDA device count:", cp.cuda.runtime.getDeviceCount())
     print("mf class:", type(mf))
+    print("reference: UKS")
     print("with_df:", type(getattr(mf, "with_df", None)))
     print("with_df.is_gamma_point:", getattr(getattr(mf, "with_df", None), "is_gamma_point", None))
     print("cell mesh:", mf.cell.mesh)
@@ -136,33 +155,38 @@ def main():
     print("mo_coeff shape:", mf.mo_coeff.shape)
     print("mo_occ shape:", mf.mo_occ.shape)
     print("SA:", SA)
+    print("remove:", remove)
 
-    last = None
-    for method in (0, 1):
-        print("=" * 80)
-        print(f"Running XSF_TDA_down method={method}")
-        xsf_method = XSF_TDA_down(
-            mf, method=method, SA=SA, davidson=True,
-            davidson_backend=davidson_backend,
-        )
-        ee, vv = xsf_method.kernel(
-            nstates=nstates,
-            remove=remove,
-            foo=foo,
-            d_lda=d_lda,
-            fglobal=fglobal,
-            fit=fit,
-        )
-        xsf_method.analyse()
-        cp.cuda.Stream.null.synchronize()
+    print("=" * 80)
+    print(f"Running USF_TDA_down method={method}")
+    usf_method = XSF_TDA_down(
+        mf,
+        method=method,
+        SA=SA,
+        davidson=True,
+        davidson_backend=davidson_backend,
+    )
+    ee, vv = usf_method.kernel(
+        nstates=nstates,
+        remove=remove,
+        foo=foo,
+        d_lda=d_lda,
+        fglobal=fglobal,
+        fit=fit,
+        save=save_results,
+        save_file=save_file,
+    )
+    cp.cuda.Stream.null.synchronize()
 
-        print("converged:", xsf_method.converged)
-        print("fglobal:", getattr(xsf_method, "fglobal", None))
-        print("energies / eV:")
-        print(np.asarray(ee))
-        print("vectors shape:", vv.shape)
-        last = xsf_method, ee, vv
-    return last
+    print("converged:", usf_method.converged)
+    print("result file:", getattr(usf_method, "result_file", None))
+    print("energies / eV:")
+    print(np.asarray(ee))
+    print("vectors shape:", vv.shape)
+
+    if run_analyse:
+        usf_method.analyse(threshold=analyse_threshold)
+    return usf_method, ee, vv
 
 
 if __name__ == "__main__":

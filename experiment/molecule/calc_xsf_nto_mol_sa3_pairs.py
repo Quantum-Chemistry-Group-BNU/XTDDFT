@@ -10,7 +10,7 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "16")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "16")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-ROOT = SCRIPT_DIR.parent
+ROOT = SCRIPT_DIR.parents[1]
 PROJECT_PARENT = ROOT.parent
 if str(PROJECT_PARENT) not in sys.path:
     sys.path.insert(0, str(PROJECT_PARENT))
@@ -22,24 +22,25 @@ from pyscf.scf import chkfile as mol_chkfile
 from XTDDFT_dev.utils.backend import backend_info, set_backend
 from XTDDFT_dev.utils.unit import ha2eV
 from XTDDFT_dev.utils.visualize import write_nto_cubes
-from XTDDFT_dev.XTDDFT.xtda import XTDA
+from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
 
 
 lib.num_threads(int(os.environ["OMP_NUM_THREADS"]))
 
 
 # ===== Manually edit these parameters on the server =====
-chk = "roks_b3lyp_ccpVDZ.chk"
-results_file = "xtda_spin_conserving_davidson_nstates8_results.npz"
-outdir = "xtda_spin_conserving_davidson_nstates8_nto_ground_pairs_mol"
-prefix = "xtda_spin_conserving_mol"
+chk = "scf.chk"
+results_file = "xsf_tda_down_roks_cc_pvdz_mcol_sa3_nstates6.npz"
+outdir = "xsf_tda_down_roks_cc_pvdz_mcol_sa3_nstates6_nto_pairs"
+prefix = "xsf_tda_down_roks_cc_pvdz_mcol_sa3"
 
 xc = "b3lyp"
 auxbasis = "cc-pvdz-jkfit"
 use_density_fit = True
 
-method = 0
-pairs = [(None, 0), (None, 1), (None, 2), (None, 3)]
+method = 1
+SA = 3
+pairs = [(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (1, 3), (1, 4)]
 nroots = 5
 resolution = 0.15
 # ========================================================
@@ -69,7 +70,7 @@ if not results_path.is_absolute():
             break
 if not results_path.exists():
     raise FileNotFoundError(
-        f"XTDA results file {results_file!r} was not found in cwd={Path.cwd()}, "
+        f"XSF results file {results_file!r} was not found in cwd={Path.cwd()}, "
         f"chk_dir={chk_path.parent}, script_dir={SCRIPT_DIR}, or repo_root={ROOT}."
     )
 
@@ -91,12 +92,15 @@ if vectors.shape[1] != energies_ha.size:
         f"got vectors.shape={vectors.shape}, energies.shape={energies_ha.shape}"
     )
 
-max_state = max(state_f for state_i, state_f in pairs)
+max_state = max(max(pair) for pair in pairs)
 if max_state >= energies_ha.size:
     raise ValueError(
         f"requested pair includes state {max_state}, but only "
         f"{energies_ha.size} states were saved."
     )
+
+remove_saved = bool(np.asarray(data["remove"]).item()) if "remove" in data else None
+fglobal_saved = float(np.asarray(data["fglobal"]).item()) if "fglobal" in data else None
 
 print("backend:", backend_info())
 print("chk path:", chk_path.resolve())
@@ -131,18 +135,22 @@ mf.mo_occ = mo_occ
 mf.e_tot = scf_rec.get("e_tot", None)
 mf.converged = True
 
-xtda_method = XTDA(
+xsf_method = XSF_TDA_down(
     mf,
     method=method,
+    SA=SA,
     davidson=True,
     davidson_backend="cpu",
-    so2st=False,
-    dense_batch_size=64,
 )
-xtda_method.v = vectors
-xtda_method.e = energies_ha
-xtda_method.nstates = energies_ha.size
-xtda_method.converged = np.ones(energies_ha.size, dtype=bool)
+xsf_method.v = vectors
+xsf_method.e = energies_ha
+xsf_method.nstates = energies_ha.size
+xsf_method.converged = np.ones(energies_ha.size, dtype=bool)
+xsf_method.re = (not xsf_method.type_u) if remove_saved is None else remove_saved
+if xsf_method.re:
+    xsf_method.vects = xsf_method.get_vect()
+if fglobal_saved is not None:
+    xsf_method.fglobal = fglobal_saved
 
 print("natm:", mol.natm)
 print("nelectron:", mol.nelectron)
@@ -152,10 +160,11 @@ print("mo_coeff shape:", mf.mo_coeff.shape)
 print("mo_occ shape:", mf.mo_occ.shape)
 print("energies / eV:", energies_ha * ha2eV)
 print("vectors shape:", vectors.shape)
+print("remove:", xsf_method.re)
 print("output root:", Path(outdir).resolve())
 
 for state_i, state_f in pairs:
-    pair_label = f"ground_to_state{state_f}" if state_i is None else f"state{state_i}_to_state{state_f}"
+    pair_label = f"state{state_i}_to_state{state_f}"
     pair_outdir = Path(outdir) / pair_label
     pair_prefix = f"{prefix}_{pair_label}"
 
@@ -164,7 +173,7 @@ for state_i, state_f in pairs:
     print("pair output:", pair_outdir)
 
     result = write_nto_cubes(
-        xtda_method,
+        xsf_method,
         state_f=state_f,
         state_i=state_i,
         nroots=nroots,

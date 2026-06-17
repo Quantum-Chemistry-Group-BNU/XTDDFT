@@ -3,8 +3,12 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RUN_SCRIPT = ROOT / "experientment" / "run_xsf_tda_down_roks_smd_toluene_from_chk.py"
-EMISSION_SCRIPT = ROOT / "experientment" / "calc_xsf_emission_from_saved_states.py"
+RUN_SCRIPT = (
+    ROOT / "experiment" / "molecule" / "run_xsf_tda_down_roks_smd_toluene_from_chk.py"
+)
+EMISSION_SCRIPT = (
+    ROOT / "experiment" / "molecule" / "calc_xsf_emission_from_saved_states.py"
+)
 
 
 class RoksSmdXsfScriptTest(unittest.TestCase):
