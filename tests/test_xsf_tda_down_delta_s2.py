@@ -106,6 +106,120 @@ class XsfTdaDownDeltaS2Test(unittest.TestCase):
         self.assertNotIn(" @ ", source)
         self.assertIn("contract(", source)
 
+    def test_uks_transition_dipole_uses_wrapped_contract(self):
+        source = inspect.getsource(xsf_tda_down.XSF_TDA_down._transition_dipole_matrix_u)
+
+        self.assertNotIn("np.einsum", source)
+        self.assertIn("contract(", source)
+
+    def test_restricted_transition_density_contracts_to_transition_dipole(self):
+        method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
+        method.type_u = False
+        method.re = False
+        method.SA = 3
+        method.nc = 1
+        method.no = 2
+        method.nv = 1
+        method.ground_s = 1.0
+        method.nstates = 2
+        dim = (method.nc + method.no) * (method.no + method.nv)
+        method.v = np.arange(1, dim * method.nstates + 1, dtype=float).reshape(dim, method.nstates) / 10.0
+
+        nmo = method.nc + method.no + method.nv
+        ints_mo = np.arange(1, 3 * nmo * nmo + 1, dtype=float).reshape(3, nmo, nmo) / 17.0
+        method._dipole_mo_integrals = lambda: (ints_mo, None)
+
+        gamma = method.transition_density_matrix(0, 1)
+        tdm = method._transition_dipole_matrix_r()
+        contracted = xsf_tda_down.contract("mn,xmn->x", gamma, ints_mo)
+
+        self.assertEqual(gamma.shape, (nmo, nmo))
+        self.assertTrue(np.allclose(contracted, tdm[0, 1]))
+
+    def test_unrestricted_transition_density_contracts_to_transition_dipole(self):
+        method = self.make_method(nstates=2)
+        method.ctx = SimpleNamespace(
+            mo_coeff=np.zeros((2, 4, 4)),
+            occidx_a=np.array([0, 1]),
+            viridx_b=np.array([1, 2, 3]),
+        )
+        ints_aa = np.arange(1, 3 * 4 * 4 + 1, dtype=float).reshape(3, 4, 4) / 13.0
+        ints_bb = np.arange(101, 101 + 3 * 4 * 4, dtype=float).reshape(3, 4, 4) / 19.0
+        method._dipole_mo_integrals = lambda: (ints_aa, ints_bb, method.ctx)
+
+        gamma = method.transition_density_matrix(0, 1)
+        tdm = method._transition_dipole_matrix_u()
+        spin_block_integrals = np.zeros((3, 8, 8))
+        spin_block_integrals[:, :4, :4] = ints_aa
+        spin_block_integrals[:, 4:, 4:] = ints_bb
+        contracted = xsf_tda_down.contract("mn,xmn->x", gamma, spin_block_integrals)
+
+        self.assertEqual(gamma.shape, (8, 8))
+        self.assertTrue(np.allclose(contracted, tdm[0, 1]))
+
+    def test_nto_returns_singular_values(self):
+        method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
+        method.type_u = False
+        method.re = False
+        method.SA = 0
+        method.nc = 1
+        method.no = 1
+        method.nv = 2
+        method.ground_s = 0.5
+        method.nstates = 2
+        dim = (method.nc + method.no) * (method.no + method.nv)
+        method.v = np.arange(1, dim * method.nstates + 1, dtype=float).reshape(dim, method.nstates) / 10.0
+
+        singular_values, holes, particles = method.nto(0, 1, nroots=2)
+        gamma = method.transition_density_matrix(0, 1)
+        expected = np.linalg.svd(gamma, compute_uv=False)[:2]
+
+        self.assertTrue(np.allclose(singular_values, expected))
+        self.assertEqual(holes.shape, (gamma.shape[1], 2))
+        self.assertEqual(particles.shape, (gamma.shape[0], 2))
+
+    def test_block_nto_returns_spin_adapted_block_svds(self):
+        method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
+        method.type_u = False
+        method.re = False
+        method.nc = 2
+        method.no = 2
+        method.nv = 3
+        method.nstates = 1
+        dim = (method.nc + method.no) * (method.no + method.nv)
+        method.v = np.arange(1, dim + 1, dtype=float).reshape(dim, 1) / 10.0
+
+        result = method.block_nto(0, nroots=1)
+        cv, co, ov, oo = method._split_analysis_vectors(method.v[:, 0])
+        expected_matrices = {
+            "CV": cv.T,
+            "CO": co.T,
+            "OV": ov.T,
+            "OO": oo,
+        }
+
+        self.assertEqual(set(result), {"CV", "CO", "OV", "OO"})
+        nmo = method.nc + method.no + method.nv
+        for name, matrix in expected_matrices.items():
+            block = result[name]
+            expected_s = np.linalg.svd(matrix, compute_uv=False)
+            self.assertTrue(np.allclose(block["singular_values"], expected_s[:1]))
+            self.assertTrue(np.allclose(block["weights"], expected_s[:1] ** 2))
+            self.assertAlmostEqual(block["block_weight"], np.sum(matrix * matrix))
+            self.assertEqual(block["holes"].shape, (nmo, 1))
+            self.assertEqual(block["particles"].shape, (nmo, 1))
+
+        self.assertEqual(result["CV"]["source"], "C")
+        self.assertEqual(result["CV"]["target"], "V")
+        self.assertEqual(result["CO"]["source"], "C")
+        self.assertEqual(result["CO"]["target"], "O")
+        self.assertEqual(result["OV"]["source"], "O")
+        self.assertEqual(result["OV"]["target"], "V")
+        self.assertEqual(result["OO"]["source"], "O")
+        self.assertEqual(result["OO"]["target"], "O")
+        self.assertIn("trace_overlap", result["OO"])
+        self.assertEqual(result["OO"]["trace_overlap"].shape, (1,))
+
     def test_delta_a_jk_response_batches_density_matrices(self):
         method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
         method.delta_a_jk_batch_size = 2

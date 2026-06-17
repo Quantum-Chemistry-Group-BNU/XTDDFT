@@ -1075,6 +1075,61 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             particles = particles[:, :nroots]
         return singular_values, holes, particles
 
+    def block_nto(self, state=0, nroots=None):
+        """SVD channels of each restricted XSF-TDA spin-adapted block.
+
+        The returned vectors are embedded in the restricted C|O|V MO order so
+        they can be written as cube orbitals.  They are block-resolved
+        contracted spin-adapted configurations, not ordinary reference-to-state
+        NTOs.
+        """
+        if self.type_u:
+            raise NotImplementedError("block_nto is implemented for restricted XSF-TDA blocks only")
+
+        cv, co, ov, oo = self._state_analysis_blocks(state)
+        nmo = self.nc + self.no + self.nv
+        slices = {
+            "C": slice(0, self.nc),
+            "O": slice(self.nc, self.nc + self.no),
+            "V": slice(self.nc + self.no, nmo),
+        }
+        specs = {
+            "CV": (cv.T, "C", "V"),
+            "CO": (co.T, "C", "O"),
+            "OV": (ov.T, "O", "V"),
+            "OO": (oo, "O", "O"),
+        }
+
+        result = {}
+        for name, (matrix, source, target) in specs.items():
+            matrix = np.asarray(matrix)
+            particles_local, singular_values, holes_h = np.linalg.svd(matrix, full_matrices=False)
+            holes_local = holes_h.conj().T
+            block_weight = float(np.real_if_close(np.sum(np.abs(singular_values) ** 2)))
+            if nroots is not None:
+                keep = min(int(nroots), singular_values.size)
+                singular_values = singular_values[:keep]
+                particles_local = particles_local[:, :keep]
+                holes_local = holes_local[:, :keep]
+
+            holes = np.zeros((nmo, singular_values.size), dtype=holes_local.dtype)
+            particles = np.zeros((nmo, singular_values.size), dtype=particles_local.dtype)
+            holes[slices[source], :] = holes_local
+            particles[slices[target], :] = particles_local
+            block = {
+                "source": source,
+                "target": target,
+                "singular_values": singular_values,
+                "weights": np.abs(singular_values) ** 2,
+                "block_weight": block_weight,
+                "holes": holes,
+                "particles": particles,
+            }
+            if name == "OO":
+                block["trace_overlap"] = np.sum(holes_local.conj() * particles_local, axis=0)
+            result[name] = block
+        return result
+
     def _transition_dipole_matrix_u(self):
         ints_aa, ints_bb, ctx = self._dipole_mo_integrals()
         occ_a = _asnumpy(ctx.occidx_a)
