@@ -8,14 +8,18 @@ from XTDDFT_dev.XTDDFT.symmetry import (
     SymmetryAnalysisReport,
     analyze_excited_state_symmetry,
     build_ao_operation_matrices,
+    build_ao_permutation_operation_matrices,
     build_mo_operation_matrices,
     decompose_characters,
     detect_geometry_symmetry,
+    detect_pbc_spglib_symmetry,
     determinant_characters,
     group_degenerate_roots,
     make_method_adapter,
     MOOperationMatrices,
+    _atom_map_for_fractional_operation,
     _state_overlap_with_transformed,
+    select_active_orbital_spaces,
 )
 
 
@@ -83,18 +87,83 @@ def test_detect_geometry_symmetry_extracts_libmsym_character_table():
     assert set(geometry.character_table.irreps) == {"A1", "A2", "B1", "B2"}
 
 
+def test_pbc_spglib_symmetry_keeps_fractional_translations_for_d3d():
+    pytest.importorskip("spglib")
+    pytest.importorskip("libmsym")
+
+    lattice = np.eye(3) * 10.0
+    center = np.array([0.70833, 0.54167, 0.54167])
+    seed = np.array([0.123, 0.234, 0.345])
+    rotations = [
+        np.array(r, dtype=int)
+        for r in (
+            [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+            [[-1, 0, 0], [0, -1, 0], [0, 0, -1]],
+            [[0, 0, 1], [1, 0, 0], [0, 1, 0]],
+            [[0, 0, -1], [-1, 0, 0], [0, -1, 0]],
+            [[0, 1, 0], [0, 0, 1], [1, 0, 0]],
+            [[0, -1, 0], [0, 0, -1], [-1, 0, 0]],
+            [[0, 0, -1], [0, -1, 0], [-1, 0, 0]],
+            [[0, 0, 1], [0, 1, 0], [1, 0, 0]],
+            [[0, -1, 0], [-1, 0, 0], [0, 0, -1]],
+            [[0, 1, 0], [1, 0, 0], [0, 0, 1]],
+            [[-1, 0, 0], [0, 0, -1], [0, -1, 0]],
+            [[1, 0, 0], [0, 0, 1], [0, 1, 0]],
+        )
+    ]
+    frac_coords = [center]
+    for rotation in rotations:
+        translation = center - center @ rotation.T
+        candidate = (seed @ rotation.T + translation) % 1.0
+        if not any(np.linalg.norm(candidate - old) < 1.0e-10 for old in frac_coords):
+            frac_coords.append(candidate)
+
+    class FakeCell:
+        natm = len(frac_coords)
+
+        def atom_symbol(self, index):
+            return "Si" if index == 0 else "C"
+
+        def atom_coords(self):
+            return np.asarray(frac_coords) @ lattice
+
+        def lattice_vectors(self):
+            return lattice
+
+    geometry = detect_pbc_spglib_symmetry(FakeCell(), symprec=1.0e-4, point_group="D3d")
+
+    assert geometry.point_group == "D3d"
+    assert len(geometry.fractional_operations) == 12
+    assert len(geometry.fractional_translations) == 12
+    assert geometry.character_table.class_counts == (1, 2, 2, 1, 3, 3)
+
+    inversion_index = [
+        i for i, rotation in enumerate(geometry.fractional_operations)
+        if np.array_equal(rotation, -np.eye(3, dtype=int))
+    ][0]
+    atom_map = _atom_map_for_fractional_operation(
+        FakeCell(),
+        geometry.fractional_operations[inversion_index],
+        geometry.fractional_translations[inversion_index],
+        tol=1.0e-4,
+    )
+    assert atom_map[0] == 0
+
+
 def test_nh3_c3v_ao_operation_matrices_preserve_overlap():
     pytest.importorskip("libmsym")
     pytest.importorskip("pyscf")
     from pyscf import gto
 
+    h_radius = 0.9377
+    h_z = -0.2706666667
     mol = gto.M(
-        atom="""
-        N   0.0000000000   0.0000000000   0.1160000000
-        H   0.0000000000   0.9377000000  -0.2706666667
-        H   0.8124219201  -0.4688500000  -0.2706666667
-        H  -0.8124219201  -0.4688500000  -0.2706666667
-        """,
+        atom=[
+            ("N", (0.0, 0.0, 0.1160000000)),
+            ("H", (h_radius, 0.0, h_z)),
+            ("H", (-0.5 * h_radius, np.sqrt(3.0) * 0.5 * h_radius, h_z)),
+            ("H", (-0.5 * h_radius, -np.sqrt(3.0) * 0.5 * h_radius, h_z)),
+        ],
         basis="sto-3g",
         unit="Angstrom",
         verbose=0,
@@ -106,18 +175,46 @@ def test_nh3_c3v_ao_operation_matrices_preserve_overlap():
         assert np.linalg.norm(op.T @ overlap @ op - overlap) < 5.0e-3
 
 
+@pytest.mark.parametrize("basis,tol", [("sto-3g", 1.0e-8), ("cc-pvdz", 1.0e-7)])
+def test_nh3_c3v_ao_permutation_matrices_preserve_overlap_for_sp_and_d_shells(basis, tol):
+    pytest.importorskip("libmsym")
+    pytest.importorskip("pyscf")
+    from pyscf import gto
+
+    h_radius = 0.9377
+    h_z = -0.2706666667
+    mol = gto.M(
+        atom=[
+            ("N", (0.0, 0.0, 0.1160000000)),
+            ("H", (h_radius, 0.0, h_z)),
+            ("H", (-0.5 * h_radius, np.sqrt(3.0) * 0.5 * h_radius, h_z)),
+            ("H", (-0.5 * h_radius, -np.sqrt(3.0) * 0.5 * h_radius, h_z)),
+        ],
+        basis=basis,
+        unit="Angstrom",
+        verbose=0,
+    )
+    geometry = detect_geometry_symmetry(mol, threshold=1.0e-3)
+    ao_ops = build_ao_permutation_operation_matrices(mol, geometry, tol=1.0e-3)
+    overlap = mol.intor_symmetric("int1e_ovlp")
+    for op in ao_ops:
+        assert np.linalg.norm(op.T @ overlap @ op - overlap) < tol
+
+
 def test_mo_operation_matrices_have_expected_spin_shapes_for_roks_nh3():
     pytest.importorskip("libmsym")
     pytest.importorskip("pyscf")
     from pyscf import dft, gto
 
+    h_radius = 0.9377
+    h_z = -0.2706666667
     mol = gto.M(
-        atom="""
-        N   0.0000000000   0.0000000000   0.1160000000
-        H   0.0000000000   0.9377000000  -0.2706666667
-        H   0.8124219201  -0.4688500000  -0.2706666667
-        H  -0.8124219201  -0.4688500000  -0.2706666667
-        """,
+        atom=[
+            ("N", (0.0, 0.0, 0.1160000000)),
+            ("H", (h_radius, 0.0, h_z)),
+            ("H", (-0.5 * h_radius, np.sqrt(3.0) * 0.5 * h_radius, h_z)),
+            ("H", (-0.5 * h_radius, -np.sqrt(3.0) * 0.5 * h_radius, h_z)),
+        ],
         basis="sto-3g",
         unit="Angstrom",
         spin=2,
@@ -144,13 +241,15 @@ def test_nh3_c3v_xsf_and_xtda_reports_assign_reference_and_e_pairs():
 
     set_backend("cpu")
     lib.num_threads(2)
+    h_radius = 0.9377
+    h_z = -0.2706666667
     mol = gto.M(
-        atom="""
-        N   0.0000000000   0.0000000000   0.1160000000
-        H   0.0000000000   0.9377000000  -0.2706666667
-        H   0.8124219201  -0.4688500000  -0.2706666667
-        H  -0.8124219201  -0.4688500000  -0.2706666667
-        """,
+        atom=[
+            ("N", (0.0, 0.0, 0.1160000000)),
+            ("H", (h_radius, 0.0, h_z)),
+            ("H", (-0.5 * h_radius, np.sqrt(3.0) * 0.5 * h_radius, h_z)),
+            ("H", (-0.5 * h_radius, -np.sqrt(3.0) * 0.5 * h_radius, h_z)),
+        ],
         basis="sto-3g",
         unit="Angstrom",
         spin=2,
@@ -164,7 +263,10 @@ def test_nh3_c3v_xsf_and_xtda_reports_assign_reference_and_e_pairs():
     xsf = XSF_TDA_down(mf, method=0, SA=3, davidson=False)
     xsf.kernel(nstates=4, remove=None, save=False)
     xsf_report = analyze_excited_state_symmetry(
-        xsf, energy_tol=1.0e-4, symmetry_tol=1.0e-3, grid_level=4
+        xsf,
+        energy_tol=1.0e-4,
+        symmetry_tol=1.0e-3,
+        projection_backend="ao_permutation",
     )
     assert xsf_report.group_name == "C3v"
     assert xsf_report.reference_assignment["A1"] > 0.99
@@ -173,7 +275,10 @@ def test_nh3_c3v_xsf_and_xtda_reports_assign_reference_and_e_pairs():
     xtda = XTDA(mf, method=0, davidson=False, so2st=False)
     xtda.kernel(nstates=4, save=False)
     xtda_report = analyze_excited_state_symmetry(
-        xtda, energy_tol=1.0e-2, symmetry_tol=1.0e-3, grid_level=4
+        xtda,
+        energy_tol=1.0e-2,
+        symmetry_tol=1.0e-3,
+        projection_backend="ao_permutation",
     )
     assert xtda_report.group_name == "C3v"
     assert xtda_report.reference_assignment["A1"] > 0.99
@@ -238,6 +343,37 @@ def test_unrestricted_xsf_down_projection_uses_beta_virtual_rotation():
     adapter = make_method_adapter(td, method_name="XSF_TDA_down")
     value = _state_overlap_with_transformed(td, adapter, 0, mo_ops, 0)
     assert value == -1.0
+
+
+def test_xsf_active_orbital_selection_uses_large_amplitudes():
+    XSF_TDA_down = type("XSF_TDA_down", (), {})
+    td = XSF_TDA_down()
+    td.nc = 2
+    td.no = 1
+    td.nv = 3
+    td.re = False
+    td.type_u = False
+    td.occidx_a = np.array([0, 1, 2])
+    td.viridx_b = np.array([2, 3, 4, 5])
+    # Blocks are CV(2x3), CO(2x1), OV(1x3), OO(1x1).
+    vector = np.zeros(12)
+    vector[1 * 3 + 2] = 0.90  # CV: C index 1, V index 2 -> beta MO 5
+    vector[6 + 1] = 0.20      # CO: C index 1, O index 0 -> beta MO 2
+    vector[8 + 1] = 0.10      # OV: O index 0, V index 1 -> beta MO 4
+    td.v = vector.reshape(-1, 1)
+
+    selection = select_active_orbital_spaces(
+        td,
+        root_group=(0,),
+        amplitude_weight_cutoff=1.0e-6,
+        cumulative_weight_cutoff=0.995,
+    )
+
+    assert selection.spaces[("alpha", "C")] == (1,)
+    assert selection.spaces[("alpha", "O")] == (2,)
+    assert selection.spaces[("beta", "O")] == (2,)
+    assert selection.spaces[("beta", "V")] == (4, 5)
+    assert selection.analyzed_weight > 0.999
 
 
 def test_report_format_text_contains_scope_warning_for_supercell():

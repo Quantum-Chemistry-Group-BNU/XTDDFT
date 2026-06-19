@@ -79,10 +79,17 @@ dense_batch_size = 64
 # point_group = None 时由 libmsym 自动识别有限超胞点群。
 # 如果结构有轻微数值噪声导致自动识别降群，可以手动指定，例如 "C3v"、"D3d"。
 point_group = None
+# 读取 PySCF chk 时，这里的长度单位跟 cell.lattice_vectors()/atom_coords() 一致，通常是 Bohr。
 symmetry_tol = 1.0e-3
 energy_tol = 1.0e-5
 grid_level = 4
 grid_block_size = 20000
+projection_backend = "spglib_ao_permutation"
+analysis_mode = "active"
+amplitude_weight_cutoff = 1.0e-6
+cumulative_weight_cutoff = 0.995
+min_analyzed_weight = 0.95
+reference_mode = "open_shell"
 
 # 如果想把报告保存成文件，填入文件名；否则设为 None，只打印到屏幕。
 output_file = None
@@ -299,6 +306,12 @@ print("symmetry_tol:", symmetry_tol)
 print("energy_tol:", energy_tol)
 print("grid_level:", grid_level)
 print("grid_block_size:", grid_block_size)
+print("projection_backend:", projection_backend)
+print("analysis_mode:", analysis_mode)
+print("amplitude_weight_cutoff:", amplitude_weight_cutoff)
+print("cumulative_weight_cutoff:", cumulative_weight_cutoff)
+print("min_analyzed_weight:", min_analyzed_weight)
+print("reference_mode:", reference_mode)
 print("=" * 80)
 
 
@@ -313,6 +326,12 @@ report = analyze_excited_state_symmetry(
     point_group=point_group,
     grid_level=grid_level,
     grid_block_size=grid_block_size,
+    projection_backend=projection_backend,
+    analysis_mode=analysis_mode,
+    reference_mode=reference_mode,
+    amplitude_weight_cutoff=amplitude_weight_cutoff,
+    cumulative_weight_cutoff=cumulative_weight_cutoff,
+    min_analyzed_weight=min_analyzed_weight,
 )
 
 text = report.format_text()

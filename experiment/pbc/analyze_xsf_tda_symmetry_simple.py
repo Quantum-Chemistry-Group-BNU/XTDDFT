@@ -66,6 +66,7 @@ SA = 3
 # 对称性参数。
 # point_group=None 表示自动识别；如果自动识别降群，可以手动设成 "C3v"、"D3d" 等。
 point_group = None
+# 读取 PySCF chk 时，这里的长度单位跟 cell.lattice_vectors()/atom_coords() 一致，通常是 Bohr。
 symmetry_tol = 1.0e-3
 
 # energy_tol 控制哪些 root 被认为是近简并子空间。
@@ -74,6 +75,20 @@ energy_tol = 1.0e-5
 # 每次处理多少个 grid 点。这个参数控制内存。
 # 对 3000 个 AO，20000 个 grid 点大约需要几 GB 级别内存；内存紧张就改成 5000 或 10000。
 grid_block_size = 20000
+
+# 投影后端：
+#   "spglib_ao_permutation": 使用 spglib 周期性操作 R,t 做原子置换 + AO shell 旋转，推荐 PBC 缺陷超胞使用。
+#   "ao_permutation": 使用原子置换 + AO shell 旋转，不需要读取/积分 grid，适合严格点群几何。
+#   "grid": 使用保存好的 Becke grid 做数值投影，较慢但对轻微几何误差更宽容。
+projection_backend = "spglib_ao_permutation"
+
+# active-subspace 对称性分析参数。
+# 程序会从 XSF amplitude 中筛选重要组态，只对相关轨道子空间做投影。
+analysis_mode = "active"
+amplitude_weight_cutoff = 1.0e-6
+cumulative_weight_cutoff = 0.995
+min_analyzed_weight = 0.95
+reference_mode = "open_shell"
 
 
 # =============================================================================
@@ -90,7 +105,7 @@ if not chk_path.exists():
 if not xsf_path.exists():
     raise FileNotFoundError(f"Cannot find XSF result npz file: {xsf_path.resolve()}")
 
-if not grid_path.exists():
+if projection_backend == "grid" and not grid_path.exists():
     raise FileNotFoundError(f"Cannot find saved grid npz file: {grid_path.resolve()}")
 
 
@@ -122,25 +137,29 @@ if vectors.shape[1] != energies_ha.size:
 
 
 # =============================================================================
-# 4. 读取已经保存好的 Becke grids
+# 4. 如果使用 grid 后端，读取已经保存好的 Becke grids
 # =============================================================================
 
-grid_data = np.load(grid_path)
+grid_coords = None
+grid_weights = None
 
-if "coords" not in grid_data or "weights" not in grid_data:
-    raise KeyError("grid npz must contain keys 'coords' and 'weights'.")
+if projection_backend == "grid":
+    grid_data = np.load(grid_path)
 
-grid_coords = np.asarray(grid_data["coords"])
-grid_weights = np.asarray(grid_data["weights"])
+    if "coords" not in grid_data or "weights" not in grid_data:
+        raise KeyError("grid npz must contain keys 'coords' and 'weights'.")
 
-if grid_coords.ndim != 2 or grid_coords.shape[1] != 3:
-    raise ValueError(f"grid coords must have shape (ngrids, 3), got {grid_coords.shape}")
+    grid_coords = np.asarray(grid_data["coords"])
+    grid_weights = np.asarray(grid_data["weights"])
 
-if grid_weights.ndim != 1 or grid_weights.shape[0] != grid_coords.shape[0]:
-    raise ValueError(
-        "grid weights must be 1D and have the same length as coords. "
-        f"coords={grid_coords.shape}, weights={grid_weights.shape}"
-    )
+    if grid_coords.ndim != 2 or grid_coords.shape[1] != 3:
+        raise ValueError(f"grid coords must have shape (ngrids, 3), got {grid_coords.shape}")
+
+    if grid_weights.ndim != 1 or grid_weights.shape[0] != grid_coords.shape[0]:
+        raise ValueError(
+            "grid weights must be 1D and have the same length as coords. "
+            f"coords={grid_coords.shape}, weights={grid_weights.shape}"
+        )
 
 
 # =============================================================================
@@ -215,7 +234,7 @@ xsf.converged = np.ones(energies_ha.size, dtype=bool)
 print("backend:", backend_info())
 print("chk file:", chk_path.resolve())
 print("XSF file:", xsf_path.resolve())
-print("grid file:", grid_path.resolve())
+print("grid file:", grid_path.resolve() if projection_backend == "grid" else "not used")
 print("finite-supercell point-group analysis: yes")
 print("cell natm:", cell.natm)
 print("cell nelectron:", cell.nelectron)
@@ -229,12 +248,19 @@ print("XSF SA:", saved_SA)
 print("XSF remove:", xsf.re)
 print("energies / eV:", energies_ha * ha2eV)
 print("vectors shape:", vectors.shape)
-print("grid coords shape:", grid_coords.shape)
-print("grid weights shape:", grid_weights.shape)
+if projection_backend == "grid":
+    print("grid coords shape:", grid_coords.shape)
+    print("grid weights shape:", grid_weights.shape)
 print("point_group override:", point_group)
 print("symmetry_tol:", symmetry_tol)
 print("energy_tol:", energy_tol)
 print("grid_block_size:", grid_block_size)
+print("projection_backend:", projection_backend)
+print("analysis_mode:", analysis_mode)
+print("amplitude_weight_cutoff:", amplitude_weight_cutoff)
+print("cumulative_weight_cutoff:", cumulative_weight_cutoff)
+print("min_analyzed_weight:", min_analyzed_weight)
+print("reference_mode:", reference_mode)
 print("=" * 80)
 
 
@@ -250,6 +276,12 @@ report = analyze_excited_state_symmetry(
     grid_coords=grid_coords,
     grid_weights=grid_weights,
     grid_block_size=grid_block_size,
+    projection_backend=projection_backend,
+    analysis_mode=analysis_mode,
+    reference_mode=reference_mode,
+    amplitude_weight_cutoff=amplitude_weight_cutoff,
+    cumulative_weight_cutoff=cumulative_weight_cutoff,
+    min_analyzed_weight=min_analyzed_weight,
 )
 
 print(report.format_text())
