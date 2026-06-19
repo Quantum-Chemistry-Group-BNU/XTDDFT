@@ -76,20 +76,21 @@ def reference_spin_square(mf, mol):
 
 
 # ===== User parameters =====
-xc = "CAM-B3LYP"
+xc = "PBE0"
 basis = "6-31G"
 charge = 0
 spin = 2
+cycle = 200
 unit = "Angstrom"
 
-nstates = 8
+nstates = 6
 method = 1  # 1 = multicollinear XSF kernel
 SA = 3
 collinear_samples = 20
 
 use_density_fit = True
 max_memory = 4000
-grid_level = 3
+grid_level = 4
 output_file = "xsf_tda_down_gpu_mcol_results.npz"
 # ===========================
 
@@ -117,7 +118,11 @@ if use_density_fit:
     mf = mf.density_fit()
 mf.max_memory = max_memory
 mf.grids.level = grid_level
+mf.max_cycle = cycle
 mf.chkfile = "xsf_tda_down_gpu_roks_ref.chk"
+mf.conv_tol = 1e-10        # 能量收敛阈值
+mf.conv_tol_grad = 1e-6    # orbital gradient / density 相关的收敛阈值
+
 
 mf.kernel()
 if not mf.converged:

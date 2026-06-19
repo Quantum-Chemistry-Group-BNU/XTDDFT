@@ -53,17 +53,13 @@ print("backend:", backend_info())
 # ===== User parameters =====
 # 下面这些是最常改的参数。
 # xc/basis 控制 DFT 泛函和 AO 基组；charge/spin/unit 定义分子电荷、自旋和坐标单位。
-xc = "CAM-B3LYP"
+xc = "PBE0"
 basis = "6-31G"
 charge = 0
 spin = 2
 unit = "Angstrom"
-
-# nstates 是要求解的激发态个数。
-# method=1 表示使用 multicollinear kernel；method=0 是较简化的 ALDA0 路径。
-# SA=3 表示使用完整的 spin-adapted 修正。
-# collinear_samples 是 multicollinear kernel 的采样数，越大通常越稳但越慢。
-nstates = 8
+cycle = 200
+nstates = 6
 method = 1  # 1 = multicollinear XSF kernel
 SA = 3
 collinear_samples = 20
@@ -102,8 +98,11 @@ if use_density_fit:
     mf = mf.density_fit()
 mf.max_memory = max_memory
 mf.grids.level = grid_level
+mf.init_guess = 'huckle'
+mf.max_cycle = cycle
 mf.chkfile = "xsf_tda_down_cpu_roks_ref.chk"
-
+mf.conv_tol = 1e-10        # 能量收敛阈值
+mf.conv_tol_grad = 1e-6    # orbital gradient / density 相关的收敛阈值
 # kernel() 会真正开始 SCF 自洽计算。
 mf.kernel()
 if not mf.converged:

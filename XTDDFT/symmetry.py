@@ -846,6 +846,11 @@ def analyze_excited_state_symmetry(
     ``projection_backend="grid"`` uses numerical AO projection on PySCF grids.
     ``projection_backend="ao_permutation"`` uses atom permutations and AO shell
     rotations, which is much faster when the geometry is symmetry-adapted.
+
+    The raw TD eigenvector transforms as an excitation/transition vector.  The
+    reported root assignment is the final N-electron state symmetry, obtained
+    by multiplying the transition-vector characters by the reference-state
+    characters before character projection.
     """
 
     mf = getattr(td_obj, "mf", None)
@@ -890,21 +895,24 @@ def analyze_excited_state_symmetry(
             projection_backend=projection_backend,
             operation_tol=symmetry_tol,
         )
-        assignments = [
-            decompose_characters(
-                _characters_by_class(
-                    _excited_subspace_operation_characters(td_obj, mo_ops, group),
-                    geometry,
-                ),
-                geometry.character_table,
-            )
-            for group in groups
-        ]
         reference_chars, open_shell_chars = _reference_operation_characters(mf, mo_ops)
+        reference_class_chars = _characters_by_class(reference_chars, geometry)
         reference_assignment = decompose_characters(
-            _characters_by_class(reference_chars, geometry),
+            reference_class_chars,
             geometry.character_table,
         )
+        assignments = []
+        for group in groups:
+            excitation_class_chars = _characters_by_class(
+                _excited_subspace_operation_characters(td_obj, mo_ops, group),
+                geometry,
+            )
+            assignments.append(
+                decompose_characters(
+                    reference_class_chars * excitation_class_chars,
+                    geometry.character_table,
+                )
+            )
         open_shell_assignment = None
         if open_shell_chars is not None:
             open_shell_assignment = decompose_characters(
@@ -942,23 +950,26 @@ def analyze_excited_state_symmetry(
             projection_backend=projection_backend,
             operation_tol=symmetry_tol,
         )
-        assignments = [
-            decompose_characters(
-                _characters_by_class(
-                    _active_excited_subspace_operation_characters(
-                        td_obj, group, selection, subspace_ops
-                    ),
-                    geometry,
-                ),
-                geometry.character_table,
-            )
-            for group, selection in zip(groups, selections)
-        ]
         reference_chars = _reference_active_operation_characters(reference_spaces, subspace_ops)
+        reference_class_chars = _characters_by_class(reference_chars, geometry)
         reference_assignment = decompose_characters(
-            _characters_by_class(reference_chars, geometry),
+            reference_class_chars,
             geometry.character_table,
         )
+        assignments = []
+        for group, selection in zip(groups, selections):
+            excitation_class_chars = _characters_by_class(
+                _active_excited_subspace_operation_characters(
+                    td_obj, group, selection, subspace_ops
+                ),
+                geometry,
+            )
+            assignments.append(
+                decompose_characters(
+                    reference_class_chars * excitation_class_chars,
+                    geometry.character_table,
+                )
+            )
         open_shell_assignment = reference_assignment if reference_mode == "open_shell" else None
         approximate = False
         for group, selection in zip(groups, selections):
