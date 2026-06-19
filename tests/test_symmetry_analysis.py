@@ -1,26 +1,29 @@
 from types import SimpleNamespace
+import inspect
 
 import numpy as np
 import pytest
 
-from XTDDFT_dev.XTDDFT.symmetry import (
+from XTDDFT_dev.utils.symmetry import (
     CharacterTable,
     SymmetryAnalysisReport,
     analyze_excited_state_symmetry,
-    build_ao_operation_matrices,
     build_ao_permutation_operation_matrices,
     build_mo_operation_matrices,
     decompose_characters,
     detect_geometry_symmetry,
     detect_pbc_spglib_symmetry,
+    dominant_irrep_labels,
     determinant_characters,
     group_degenerate_roots,
     make_method_adapter,
     MOOperationMatrices,
     _atom_map_for_fractional_operation,
+    _final_state_assignment,
     _state_overlap_with_transformed,
     select_active_orbital_spaces,
 )
+from XTDDFT_dev.experiment.symmetry_grid import build_ao_operation_matrices
 
 
 def test_group_degenerate_roots_groups_close_energies():
@@ -61,6 +64,73 @@ def test_decompose_characters_uses_conjugacy_class_counts():
     assert weights["A1"] == 0.0
     assert weights["A2"] == 0.0
     assert weights["E"] == 1.0
+
+
+def test_final_state_assignment_multiplies_reference_and_excitation_characters():
+    table = CharacterTable(
+        group_name="C2v",
+        operation_labels=("E", "C2", "sv_xz", "sv_yz"),
+        irreps={
+            "A1": (1, 1, 1, 1),
+            "A2": (1, 1, -1, -1),
+            "B1": (1, -1, 1, -1),
+            "B2": (1, -1, -1, 1),
+        },
+    )
+    geometry = SimpleNamespace(character_table=table, operation_class_indices=(0, 1, 2, 3))
+    reference_a2 = np.array([1, 1, -1, -1])
+    excitation_b1 = np.array([1, -1, 1, -1])
+
+    weights = _final_state_assignment(reference_a2, excitation_b1, geometry)
+
+    assert weights["B2"] == 1.0
+    assert weights["A1"] == 0.0
+
+
+def test_final_state_assignment_multiplies_before_class_averaging():
+    table = CharacterTable(
+        group_name="C3v",
+        operation_labels=("E", "2C3", "3sv"),
+        class_counts=(1, 2, 3),
+        irreps={
+            "A1": (1, 1, 1),
+            "A2": (1, 1, -1),
+            "E": (2, -1, 0),
+        },
+    )
+    geometry = SimpleNamespace(character_table=table, operation_class_indices=(0, 1, 1, 2, 2, 2))
+    reference_chars = np.array([1, 1, 3, 1, 1, 1], dtype=float)
+    excitation_chars = np.array([1, 1, -1, 1, 1, 1], dtype=float)
+
+    weights = _final_state_assignment(reference_chars, excitation_chars, geometry)
+
+    assert weights["A2"] == pytest.approx(-2.0 / 3.0)
+
+
+def test_dominant_irrep_labels_expands_degenerate_root_groups():
+    report = SymmetryAnalysisReport(
+        group_name="C3v",
+        finite_supercell=False,
+        root_groups=[(0, 1), (2,)],
+        assignments=[
+            {"A1": 0.0, "E": 1.0},
+            {"A1": 1.0, "E": 0.0},
+        ],
+    )
+
+    assert dominant_irrep_labels(report) == ["E", "E", "A1"]
+
+
+def test_tda_analyse_methods_expose_opt_in_symmetry_options():
+    from XTDDFT_dev.XTDDFT.sf_tda_up import SF_TDA_up
+    from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
+    from XTDDFT_dev.XTDDFT.xtda import XTDA
+
+    for cls in (SF_TDA_up, XSF_TDA_down, XTDA):
+        params = inspect.signature(cls.analyse).parameters
+        assert params["analyze_symmetry"].default is False
+        assert params["point_group"].default is None
+        assert params["projection_backend"].default == "auto"
 
 
 def test_detect_geometry_symmetry_extracts_libmsym_character_table():

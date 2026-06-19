@@ -2,7 +2,7 @@
 
 This module is intentionally narrow: it targets gamma-point GPU4PySCF PBC GDF
 objects whose compressed CDERI tensor has been written by
-XTDDFT_dev.XTDDFT.df_cderi_cache.  The J/K contraction reads auxiliary-function
+XTDDFT_dev.utils.df_cderi_cache.  The J/K contraction reads auxiliary-function
 blocks from HDF5 and never materializes the full CDERI tensor in host memory.
 """
 
@@ -233,7 +233,7 @@ def streaming_jk_from_cderi_block(cderi, dm_work, *, with_j=True, with_k=True, x
 
 
 def _load_xtddft_cache_helpers():
-    from XTDDFT_dev.XTDDFT.df_cderi_cache import (
+    from XTDDFT_dev.utils.df_cderi_cache import (
         DFCderiCacheConfig,
         pbc_gamma_cderi_cache_path,
         prepare_pbc_gamma_df_cderi_cache,

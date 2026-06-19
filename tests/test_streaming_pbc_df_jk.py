@@ -6,7 +6,7 @@ import unittest
 import h5py
 import numpy as np
 
-from XTDDFT.streaming_pbc_df_jk import (
+from XTDDFT_dev.utils.streaming_pbc_df_jk import (
     _apply_ewald_exxdiv_for_gamma,
     _assert_cache_omega,
     _gamma_ewald_terms,

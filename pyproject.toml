@@ -17,9 +17,12 @@ dependencies = [
   "scipy",
   "pandas",
   "pyscf",
+  "h5py",
   "joblib",
   "opt_einsum",
   "psutil",
+  "spglib",
+  "libmsym",
 ]
 
 [project.optional-dependencies]
@@ -27,12 +30,21 @@ gpu = [
   "cupy",
   "gpu4pyscf",
 ]
+gpu-cuda11x = [
+  "cupy-cuda11x",
+  "gpu4pyscf",
+]
+gpu-cuda12x = [
+  "cupy-cuda12x",
+  "gpu4pyscf",
+]
 
 [tool.setuptools]
 include-package-data = true
-packages = ["XTDDFT_dev", "XTDDFT_dev.XTDDFT", "XTDDFT_dev.utils"]
+packages = ["XTDDFT_dev", "XTDDFT_dev.XTDDFT", "XTDDFT_dev.utils", "XTDDFT_dev.experiment"]
 
 [tool.setuptools.package-dir]
 "XTDDFT_dev" = "."
 "XTDDFT_dev.XTDDFT" = "XTDDFT"
 "XTDDFT_dev.utils" = "utils"
+"XTDDFT_dev.experiment" = "experiment"

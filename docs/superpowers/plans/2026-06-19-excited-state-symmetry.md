@@ -21,7 +21,7 @@
 ```python
 import numpy as np
 
-from XTDDFT_dev.XTDDFT.symmetry import (
+from XTDDFT_dev.utils.symmetry import (
     CharacterTable,
     decompose_characters,
     group_degenerate_roots,
@@ -59,7 +59,7 @@ Run:
 /home/chang/soft/miniconda3/envs/clf_quimb/bin/python -m pytest tests/test_symmetry_analysis.py -q
 ```
 
-Expected: import fails because `XTDDFT_dev.XTDDFT.symmetry` does not exist.
+Expected: import fails because `XTDDFT_dev.utils.symmetry` does not exist.
 
 - [ ] **Step 3: Implement minimal data types and functions**
 
@@ -89,7 +89,7 @@ Use lightweight `types.SimpleNamespace` objects with the same attributes used by
 from types import SimpleNamespace
 import numpy as np
 
-from XTDDFT_dev.XTDDFT.symmetry import make_method_adapter
+from XTDDFT_dev.utils.symmetry import make_method_adapter
 
 
 def test_xtda_restricted_adapter_splits_spin_tensor_blocks():
@@ -169,7 +169,7 @@ Expected: all adapter and projection tests pass.
 ```python
 import pytest
 
-from XTDDFT_dev.XTDDFT.symmetry import (
+from XTDDFT_dev.utils.symmetry import (
     SymmetryAnalysisReport,
     analyze_excited_state_symmetry,
 )
@@ -231,7 +231,7 @@ Expected: all tests pass.
 ```python
 import numpy as np
 
-from XTDDFT_dev.XTDDFT.symmetry import determinant_characters
+from XTDDFT_dev.utils.symmetry import determinant_characters
 
 
 def test_determinant_characters_for_single_open_shell_b1():
@@ -290,7 +290,7 @@ Run:
 
 ```bash
 /home/chang/soft/miniconda3/envs/clf_quimb/bin/python - <<'PY'
-from XTDDFT_dev.XTDDFT.symmetry import group_degenerate_roots, make_method_adapter
+from XTDDFT_dev.utils.symmetry import group_degenerate_roots, make_method_adapter
 print(group_degenerate_roots([0.0, 1.0], tol=1e-5))
 PY
 ```

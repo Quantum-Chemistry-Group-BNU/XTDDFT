@@ -38,7 +38,7 @@ from pyscf.pbc.scf import chkfile as pbc_chkfile
 
 from XTDDFT_dev.utils.backend import backend_info, set_backend
 from XTDDFT_dev.utils.unit import ha2eV
-from XTDDFT_dev.XTDDFT.symmetry import analyze_excited_state_symmetry
+from XTDDFT_dev.utils.symmetry import analyze_excited_state_symmetry
 from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
 
 

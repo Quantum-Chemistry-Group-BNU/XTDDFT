@@ -13,7 +13,7 @@ from .base import (
     _run_davidson,
     _system,
 )
-from .hxc_part import gen_response_tda
+from ..utils.hxc_part import gen_response_tda
 from ..utils.backend import _asarray, _asnumpy, backend, contract, require_cupy, set_backend, xp
 from ..utils.unit import ha2eV
 
@@ -698,15 +698,43 @@ class XTDA(XTDDFT_base):
             self.save_results(save_file)
         return _asnumpy(self.e[:nstates] * ha2eV), self.v[:, :nstates]
 
-    def analyse(self, threshold=0.1, compute_s2=True):
+    def analyse(
+        self,
+        threshold=0.1,
+        compute_s2=True,
+        analyze_symmetry=False,
+        point_group=None,
+        symmetry_tol=1.0e-3,
+        energy_tol=1.0e-5,
+        projection_backend="auto",
+        symmetry_kwargs=None,
+    ):
         energies = _asnumpy(self.e) * ha2eV
         block0, block1, block2, block3 = self._split_analysis_vectors()
         self.dS2 = _asnumpy(self.deltaS2()) if compute_s2 else None
+        symmetry_labels = None
+        if analyze_symmetry:
+            from ..utils.symmetry import analyze_state_symmetry_labels
+
+            kwargs = {} if symmetry_kwargs is None else dict(symmetry_kwargs)
+            symmetry_labels, self.symmetry_report = analyze_state_symmetry_labels(
+                self,
+                point_group=point_group,
+                symmetry_tol=symmetry_tol,
+                energy_tol=energy_tol,
+                projection_backend=projection_backend,
+                active_roots=range(min(self.nstates, block0.shape[0])),
+                **kwargs,
+            )
         for istate in range(min(self.nstates, block0.shape[0])):
             ds2_text = f"{self.dS2[istate]:8.4f}" if self.dS2 is not None else "     n/a"
+            irrep_text = ""
+            if symmetry_labels is not None and istate < len(symmetry_labels):
+                irrep_text = f"    irrep:{symmetry_labels[istate]}"
             print(
                 f"D{istate + 1}    w:{energies[istate]:10.4f} eV"
                 f"    d<S^2>:{ds2_text}"
+                f"{irrep_text}"
             )
             if self.type_u:
                 labels = (

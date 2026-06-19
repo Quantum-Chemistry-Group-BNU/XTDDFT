@@ -2,7 +2,7 @@ import numpy as np
 from pyscf import ao2mo
 from pyscf.dft import numint2c
 from pyscf.pbc.dft import numint2c as pbc_numint2c
-from .hxc_part import (
+from ..utils.hxc_part import (
     cache_xc_kernel_sf_mc,
     gen_response_sf,
     gen_response_sf_mc,
@@ -292,12 +292,41 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
         logger.info('SF_TDA_up Davidson converged: {}', converged)
         return self.e, self.v
 
-    def analyse(self):
+    def analyse(
+        self,
+        threshold=0.1,
+        analyze_symmetry=False,
+        point_group=None,
+        symmetry_tol=1.0e-3,
+        energy_tol=1.0e-5,
+        projection_backend="auto",
+        symmetry_kwargs=None,
+    ):
+        symmetry_labels = None
+        if analyze_symmetry:
+            from ..utils.symmetry import analyze_state_symmetry_labels
+
+            kwargs = {} if symmetry_kwargs is None else dict(symmetry_kwargs)
+            symmetry_labels, self.symmetry_report = analyze_state_symmetry_labels(
+                self,
+                point_group=point_group,
+                symmetry_tol=symmetry_tol,
+                energy_tol=energy_tol,
+                projection_backend=projection_backend,
+                active_roots=range(self.nstates),
+                **kwargs,
+            )
         for nstate in range(self.nstates):
             value = _asnumpy(self.v[:, nstate])
             x_cv = value[:self.nc * self.nv].reshape(self.nc, self.nv)
-            print(f'Excited state {nstate+1} {float(_asnumpy(self.e)[nstate])*ha2eV:10.5f} eV')
-            for occ, vir in zip(*np.where(abs(x_cv) > 0.1)):
+            irrep_text = ""
+            if symmetry_labels is not None and nstate < len(symmetry_labels):
+                irrep_text = f" irrep={symmetry_labels[nstate]}"
+            print(
+                f'Excited state {nstate+1} '
+                f'{float(_asnumpy(self.e)[nstate])*ha2eV:10.5f} eV{irrep_text}'
+            )
+            for occ, vir in zip(*np.where(abs(x_cv) > threshold)):
                 vir_label = vir + 1 + self.nc + self.no
                 print(f'{100*x_cv[occ, vir]**2:3.0f}% CV(ab) '
                       f'{occ+1}a -> {vir_label}b {x_cv[occ, vir]:10.5f}')

@@ -118,6 +118,27 @@ class SymmetryAnalysisReport:
         return "\n".join(lines)
 
 
+def dominant_irrep_labels(report: SymmetryAnalysisReport) -> list[str | None]:
+    """Return the largest-weight irrep label for each root in a report."""
+
+    if not report.root_groups:
+        return []
+    nroots = max(max(group) for group in report.root_groups) + 1
+    labels: list[str | None] = [None] * nroots
+    for group, weights in zip(report.root_groups, report.assignments):
+        label = max(weights, key=weights.get) if weights else None
+        for root in group:
+            labels[int(root)] = label
+    return labels
+
+
+def analyze_state_symmetry_labels(td_obj, **kwargs):
+    """Run symmetry analysis and return per-root dominant irrep labels."""
+
+    report = analyze_excited_state_symmetry(td_obj, **kwargs)
+    return dominant_irrep_labels(report), report
+
+
 class BaseMethodAdapter:
     """Base class for method-specific stored-vector layouts."""
 
@@ -560,54 +581,6 @@ def detect_pbc_spglib_symmetry(
     )
 
 
-def build_ao_operation_matrices(
-    mol,
-    geometry: GeometrySymmetry,
-    grid_level: int = 5,
-    grid_coords=None,
-    grid_weights=None,
-    grid_block_size: int = 20000,
-):
-    """Build AO representation matrices for the detected symmetry operations."""
-
-    if grid_coords is None or grid_weights is None:
-        try:
-            from pyscf.dft import gen_grid
-        except ImportError as err:
-            raise ImportError("PySCF is required to build AO operation matrices") from err
-
-        grids = gen_grid.Grids(mol)
-        grids.level = int(grid_level)
-        grids.build()
-        coords = np.asarray(grids.coords)
-        weights = np.asarray(grids.weights)
-    else:
-        coords = np.asarray(grid_coords)
-        weights = np.asarray(grid_weights)
-        if coords.ndim != 2 or coords.shape[1] != 3:
-            raise ValueError(f"grid_coords must have shape (ngrids, 3); got {coords.shape}")
-        if weights.ndim != 1 or weights.shape[0] != coords.shape[0]:
-            raise ValueError(
-                "grid_weights must be a 1D array with the same length as grid_coords; "
-                f"got weights={weights.shape}, coords={coords.shape}"
-            )
-
-    overlap = _overlap_matrix(mol)
-    ops = []
-    for rotation in geometry.cartesian_operations:
-        projected_overlap = np.zeros_like(overlap, dtype=np.result_type(overlap, complex))
-        for p0 in range(0, coords.shape[0], int(grid_block_size)):
-            p1 = min(p0 + int(grid_block_size), coords.shape[0])
-            coord_block = coords[p0:p1]
-            weight_block = weights[p0:p1]
-            inverse_coords = (coord_block - geometry.origin) @ rotation + geometry.origin
-            ao = _eval_gto_values(mol, coord_block)
-            ao_rot = _eval_gto_values(mol, inverse_coords)
-            projected_overlap += ao.conj().T @ (weight_block[:, None] * ao_rot)
-        ops.append(np.linalg.solve(overlap, projected_overlap))
-    return tuple(ops)
-
-
 def build_ao_permutation_operation_matrices(
     mol,
     geometry: GeometrySymmetry,
@@ -672,6 +645,42 @@ def build_ao_spglib_operation_matrices(
     return tuple(ops)
 
 
+def _ao_operations_for_projection_backend(
+    system,
+    geometry: GeometrySymmetry,
+    projection_backend: str,
+    operation_tol: float,
+    grid_level: int,
+    grid_coords,
+    grid_weights,
+    grid_block_size: int,
+):
+    del grid_level, grid_coords, grid_weights, grid_block_size
+    projection_backend = _resolve_projection_backend(system, projection_backend)
+    if projection_backend == "ao_permutation":
+        return build_ao_permutation_operation_matrices(
+            system,
+            geometry,
+            tol=operation_tol,
+        )
+    if projection_backend == "spglib_ao_permutation":
+        return build_ao_spglib_operation_matrices(
+            system,
+            geometry,
+            tol=operation_tol,
+        )
+    raise ValueError(
+        "projection_backend must be 'auto', 'ao_permutation', or 'spglib_ao_permutation'. "
+        "The legacy grid backend now lives in experiment.symmetry_grid."
+    )
+
+
+def _resolve_projection_backend(system, projection_backend: str) -> str:
+    if projection_backend == "auto":
+        return "spglib_ao_permutation" if hasattr(system, "pbc_intor") else "ao_permutation"
+    return projection_backend
+
+
 def build_mo_operation_matrices(
     mf,
     geometry: GeometrySymmetry,
@@ -679,7 +688,7 @@ def build_mo_operation_matrices(
     grid_coords=None,
     grid_weights=None,
     grid_block_size: int = 20000,
-    projection_backend: str = "grid",
+    projection_backend: str = "auto",
     operation_tol: float = 1.0e-5,
 ):
     """Build spin-resolved MO representation matrices from AO operations."""
@@ -689,32 +698,16 @@ def build_mo_operation_matrices(
         system = getattr(mf, "cell", None)
     if system is None:
         raise TypeError("mf must expose either .mol or .cell")
-    if projection_backend == "grid":
-        ao_ops = build_ao_operation_matrices(
-            system,
-            geometry,
-            grid_level=grid_level,
-            grid_coords=grid_coords,
-            grid_weights=grid_weights,
-            grid_block_size=grid_block_size,
-        )
-    elif projection_backend == "ao_permutation":
-        ao_ops = build_ao_permutation_operation_matrices(
-            system,
-            geometry,
-            tol=operation_tol,
-        )
-    elif projection_backend == "spglib_ao_permutation":
-        ao_ops = build_ao_spglib_operation_matrices(
-            system,
-            geometry,
-            tol=operation_tol,
-        )
-    else:
-        raise ValueError(
-            "projection_backend must be 'grid', 'ao_permutation', or "
-            "'spglib_ao_permutation'"
-        )
+    ao_ops = _ao_operations_for_projection_backend(
+        system,
+        geometry,
+        projection_backend=projection_backend,
+        operation_tol=operation_tol,
+        grid_level=grid_level,
+        grid_coords=grid_coords,
+        grid_weights=grid_weights,
+        grid_block_size=grid_block_size,
+    )
     overlap = _overlap_matrix(system)
     coeff_alpha, coeff_beta = _spin_mo_coefficients(mf)
     alpha = tuple(coeff_alpha.conj().T @ overlap @ op @ coeff_alpha for op in ao_ops)
@@ -730,7 +723,7 @@ def build_mo_subspace_operation_matrices(
     grid_coords=None,
     grid_weights=None,
     grid_block_size: int = 20000,
-    projection_backend: str = "grid",
+    projection_backend: str = "auto",
     operation_tol: float = 1.0e-5,
 ) -> SubspaceOperationMatrices:
     """Build MO operation matrices only for selected orbital subspaces."""
@@ -749,20 +742,19 @@ def build_mo_subspace_operation_matrices(
         if len(tuple(indices)) > 0
     }
 
+    projection_backend = _resolve_projection_backend(system, projection_backend)
     if projection_backend in ("ao_permutation", "spglib_ao_permutation"):
         overlap = _overlap_matrix(system)
-        if projection_backend == "ao_permutation":
-            ao_ops = build_ao_permutation_operation_matrices(
-                system,
-                geometry,
-                tol=operation_tol,
-            )
-        else:
-            ao_ops = build_ao_spglib_operation_matrices(
-                system,
-                geometry,
-                tol=operation_tol,
-            )
+        ao_ops = _ao_operations_for_projection_backend(
+            system,
+            geometry,
+            projection_backend=projection_backend,
+            operation_tol=operation_tol,
+            grid_level=grid_level,
+            grid_coords=grid_coords,
+            grid_weights=grid_weights,
+            grid_block_size=grid_block_size,
+        )
         matrices = {key: [] for key in normalized_spaces}
         for op in ao_ops:
             for key, indices in normalized_spaces.items():
@@ -775,52 +767,9 @@ def build_mo_subspace_operation_matrices(
             spaces=normalized_spaces,
         )
 
-    if projection_backend != "grid":
-        raise ValueError(
-            "projection_backend must be 'grid', 'ao_permutation', or "
-            "'spglib_ao_permutation'"
-        )
-
-    if grid_coords is None or grid_weights is None:
-        try:
-            from pyscf.dft import gen_grid
-        except ImportError as err:
-            raise ImportError("PySCF is required to build MO subspace matrices") from err
-        grids = gen_grid.Grids(system)
-        grids.level = int(grid_level)
-        grids.build()
-        coords = np.asarray(grids.coords)
-        weights = np.asarray(grids.weights)
-    else:
-        coords = np.asarray(grid_coords)
-        weights = np.asarray(grid_weights)
-
-    matrices = {key: [] for key in normalized_spaces}
-
-    for rotation in geometry.cartesian_operations:
-        accum = {
-            key: np.zeros((len(indices), len(indices)), dtype=complex)
-            for key, indices in normalized_spaces.items()
-        }
-        for p0 in range(0, coords.shape[0], int(grid_block_size)):
-            p1 = min(p0 + int(grid_block_size), coords.shape[0])
-            coord_block = coords[p0:p1]
-            weight_block = weights[p0:p1]
-            inverse_coords = (coord_block - geometry.origin) @ rotation + geometry.origin
-            ao = _eval_gto_values(system, coord_block)
-            ao_rot = _eval_gto_values(system, inverse_coords)
-            for key, indices in normalized_spaces.items():
-                spin, _label = key
-                coeff = coeff_by_spin[spin][:, indices]
-                phi = ao @ coeff
-                phi_rot = ao_rot @ coeff
-                accum[key] += phi.conj().T @ (weight_block[:, None] * phi_rot)
-        for key in normalized_spaces:
-            matrices[key].append(np.real_if_close(accum[key], tol=1000))
-
-    return SubspaceOperationMatrices(
-        matrices={key: tuple(values) for key, values in matrices.items()},
-        spaces=normalized_spaces,
+    raise ValueError(
+        "projection_backend must be 'auto', 'ao_permutation', or 'spglib_ao_permutation'. "
+        "The legacy grid backend now lives in experiment.symmetry_grid."
     )
 
 
@@ -833,7 +782,7 @@ def analyze_excited_state_symmetry(
     grid_coords=None,
     grid_weights=None,
     grid_block_size: int = 20000,
-    projection_backend: str = "grid",
+    projection_backend: str = "auto",
     analysis_mode: str = "active",
     reference_mode: str = "open_shell",
     amplitude_weight_cutoff: float = 1.0e-6,
@@ -843,9 +792,13 @@ def analyze_excited_state_symmetry(
 ):
     """Analyze reference and excited-state symmetry for a TD object.
 
-    ``projection_backend="grid"`` uses numerical AO projection on PySCF grids.
+    ``projection_backend="auto"`` uses spglib AO permutation for PBC cells and
+    libmsym AO permutation for molecules.
     ``projection_backend="ao_permutation"`` uses atom permutations and AO shell
     rotations, which is much faster when the geometry is symmetry-adapted.
+    ``projection_backend="spglib_ao_permutation"`` is the PBC version: it keeps
+    spglib fractional translations and is the preferred path for Gamma-point
+    defect supercells.
 
     The raw TD eigenvector transforms as an excitation/transition vector.  The
     reported root assignment is the final N-electron state symmetry, obtained
@@ -864,6 +817,7 @@ def analyze_excited_state_symmetry(
     if system is None:
         raise TypeError("td_obj.mf must expose either .mol or .cell")
 
+    projection_backend = _resolve_projection_backend(system, projection_backend)
     if projection_backend == "spglib_ao_permutation":
         geometry = detect_pbc_spglib_symmetry(
             system,
@@ -903,14 +857,11 @@ def analyze_excited_state_symmetry(
         )
         assignments = []
         for group in groups:
-            excitation_class_chars = _characters_by_class(
-                _excited_subspace_operation_characters(td_obj, mo_ops, group),
-                geometry,
-            )
             assignments.append(
-                decompose_characters(
-                    reference_class_chars * excitation_class_chars,
-                    geometry.character_table,
+                _final_state_assignment(
+                    reference_chars,
+                    _excited_subspace_operation_characters(td_obj, mo_ops, group),
+                    geometry,
                 )
             )
         open_shell_assignment = None
@@ -958,16 +909,13 @@ def analyze_excited_state_symmetry(
         )
         assignments = []
         for group, selection in zip(groups, selections):
-            excitation_class_chars = _characters_by_class(
-                _active_excited_subspace_operation_characters(
-                    td_obj, group, selection, subspace_ops
-                ),
-                geometry,
-            )
             assignments.append(
-                decompose_characters(
-                    reference_class_chars * excitation_class_chars,
-                    geometry.character_table,
+                _final_state_assignment(
+                    reference_chars,
+                    _active_excited_subspace_operation_characters(
+                        td_obj, group, selection, subspace_ops
+                    ),
+                    geometry,
                 )
             )
         open_shell_assignment = reference_assignment if reference_mode == "open_shell" else None
@@ -1004,17 +952,6 @@ def _spin_mo_coefficients(mf) -> tuple[np.ndarray, np.ndarray]:
     if coeff.ndim == 3:
         return np.asarray(coeff[0]), np.asarray(coeff[1])
     return coeff, coeff
-
-
-def _eval_gto_values(system, coords) -> np.ndarray:
-    if hasattr(system, "pbc_eval_gto"):
-        values = system.pbc_eval_gto("GTOval", coords)
-    else:
-        values = system.eval_gto("GTOval", coords)
-    values = np.asarray(values)
-    if values.ndim == 3 and values.shape[0] == 1:
-        values = values[0]
-    return values
 
 
 def _overlap_matrix(system) -> np.ndarray:
@@ -1236,6 +1173,21 @@ def _characters_by_class(operation_characters, geometry: GeometrySymmetry) -> np
     return np.real_if_close(class_chars, tol=1000)
 
 
+def _final_state_assignment(reference_operation_chars, excitation_operation_chars, geometry):
+    reference_operation_chars = np.asarray(reference_operation_chars, dtype=complex)
+    excitation_operation_chars = np.asarray(excitation_operation_chars, dtype=complex)
+    if reference_operation_chars.shape != excitation_operation_chars.shape:
+        raise ValueError(
+            "reference and excitation characters must be sampled on the same operations; "
+            f"got {reference_operation_chars.shape} and {excitation_operation_chars.shape}"
+        )
+    # TD amplitudes transform as excitation operators.  The observed N-electron
+    # excited state transforms as reference representation x excitation representation.
+    final_operation_chars = reference_operation_chars * excitation_operation_chars
+    final_class_chars = _characters_by_class(final_operation_chars, geometry)
+    return decompose_characters(final_class_chars, geometry.character_table)
+
+
 def _format_weights(weights: Mapping[str, float]) -> str:
     return " ".join(f"{label}: {value:.6f}" for label, value in weights.items())
 
@@ -1318,32 +1270,26 @@ def _operation_class_index_for_point_group(point_group: str, cartesian_operation
     op = np.asarray(cartesian_operation, dtype=float)
     det = round(float(np.linalg.det(op)))
     trace = round(float(np.trace(op)))
-    if group == "C1":
-        return 0
-    if group == "Ci":
-        return 0 if det > 0 else 1
-    if group == "Cs":
-        return 0 if det > 0 else 1
-    if group == "C3v":
-        if det > 0 and trace == 3:
-            return 0
-        if det > 0:
-            return 1
-        return 2
-    if group == "D3d":
-        # libmsym D3d class order is E, 2S6, 2C3, i, 3sigma_d, 3C2'.
-        if det > 0 and trace == 3:
-            return 0
-        if det < 0 and trace == 0:
-            return 1
-        if det > 0 and trace == 0:
-            return 2
-        if det < 0 and trace == -3:
-            return 3
-        if det < 0 and trace == 1:
-            return 4
-        if det > 0 and trace == -1:
-            return 5
+    # spglib gives individual operations, while character projection needs
+    # conjugacy classes.  For the point groups used by our defect workflows,
+    # determinant and trace uniquely identify the class in libmsym's table order.
+    class_by_signature = {
+        "C1": {(1, 3): 0},
+        "Ci": {(1, 3): 0, (-1, -3): 1},
+        "Cs": {(1, 3): 0, (-1, 1): 1},
+        "C3v": {(1, 3): 0, (1, 0): 1, (-1, 1): 2},
+        # libmsym D3d class order: E, 2S6, 2C3, i, 3sigma_d, 3C2'.
+        "D3d": {
+            (1, 3): 0,
+            (-1, 0): 1,
+            (1, 0): 2,
+            (-1, -3): 3,
+            (-1, 1): 4,
+            (1, -1): 5,
+        },
+    }
+    if group in class_by_signature and (det, trace) in class_by_signature[group]:
+        return class_by_signature[group][(det, trace)]
     raise ValueError(
         f"Cannot classify operation for point group {point_group!r}: "
         f"det={det}, trace={trace}"

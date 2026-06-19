@@ -15,7 +15,7 @@ PROJECT_PARENT = ROOT.parent
 if str(PROJECT_PARENT) not in sys.path:
     sys.path.insert(0, str(PROJECT_PARENT))
 
-from XTDDFT_dev.XTDDFT.df_cderi_cache import (
+from XTDDFT_dev.utils.df_cderi_cache import (
     DFCderiCacheConfig,
     ao2mo_from_molecular_cderi_cache,
     attach_pbc_gamma_cderi_cache,
@@ -25,7 +25,7 @@ from XTDDFT_dev.XTDDFT.df_cderi_cache import (
     prepare_pbc_gamma_df_cderi_cache,
 )
 from XTDDFT_dev.XTDDFT.base import _set_df_cache_config_on_mf
-from XTDDFT_dev.XTDDFT.pbc_cderi_outcore import write_pbc_gamma_cderi_cache_from_blocks
+from XTDDFT_dev.utils.pbc_cderi_outcore import write_pbc_gamma_cderi_cache_from_blocks
 
 
 def make_water():
@@ -184,7 +184,7 @@ class PbcGammaCderiCacheTest(unittest.TestCase):
                 attached.close()
 
     def test_prepare_outcore_backend_does_not_call_gdf_build_first(self):
-        import XTDDFT_dev.XTDDFT.pbc_cderi_outcore as outcore
+        import XTDDFT_dev.utils.pbc_cderi_outcore as outcore
 
         gdf = FakePbcGammaGDF()
         original = outcore.build_pbc_gamma_cderi_cache_outcore

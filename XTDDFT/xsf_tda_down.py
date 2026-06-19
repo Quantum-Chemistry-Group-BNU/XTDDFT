@@ -4,7 +4,7 @@ import numpy as np
 from pyscf import ao2mo
 from pyscf.dft import numint2c
 from pyscf.pbc.dft import numint2c as pbc_numint2c
-from .hxc_part import (
+from ..utils.hxc_part import (
     cache_xc_kernel_sf_mc,
     gen_response_sf,
     gen_response_sf_mc,
@@ -1226,15 +1226,47 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
 
     analyze_TDM = calculate_TDM
 
-    def analyse(self, threshold=0.05):
+    def analyse(
+        self,
+        threshold=0.05,
+        analyze_symmetry=False,
+        point_group=None,
+        symmetry_tol=1.0e-3,
+        energy_tol=1.0e-5,
+        projection_backend="auto",
+        symmetry_kwargs=None,
+    ):
         energies = _asnumpy(self.e) * ha2eV
         self.dS2 = self.deltaS2()
+        symmetry_labels = None
+        if analyze_symmetry:
+            from ..utils.symmetry import analyze_state_symmetry_labels
+
+            kwargs = {} if symmetry_kwargs is None else dict(symmetry_kwargs)
+            symmetry_labels, self.symmetry_report = analyze_state_symmetry_labels(
+                self,
+                point_group=point_group,
+                symmetry_tol=symmetry_tol,
+                energy_tol=energy_tol,
+                projection_backend=projection_backend,
+                active_roots=range(self.nstates),
+                **kwargs,
+            )
         for nstate in range(self.nstates):
             x_cv, x_co, x_ov, x_oo = self._split_analysis_vectors(_asnumpy(self.v[:, nstate]))
+            irrep_text = ""
+            if symmetry_labels is not None and nstate < len(symmetry_labels):
+                irrep_text = f" irrep={symmetry_labels[nstate]}"
             if np.isfinite(self.dS2[nstate]):
-                print(f"Excited state {nstate + 1} {energies[nstate]:10.5f} eV D<S^2>={self.dS2[nstate]:8.4f}")
+                print(
+                    f"Excited state {nstate + 1} {energies[nstate]:10.5f} eV "
+                    f"D<S^2>={self.dS2[nstate]:8.4f}{irrep_text}"
+                )
             else:
-                print(f"Excited state {nstate + 1} {energies[nstate]:10.5f} eV D<S^2>=     n/a")
+                print(
+                    f"Excited state {nstate + 1} {energies[nstate]:10.5f} eV "
+                    f"D<S^2>=     n/a{irrep_text}"
+                )
 
             for label, arr, occ_offset, vir_offset in (
                 ("CV(ab)", x_cv, 1, self.nc + self.no + 1),

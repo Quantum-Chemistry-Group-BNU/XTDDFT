@@ -26,11 +26,11 @@ PROJECT_PARENT = ROOT.parent
 if str(PROJECT_PARENT) not in sys.path:
     sys.path.insert(0, str(PROJECT_PARENT))
 
-from XTDDFT_dev.XTDDFT.df_cderi_cache import (
+from XTDDFT_dev.utils.df_cderi_cache import (
     attach_pbc_gamma_cderi_cache,
     build_pbc_gamma_cderi_cache,
 )
-from XTDDFT_dev.XTDDFT.pbc_cderi_outcore import build_pbc_gamma_cderi_cache_outcore
+from XTDDFT_dev.utils.pbc_cderi_outcore import build_pbc_gamma_cderi_cache_outcore
 
 
 def make_diamond_carbon_cell():

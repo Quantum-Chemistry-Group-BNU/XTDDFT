@@ -1,0 +1,6 @@
+gpu4pyscf
+
+# Choose the CuPy wheel matching your CUDA runtime.  For example:
+# cupy-cuda11x
+# cupy-cuda12x
+cupy

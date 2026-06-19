@@ -15,7 +15,7 @@ from typing import Iterable
 import h5py
 import numpy as np
 
-from ..utils.backend import _asnumpy
+from .backend import _asnumpy
 from .df_cderi_cache import CderiCacheInfo
 
 

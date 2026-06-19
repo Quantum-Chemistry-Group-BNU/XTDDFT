@@ -117,7 +117,7 @@ If the reference density or AO transformation is not symmetric within tolerance,
 The first API should be object-based:
 
 ```python
-from XTDDFT_dev.XTDDFT.symmetry import analyze_excited_state_symmetry
+from XTDDFT_dev.utils.symmetry import analyze_excited_state_symmetry
 
 report = analyze_excited_state_symmetry(
     td_obj,

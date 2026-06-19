@@ -5,6 +5,36 @@
 Spin-adapted time-dependent density functional theory for open-shell systems
 -----------------------------------------------
 
+## Branch
+
+This README describes the current development branch:
+
+```bash
+dev
+```
+
+Use this branch for the actively maintained `XTDDFT_dev` package layout.  In
+this layout, the user-facing method classes live in `XTDDFT/`, while shared
+implementation helpers live in `utils/`; calculation scripts are kept in
+`examples/`, and experimental or low-frequency helpers are kept in
+`experiment/`.
+
+## Installation
+
+For CPU usage:
+
+```bash
+pip install -e .
+```
+
+For GPU usage, install the matching optional extra for your CUDA runtime:
+
+```bash
+pip install -e ".[gpu-cuda12x]"
+# or
+pip install -e ".[gpu-cuda11x]"
+```
+
 ## Available methods
 
 1. Spin-adapted TD-DFT for open-shell systems

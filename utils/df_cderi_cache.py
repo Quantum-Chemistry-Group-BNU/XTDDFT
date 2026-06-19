@@ -15,7 +15,7 @@ import h5py
 import numpy as np
 from pyscf import df, lib
 
-from ..utils.backend import _asnumpy, contract
+from .backend import _asnumpy, contract
 
 
 @dataclass(frozen=True)
