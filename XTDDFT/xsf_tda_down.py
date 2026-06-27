@@ -92,7 +92,8 @@ def _convert_a2b_to_cv_co_ov_oo(amat, nc, no, nv):
 
 class XSF_TDA_down(XTDDFT_base): # just for ROKS
     def __init__(self, mf, method, davidson=True, SA = None, davidson_backend="cpu",
-                 collinear_samples=60, delta_a_jk_batch_size=None, df_cache=None):
+                 collinear_samples=60, delta_a_jk_batch_size=None,
+                 delta_a_diag_j_batch_size=None, df_cache=None):
         """SA=0: SF-TDA
            SA=1: only add diagonal block for dA
            SA=2: add all dA except for OO block
@@ -110,8 +111,11 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         if delta_a_jk_batch_size is not None and delta_a_jk_batch_size < 1:
             raise ValueError("delta_a_jk_batch_size must be a positive integer or None")
         self.delta_a_jk_batch_size = delta_a_jk_batch_size
+        if delta_a_diag_j_batch_size is not None and delta_a_diag_j_batch_size < 1:
+            raise ValueError
+        self.delta_a_diag_j_batch_size = delta_a_diag_j_batch_size
         self.SA = (0 if self.type_u else 3) if SA is None else SA
-        spin_mf = mf if hasattr(mf, "spin_square") else _as_cpu_mf(mf)
+        spin_mf = _as_cpu_mf(mf)
         _,dsp1 = spin_mf.spin_square()
         self.ground_s = (dsp1-1)/2
 
@@ -486,16 +490,17 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         try:
             free_mem, _ = xp.cuda.runtime.memGetInfo()
         except Exception:
-            return min(256, total)
+            return min(64, total)
 
         nao = int(self.mo_coeff.shape[-2])
         itemsize = xp.dtype(self.mo_coeff.dtype).itemsize
-        # Keep a conservative margin for dm, J(dm), projection buffers, and
-        # GPU4PySCF temporaries.  Align to 256, matching its DF kernel blocks.
-        bytes_per_trial = itemsize * (3 * nao * nao + max(1, self.nocc_a * self.nvir_b))
-        raw = max(1, int(0.25 * free_mem / max(bytes_per_trial, 1)))
-        if raw >= 256:
-            raw = max(256, (raw // 256) * 256)
+        response_dim = max(1, int(self.nocc_a) * int(self.nvir_b))
+        bytes_per_trial = itemsize * (2 * nao * nao + response_dim)
+        fixed_bytes = itemsize * (2 * response_dim)
+        budget = max(0, int(0.60 * free_mem) - fixed_bytes)
+        raw = max(1, int(budget / max(bytes_per_trial, 1)))
+        if raw >= 32:
+            raw = max(32, (raw // 32) * 32)
         return min(total, raw)
 
     def _response_j_diagonals(self, batch_size=None):
@@ -573,7 +578,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             hdiag[:nc, no:] += fglobal * (
                 diag_s[nc + no:] + diag_s[:nc, None]
             ) / si
-            co_j, ov_j = self._response_j_diagonals()
+            co_j, ov_j = self._response_j_diagonals(batch_size=self.delta_a_diag_j_batch_size)
             hdiag[:nc, :no] += fglobal * (
                 2.0 * diag_s[:nc, None] - co_j
             ) / (2 * si - 1)
@@ -640,6 +645,12 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             vj_blocks.append(vj_block)
             vk_blocks.append(vk_block)
         return xp.concatenate(vj_blocks, axis=0), xp.concatenate(vk_blocks, axis=0)
+
+    def _apply_delta_a_jk_response_blocks(self, vresp_hf, dm_blocks):
+        return [
+            self._apply_delta_a_jk_response(vresp_hf, dm_block)
+            for dm_block in dm_blocks
+        ]
 
     def gen_tda_operation_sf(self, foo=1.0, fglobal=1.0):
         nc, no, nv = self.nc, self.no, self.nv
@@ -760,15 +771,14 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
                 ov1_mo = contract("xua,qa,pu->xpq", ov, orbvv.conj(), orboa_open)
                 oo1_mo = contract("xuv,qv,pu->xpq", oo, orbbo.conj(), orboa_open)
 
-                batch = cv1_mo.shape[0]
-                dm_hf = xp.concatenate([cv1_mo, co1_mo, ov1_mo, oo1_mo], axis=0)
-                v1_j, v1_k = self._apply_delta_a_jk_response(vresp_hf, dm_hf)
-                v1_cv_k = v1_k[:batch]
-                v1_co_j = v1_j[batch:2 * batch]
-                v1_co_k = v1_k[batch:2 * batch]
-                v1_ov_j = v1_j[2 * batch:3 * batch]
-                v1_ov_k = v1_k[2 * batch:3 * batch]
-                v1_oo_k = v1_k[3 * batch:]
+                (
+                    (_v1_cv_j, v1_cv_k),
+                    (v1_co_j, v1_co_k),
+                    (v1_ov_j, v1_ov_k),
+                    (_v1_oo_j, v1_oo_k),
+                ) = self._apply_delta_a_jk_response_blocks(
+                    vresp_hf, (cv1_mo, co1_mo, ov1_mo, oo1_mo)
+                )
 
                 cv_co_j, co_co_j, ov_co_j, oo_co_j = project_response_blocks(v1_co_j)
                 cv_ov_j, co_ov_j, ov_ov_j, oo_ov_j = project_response_blocks(v1_ov_j)

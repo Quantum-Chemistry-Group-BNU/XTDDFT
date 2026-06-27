@@ -64,7 +64,8 @@ class XTDA(XTDDFT_base):
     """
 
     def __init__(self, mf, method=0, davidson=True, davidson_backend="cpu",
-                 so2st=False, dense_batch_size=64, df_cache=None):
+                 so2st=False, dense_batch_size=64, jk_batch_size=None,
+                 jk_block_split=False, df_cache=None):
         if method != 0:
             raise NotImplementedError("XTDA currently implements method=0 spin-conserving response only.")
         davidson_backend = davidson_backend.lower()
@@ -75,6 +76,10 @@ class XTDA(XTDDFT_base):
         self.davidson_backend = "cpu" if davidson_backend == "auto" else davidson_backend
         self.so2st = so2st
         self.dense_batch_size = dense_batch_size
+        if jk_batch_size is not None and jk_batch_size < 1:
+            raise ValueError("jk_batch_size must be a positive integer or None")
+        self.jk_batch_size = jk_batch_size
+        self.jk_block_split = jk_block_split
         self.order = _order_pyscf2my(self.nc, self.no, self.nv)
         self._raw_v = None
         self.type_u = _asnumpy(self.mf.mo_coeff).ndim == 3
@@ -137,6 +142,37 @@ class XTDA(XTDDFT_base):
             )
         return xp.hstack([e_ia_a.reshape(-1), e_ia_b.reshape(-1)])
 
+    def _apply_response_in_batches(self, vresp, dms):
+        batch_size = self.jk_batch_size
+        if batch_size is None:
+            return vresp(dms)
+
+        if dms.ndim == 4 and dms.shape[0] == 2:
+            ntrial = dms.shape[1]
+            if ntrial <= batch_size:
+                return vresp(dms)
+            blocks = []
+            for start in range(0, ntrial, batch_size):
+                stop = min(start + batch_size, ntrial)
+                blocks.append(vresp(dms[:, start:stop]))
+            return xp.concatenate(blocks, axis=1)
+
+        ntrial = dms.shape[0]
+        if ntrial <= batch_size:
+            return vresp(dms)
+        blocks = []
+        for start in range(0, ntrial, batch_size):
+            stop = min(start + batch_size, ntrial)
+            blocks.append(vresp(dms[start:stop]))
+        return xp.concatenate(blocks, axis=0)
+
+    def _apply_response_blocks(self, vresp, dms_blocks):
+        response = None
+        for dms_block in dms_blocks:
+            block_response = self._apply_response_in_batches(vresp, dms_block)
+            response = block_response if response is None else response + block_response
+        return response
+
     def gen_tda_operation(self, mf=None, ctx=None):
         mf = self.mf if mf is None else mf
         ctx = self.ctx if ctx is None else ctx
@@ -179,14 +215,41 @@ class XTDA(XTDDFT_base):
             nz = zs.shape[0]
             za, zb = self._split_vectors(zs, ctx)
 
-            mo1a = contract("xov,pv->xpo", za, orbva)
-            dmsa = contract("xpo,qo->xpq", mo1a, orboa.conj())
-            mo1b = contract("xov,pv->xpo", zb, orbvb)
-            dmsb = contract("xpo,qo->xpq", mo1b, orbob.conj())
-            dms = xp.asarray([dmsa, dmsb])
-            dms = self._tag_transition_dm(dms, mo1a, mo1b, orboa, orbob)
+            def response_dm(za_part, zb_part):
+                mo1a_part = contract("xov,pv->xpo", za_part, orbva)
+                dmsa_part = contract("xpo,qo->xpq", mo1a_part, orboa.conj())
+                mo1b_part = contract("xov,pv->xpo", zb_part, orbvb)
+                dmsb_part = contract("xpo,qo->xpq", mo1b_part, orbob.conj())
+                dms_part = xp.asarray([dmsa_part, dmsb_part])
+                return self._tag_transition_dm(
+                    dms_part, mo1a_part, mo1b_part, orboa, orbob
+                )
 
-            v1ao = vresp(dms)
+            if self.jk_block_split:
+                def response_blocks():
+                    za_part = xp.zeros_like(za)
+                    zb_part = xp.zeros_like(zb)
+                    za_part[:, :ctx.nc, :] = za[:, :ctx.nc, :]
+                    yield response_dm(za_part, zb_part)
+
+                    za_part = xp.zeros_like(za)
+                    zb_part = xp.zeros_like(zb)
+                    za_part[:, ctx.nc:, :] = za[:, ctx.nc:, :]
+                    yield response_dm(za_part, zb_part)
+
+                    za_part = xp.zeros_like(za)
+                    zb_part = xp.zeros_like(zb)
+                    zb_part[:, :, :ctx.no] = zb[:, :, :ctx.no]
+                    yield response_dm(za_part, zb_part)
+
+                    za_part = xp.zeros_like(za)
+                    zb_part = xp.zeros_like(zb)
+                    zb_part[:, :, ctx.no:] = zb[:, :, ctx.no:]
+                    yield response_dm(za_part, zb_part)
+
+                v1ao = self._apply_response_blocks(vresp, response_blocks())
+            else:
+                v1ao = self._apply_response_in_batches(vresp, response_dm(za, zb))
             v1ao = xp.asarray(v1ao)
             v1a = contract("xpq,qo->xpo", v1ao[0], orboa)
             v1a = contract("xpo,pv->xov", v1a, orbva.conj())
@@ -519,6 +582,77 @@ class XTDA(XTDDFT_base):
             holes = holes[:, :nroots]
             particles = particles[:, :nroots]
         return singular_values, holes, particles
+
+    def _embedded_block_svd(self, matrix, source_indices, target_indices, source, target, nmo, nroots):
+        matrix = np.asarray(matrix)
+        particles_local, singular_values, holes_h = np.linalg.svd(matrix, full_matrices=False)
+        holes_local = holes_h.conj().T
+        block_weight = float(np.real_if_close(np.sum(np.abs(singular_values) ** 2)))
+        if nroots is not None:
+            keep = min(int(nroots), singular_values.size)
+            singular_values = singular_values[:keep]
+            particles_local = particles_local[:, :keep]
+            holes_local = holes_local[:, :keep]
+
+        holes = np.zeros((nmo, singular_values.size), dtype=holes_local.dtype)
+        particles = np.zeros((nmo, singular_values.size), dtype=particles_local.dtype)
+        holes[source_indices, :] = holes_local
+        particles[target_indices, :] = particles_local
+        return {
+            "source": source,
+            "target": target,
+            "singular_values": singular_values,
+            "weights": np.abs(singular_values) ** 2,
+            "block_weight": block_weight,
+            "holes": holes,
+            "particles": particles,
+        }
+
+    def _block_nto_restricted(self, state, nroots):
+        cv0, co0, ov0, cv1 = [block[0] for block in self._state_blocks(state)]
+        nmo = self.nc + self.no + self.nv
+        c = slice(0, self.nc)
+        o = slice(self.nc, self.nc + self.no)
+        v = slice(self.nc + self.no, nmo)
+        specs = {
+            "CV(0)": (cv0.T, c, v, "C", "V"),
+            "CO(0)": (co0.T, c, o, "C", "O"),
+            "OV(0)": (ov0.T, o, v, "O", "V"),
+            "CV(1)": (cv1.T, c, v, "C", "V"),
+        }
+        return {
+            name: self._embedded_block_svd(matrix, source_idx, target_idx, source, target, nmo, nroots)
+            for name, (matrix, source_idx, target_idx, source, target) in specs.items()
+        }
+
+    def _block_nto_unrestricted(self, state, nroots):
+        cv_a, ov_a, co_b, cv_b = [block[0] for block in self._state_blocks(state)]
+        ctx = self.ctx
+        mo_coeff = _asnumpy(ctx.mo_coeff)
+        nmo_a = int(mo_coeff[0].shape[1])
+        nmo_b = int(mo_coeff[1].shape[1])
+        occ_a = _asnumpy(ctx.occidx_a).astype(int)
+        vir_a = _asnumpy(ctx.viridx_a).astype(int)
+        occ_b = _asnumpy(ctx.occidx_b).astype(int)
+        vir_b = _asnumpy(ctx.viridx_b).astype(int)
+        beta = nmo_a
+        nmo = nmo_a + nmo_b
+        specs = {
+            "CVa": (cv_a.T, occ_a[:self.nc], vir_a, "alpha_C", "alpha_V"),
+            "OVa": (ov_a.T, occ_a[self.nc:self.nc + self.no], vir_a, "alpha_O", "alpha_V"),
+            "COb": (co_b.T, beta + occ_b, beta + vir_b[:self.no], "beta_C", "beta_O"),
+            "CVb": (cv_b.T, beta + occ_b, beta + vir_b[self.no:self.no + self.nv], "beta_C", "beta_V"),
+        }
+        return {
+            name: self._embedded_block_svd(matrix, source_idx, target_idx, source, target, nmo, nroots)
+            for name, (matrix, source_idx, target_idx, source, target) in specs.items()
+        }
+
+    def block_nto(self, state=0, nroots=None):
+        """SVD channels for XTDA spin-tensor blocks or unrestricted UTDA blocks."""
+        if self.type_u:
+            return self._block_nto_unrestricted(state, nroots)
+        return self._block_nto_restricted(state, nroots)
 
     def transition_dipoles_ground(self):
         """Ground-state to excited-state transition dipoles in a.u."""

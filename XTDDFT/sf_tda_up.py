@@ -417,6 +417,40 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
             particles = particles[:, :nroots]
         return singular_values, holes, particles
 
+    def block_nto(self, state=0, nroots=None):
+        """SVD channel of the SF-TDA-UP spin-flip CV block."""
+        amp = self._state_amplitude(state)
+        particles_local, singular_values, holes_h = np.linalg.svd(amp.T, full_matrices=False)
+        holes_local = holes_h.conj().T
+        block_weight = float(np.real_if_close(np.sum(np.abs(singular_values) ** 2)))
+        if nroots is not None:
+            keep = min(int(nroots), singular_values.size)
+            singular_values = singular_values[:keep]
+            particles_local = particles_local[:, :keep]
+            holes_local = holes_local[:, :keep]
+
+        ctx = self.ctx
+        mo_coeff = _asnumpy(ctx.mo_coeff)
+        nmo_a = int(mo_coeff[0].shape[1])
+        nmo_b = int(mo_coeff[1].shape[1])
+        vir_a = _asnumpy(ctx.viridx_a).astype(int)
+        occ_b = _asnumpy(ctx.occidx_b).astype(int)
+        holes = np.zeros((nmo_a + nmo_b, singular_values.size), dtype=holes_local.dtype)
+        particles = np.zeros((nmo_a + nmo_b, singular_values.size), dtype=particles_local.dtype)
+        holes[nmo_a + occ_b, :] = holes_local
+        particles[vir_a, :] = particles_local
+        return {
+            "CV": {
+                "source": "beta_occ",
+                "target": "alpha_vir",
+                "singular_values": singular_values,
+                "weights": np.abs(singular_values) ** 2,
+                "block_weight": block_weight,
+                "holes": holes,
+                "particles": particles,
+            }
+        }
+
     def calculate_TDM(self):
         tdm = self.transition_dipole_matrix()
         energies = _asnumpy(self.e)[:tdm.shape[0]]

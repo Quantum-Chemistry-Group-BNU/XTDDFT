@@ -31,6 +31,60 @@ class XsfTdaDownDeltaS2Test(unittest.TestCase):
         method.v = np.arange(6 * nstates, dtype=float).reshape(6, nstates) / 10.0
         return method
 
+    def test_preconditioner_uses_separate_diag_j_batch_size(self):
+        method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
+        method.nc = 1
+        method.no = 2
+        method.nv = 1
+        method.nocc_a = 3
+        method.nocc_b = 2
+        method.SA = 3
+        method.type_u = False
+        method.delta_a_jk_batch_size = 7
+        method.delta_a_diag_j_batch_size = 3
+        seen = []
+
+        def response_j_diagonals(batch_size=None):
+            seen.append(batch_size)
+            return np.zeros((method.nc, method.no)), np.zeros((method.no, method.nv))
+
+        method._response_j_diagonals = response_j_diagonals
+        fock_a = np.diag(np.arange(1.0, 5.0))
+        fock_b = np.diag(np.arange(2.0, 6.0))
+        fock_a_hf = np.diag(np.arange(3.0, 7.0))
+        fock_b_hf = np.diag(np.arange(4.0, 8.0))
+
+        method._build_preconditioner_hdiag(fock_a, fock_b, fglobal=1.0, fockA_hf=fock_a_hf, fockB_hf=fock_b_hf)
+
+        self.assertEqual(seen, [3])
+
+    def test_preconditioner_diag_j_batch_size_defaults_to_auto(self):
+        method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
+        method.nc = 1
+        method.no = 2
+        method.nv = 1
+        method.nocc_a = 3
+        method.nocc_b = 2
+        method.SA = 3
+        method.type_u = False
+        method.delta_a_jk_batch_size = 5
+        method.delta_a_diag_j_batch_size = None
+        seen = []
+
+        def response_j_diagonals(batch_size=None):
+            seen.append(batch_size)
+            return np.zeros((method.nc, method.no)), np.zeros((method.no, method.nv))
+
+        method._response_j_diagonals = response_j_diagonals
+        fock_a = np.diag(np.arange(1.0, 5.0))
+        fock_b = np.diag(np.arange(2.0, 6.0))
+        fock_a_hf = np.diag(np.arange(3.0, 7.0))
+        fock_b_hf = np.diag(np.arange(4.0, 8.0))
+
+        method._build_preconditioner_hdiag(fock_a, fock_b, fglobal=1.0, fockA_hf=fock_a_hf, fockB_hf=fock_b_hf)
+
+        self.assertEqual(seen, [None])
+
     def test_uks_delta_s2_reuses_cpu_overlap_context(self):
         method = self.make_method()
 
@@ -235,6 +289,80 @@ class XsfTdaDownDeltaS2Test(unittest.TestCase):
         self.assertEqual(batch_sizes, [2, 2, 1])
         self.assertTrue(np.allclose(v1_j, dm_hf + 10.0))
         self.assertTrue(np.allclose(v1_k, dm_hf + 20.0))
+
+    def test_delta_a_jk_response_blocks_are_evaluated_separately(self):
+        method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
+        method.delta_a_jk_batch_size = None
+        dm_blocks = [np.full((3, 2, 2), idx, dtype=float) for idx in range(4)]
+        calls = []
+
+        def vresp_hf(batch):
+            calls.append(batch.copy())
+            return batch + 10.0, batch + 20.0
+
+        results = method._apply_delta_a_jk_response_blocks(vresp_hf, dm_blocks)
+
+        self.assertEqual([call.shape[0] for call in calls], [3, 3, 3, 3])
+        for call, block in zip(calls, dm_blocks):
+            self.assertTrue(np.allclose(call, block))
+        for (v1_j, v1_k), block in zip(results, dm_blocks):
+            self.assertTrue(np.allclose(v1_j, block + 10.0))
+            self.assertTrue(np.allclose(v1_k, block + 20.0))
+
+    def test_response_j_batch_size_scales_with_available_gpu_memory(self):
+        method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
+        method.mo_coeff = SimpleNamespace(shape=(2, 4096, 4096), dtype=np.float64)
+        method.nocc_a = 4096
+        method.nvir_b = 2048
+
+        class FakeRuntime:
+            @staticmethod
+            def memGetInfo():
+                return 37 * 1024**3, 40 * 1024**3
+
+        fake_xp = SimpleNamespace(
+            dtype=np.dtype,
+            cuda=SimpleNamespace(runtime=FakeRuntime),
+        )
+        old_backend = xsf_tda_down.backend
+        old_xp = xsf_tda_down.xp
+        try:
+            xsf_tda_down.backend = SimpleNamespace(is_gpu=True)
+            xsf_tda_down.xp = fake_xp
+            batch_size = method._response_j_batch_size(10_000)
+        finally:
+            xsf_tda_down.backend = old_backend
+            xsf_tda_down.xp = old_xp
+
+        self.assertGreaterEqual(batch_size, 64)
+        self.assertEqual(batch_size % 32, 0)
+
+    def test_response_j_batch_size_uses_conservative_gpu_fallback(self):
+        method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
+        method.mo_coeff = SimpleNamespace(shape=(2, 1024, 1024), dtype=np.float64)
+        method.nocc_a = 512
+        method.nvir_b = 512
+
+        class FakeRuntime:
+            @staticmethod
+            def memGetInfo():
+                raise RuntimeError("CUDA memory unavailable")
+
+        fake_xp = SimpleNamespace(
+            dtype=np.dtype,
+            cuda=SimpleNamespace(runtime=FakeRuntime),
+        )
+        old_backend = xsf_tda_down.backend
+        old_xp = xsf_tda_down.xp
+        try:
+            xsf_tda_down.backend = SimpleNamespace(is_gpu=True)
+            xsf_tda_down.xp = fake_xp
+            batch_size = method._response_j_batch_size(10_000)
+        finally:
+            xsf_tda_down.backend = old_backend
+            xsf_tda_down.xp = old_xp
+
+        self.assertEqual(batch_size, 64)
 
 
 if __name__ == "__main__":

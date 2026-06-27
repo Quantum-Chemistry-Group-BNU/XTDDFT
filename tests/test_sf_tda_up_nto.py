@@ -75,5 +75,22 @@ class SfTdaUpNtoTest(unittest.TestCase):
         self.assertEqual(particles.shape, (10, 3))
 
 
+    def test_block_nto_returns_spinflip_cv_svd(self):
+        method, _rng = self.make_method()
+
+        result = method.block_nto(0, nroots=1)
+        amp = method._state_amplitude(0)
+        expected_s = np.linalg.svd(amp.T, compute_uv=False)
+
+        self.assertEqual(set(result), {"CV"})
+        block = result["CV"]
+        self.assertEqual(block["source"], "beta_occ")
+        self.assertEqual(block["target"], "alpha_vir")
+        self.assertTrue(np.allclose(block["singular_values"], expected_s[:1]))
+        self.assertTrue(np.allclose(block["weights"], expected_s[:1] ** 2))
+        self.assertAlmostEqual(block["block_weight"], np.sum(np.abs(amp) ** 2))
+        self.assertEqual(block["holes"].shape, (10, 1))
+        self.assertEqual(block["particles"].shape, (10, 1))
+
 if __name__ == "__main__":
     unittest.main()

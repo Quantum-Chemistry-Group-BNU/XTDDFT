@@ -185,6 +185,38 @@ class XtdaTensorBasisTest(unittest.TestCase):
 
         self.assertTrue(np.allclose(tdm, expected))
 
+    def test_response_batches_density_matrices_during_davidson(self):
+        method = xtda.XTDA.__new__(xtda.XTDA)
+        method.jk_batch_size = 2
+        dms = np.arange(2 * 5 * 2 * 2, dtype=float).reshape(2, 5, 2, 2)
+        batch_sizes = []
+
+        def vresp(batch):
+            batch_sizes.append(batch.shape[1])
+            return batch + 10.0
+
+        v1ao = method._apply_response_in_batches(vresp, dms)
+
+        self.assertEqual(batch_sizes, [2, 2, 1])
+        self.assertTrue(np.allclose(v1ao, dms + 10.0))
+
+    def test_response_blocks_are_evaluated_separately(self):
+        method = xtda.XTDA.__new__(xtda.XTDA)
+        method.jk_batch_size = None
+        blocks = [np.full((2, 3, 2, 2), idx, dtype=float) for idx in range(4)]
+        calls = []
+
+        def vresp(block):
+            calls.append(block.copy())
+            return block * 2.0
+
+        result = method._apply_response_blocks(vresp, blocks)
+
+        self.assertEqual(len(calls), 4)
+        for call, block in zip(calls, blocks):
+            self.assertTrue(np.allclose(call, block))
+        self.assertTrue(np.allclose(result, sum(block * 2.0 for block in blocks)))
+
     def test_restricted_excited_transition_density_places_reverse_cross_blocks(self):
         method = xtda.XTDA.__new__(xtda.XTDA)
         method.type_u = False
@@ -287,6 +319,89 @@ class XtdaTensorBasisTest(unittest.TestCase):
         self.assertEqual(holes.shape, (3, 2))
         self.assertEqual(particles.shape, (3, 2))
 
+
+    def test_restricted_block_nto_returns_spin_tensor_block_svds(self):
+        method = xtda.XTDA.__new__(xtda.XTDA)
+        method.type_u = False
+        method.nstates = 1
+        method.nc = 2
+        method.no = 2
+        method.nv = 3
+        dim = 2 * method.nc * method.nv + method.nc * method.no + method.no * method.nv
+        method.v = np.arange(1, dim + 1, dtype=float).reshape(dim, 1) / 10.0
+
+        result = method.block_nto(0, nroots=1)
+        cv0, co0, ov0, cv1 = [block[0] for block in method._state_blocks(0)]
+        expected = {
+            "CV(0)": cv0.T,
+            "CO(0)": co0.T,
+            "OV(0)": ov0.T,
+            "CV(1)": cv1.T,
+        }
+
+        self.assertEqual(set(result), set(expected))
+        nmo = method.nc + method.no + method.nv
+        for name, matrix in expected.items():
+            block = result[name]
+            expected_s = np.linalg.svd(matrix, compute_uv=False)
+            self.assertTrue(np.allclose(block["singular_values"], expected_s[:1]))
+            self.assertTrue(np.allclose(block["weights"], expected_s[:1] ** 2))
+            self.assertAlmostEqual(block["block_weight"], np.sum(np.abs(matrix) ** 2))
+            self.assertEqual(block["holes"].shape, (nmo, 1))
+            self.assertEqual(block["particles"].shape, (nmo, 1))
+
+        self.assertEqual(result["CV(0)"]["source"], "C")
+        self.assertEqual(result["CV(0)"]["target"], "V")
+        self.assertEqual(result["CO(0)"]["source"], "C")
+        self.assertEqual(result["CO(0)"]["target"], "O")
+        self.assertEqual(result["OV(0)"]["source"], "O")
+        self.assertEqual(result["OV(0)"]["target"], "V")
+        self.assertEqual(result["CV(1)"]["source"], "C")
+        self.assertEqual(result["CV(1)"]["target"], "V")
+
+    def test_unrestricted_block_nto_returns_utda_spin_orbital_block_svds(self):
+        method = xtda.XTDA.__new__(xtda.XTDA)
+        method.type_u = True
+        method.nstates = 1
+        method.nc = 1
+        method.no = 2
+        method.nv = 2
+        method.ctx = SimpleNamespace(
+            mo_coeff=np.zeros((2, 5, 5)),
+            occidx_a=np.array([0, 1, 2]),
+            viridx_a=np.array([3, 4]),
+            occidx_b=np.array([0]),
+            viridx_b=np.array([1, 2, 3, 4]),
+        )
+        dim = 2 * method.nc * method.nv + method.no * method.nv + method.nc * method.no
+        method.v = np.arange(1, dim + 1, dtype=float).reshape(dim, 1) / 10.0
+
+        result = method.block_nto(0, nroots=1)
+        cv_a, ov_a, co_b, cv_b = [block[0] for block in method._state_blocks(0)]
+        expected = {
+            "CVa": cv_a.T,
+            "OVa": ov_a.T,
+            "COb": co_b.T,
+            "CVb": cv_b.T,
+        }
+
+        self.assertEqual(set(result), set(expected))
+        for name, matrix in expected.items():
+            block = result[name]
+            expected_s = np.linalg.svd(matrix, compute_uv=False)
+            self.assertTrue(np.allclose(block["singular_values"], expected_s[:1]))
+            self.assertAlmostEqual(block["block_weight"], np.sum(np.abs(matrix) ** 2))
+            self.assertEqual(block["holes"].shape, (10, 1))
+            self.assertEqual(block["particles"].shape, (10, 1))
+
+        self.assertEqual(result["CVa"]["source"], "alpha_C")
+        self.assertEqual(result["CVa"]["target"], "alpha_V")
+        self.assertEqual(result["OVa"]["source"], "alpha_O")
+        self.assertEqual(result["OVa"]["target"], "alpha_V")
+        self.assertEqual(result["COb"]["source"], "beta_C")
+        self.assertEqual(result["COb"]["target"], "beta_O")
+        self.assertEqual(result["CVb"]["source"], "beta_C")
+        self.assertEqual(result["CVb"]["target"], "beta_V")
 
 if __name__ == "__main__":
     unittest.main()

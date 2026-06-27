@@ -109,6 +109,8 @@ davidson = True
 davidson_backend = "cpu"  # CPU Davidson + GPU matrix-vector product.
 so2st = False
 dense_batch_size = 64
+jk_batch_size = 20  # Split Davidson trial-vector JK builds; use None to disable.
+jk_block_split = True  # Split XTDA CVa/OVa/COb/CVb response blocks to lower peak memory.
 analyse_threshold = 0.03
 # ========================================================
 
@@ -144,6 +146,8 @@ def main():
         davidson_backend=davidson_backend,
         so2st=so2st,
         dense_batch_size=dense_batch_size,
+        jk_batch_size=jk_batch_size,
+        jk_block_split=jk_block_split,
     )
     ee, vv = xtda_method.kernel(nstates=nstates)
     xtda_method.analyse(threshold=analyse_threshold)
