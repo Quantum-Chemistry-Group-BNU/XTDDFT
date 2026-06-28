@@ -19,6 +19,7 @@ from .base import (
     _make_spinflip_problem,
     _make_spinflip_vind,
     _molecular_dipole_integrals,
+    _prepare_davidson_init_space,
     _run_davidson,
     _spinflip_gaps,
     _as_cpu_mf,
@@ -277,10 +278,10 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
     def init_guess(self, nstates):
         return _build_initial_guess_from_gaps(_spinflip_gaps(self.ctx, self.isf), nstates)
     
-    def davidson_process(self, nstates):
+    def davidson_process(self, nstates, init_space=None):
         vind, hdiag = self.gen_tda_operation_sf()
         nroots = min(nstates, int(hdiag.size))
-        x0 = self.init_guess(nroots)
+        x0 = _prepare_davidson_init_space(self.init_guess(nroots), init_space)
 
         converged, e, x1 = _run_davidson(
             self.mf, self.davidson_backend,
@@ -470,10 +471,10 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
 
     analyze_TDM = calculate_TDM
 
-    def kernel(self, nstates=1, save=False, save_file=None):
+    def kernel(self, nstates=1, save=False, save_file=None, init_space=None):
         self.nstates = nstates
         if self.davidson:
-            self.davidson_process(nstates)
+            self.davidson_process(nstates, init_space=init_space)
         else:
             self.get_Amat()
             self._diagonalize_dense(self.A, nstates)

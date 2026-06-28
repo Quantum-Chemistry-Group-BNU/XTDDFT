@@ -640,6 +640,29 @@ def _build_initial_guess_from_gaps(gaps, nstates):
     x0[xp.arange(int(idx.size)), idx] = 1.0
     return x0
 
+def _prepare_davidson_init_space(x0, init_space=None, lindep=1e-14):
+    if init_space is None:
+        return x0
+    x0_np = np.asarray(_asnumpy(x0))
+    init_np = np.asarray(_asnumpy(init_space))
+    if init_np.ndim == 1:
+        init_np = init_np.reshape(1, -1)
+    ndim = x0_np.shape[1]
+    if init_np.shape[1] != ndim:
+        if init_np.shape[0] == ndim:
+            init_np = init_np.T
+        else:
+            raise ValueError(
+                f"init_space has shape {init_np.shape}; expected (*, {ndim}) or ({ndim}, *)."
+            )
+    candidates = np.vstack([init_np, x0_np])
+    candidates = candidates[np.linalg.norm(candidates, axis=1) > lindep]
+    if candidates.size == 0:
+        raise ValueError("init_space and x0 do not contain any nonzero vector.")
+    q, r = np.linalg.qr(candidates.T, mode="reduced")
+    keep = np.abs(np.diag(r)) > lindep
+    return xp.asarray(q[:, keep].T)
+
 def _make_spinflip_problem(ctx, fock_mo, isf):
     focka_mo, fockb_mo = fock_mo
     if isf == 1:

@@ -217,6 +217,27 @@ class XtdaTensorBasisTest(unittest.TestCase):
             self.assertTrue(np.allclose(call, block))
         self.assertTrue(np.allclose(result, sum(block * 2.0 for block in blocks)))
 
+    def test_delta_a_switch_defaults_on_but_can_be_disabled(self):
+        method = xtda.XTDA.__new__(xtda.XTDA)
+        mf = SimpleNamespace(
+            mo_coeff=np.zeros((4, 4)),
+            mol=SimpleNamespace(spin=2),
+        )
+        ctx = SimpleNamespace(no=1)
+
+        method.use_delta_a = True
+        self.assertTrue(method._should_use_delta_a(mf, ctx))
+
+        method.use_delta_a = False
+        self.assertFalse(method._should_use_delta_a(mf, ctx))
+
+        method.use_delta_a = True
+        unrestricted_mf = SimpleNamespace(
+            mo_coeff=np.zeros((2, 4, 4)),
+            mol=SimpleNamespace(spin=2),
+        )
+        self.assertFalse(method._should_use_delta_a(unrestricted_mf, ctx))
+
     def test_restricted_excited_transition_density_places_reverse_cross_blocks(self):
         method = xtda.XTDA.__new__(xtda.XTDA)
         method.type_u = False

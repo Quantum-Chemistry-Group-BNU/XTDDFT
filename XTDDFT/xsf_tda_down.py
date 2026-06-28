@@ -25,6 +25,7 @@ from .base import (
     _iter_block_data,
     _make_rohf_reference_mf,
     _molecular_dipole_integrals,
+    _prepare_davidson_init_space,
     _run_davidson,
     _spinflip_gaps,
     _as_cpu_mf,
@@ -869,12 +870,12 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             _, hdiag = self.gen_tda_operation_sf()
         return _build_initial_guess_from_gaps(hdiag, nstates)
 
-    def davidson_process(self, nstates, foo=1.0, fglobal=1.0):
+    def davidson_process(self, nstates, foo=1.0, fglobal=1.0, init_space=None):
         vind, hdiag = self.gen_tda_operation_sf(
             foo=foo, fglobal=fglobal
         )
         nroots = min(nstates, int(hdiag.size))
-        x0 = self.init_guess(nroots, hdiag=hdiag)
+        x0 = _prepare_davidson_init_space(self.init_guess(nroots, hdiag=hdiag), init_space)
         converged, e, x1 = _run_davidson(
             self.mf, self.davidson_backend,
             vind, hdiag, x0, nroots,
@@ -1294,7 +1295,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         return self.dS2
 
     def kernel(self, nstates=1, remove=None, frozen=None, foo=1.0, d_lda=0.3,
-               fglobal=None, fit=True, save=False, save_file=None):
+               fglobal=None, fit=True, save=False, save_file=None, init_space=None):
         self.re = (_asnumpy(self.mf.mo_coeff).ndim != 3) if remove is None else bool(remove)
         nov = (self.nc + self.no) * (self.no + self.nv)
         effective_dim = nov - 1 if self.re else nov
@@ -1306,7 +1307,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         if self.davidson:
             if frozen is not None:
                 raise NotImplementedError("frozen orbital truncation is only implemented for dense XSF_TDA_down.")
-            self.davidson_process(self.nstates, foo=foo, fglobal=fglobal)
+            self.davidson_process(self.nstates, foo=foo, fglobal=fglobal, init_space=init_space)
         else:
             self._prepare_dense_A(foo=foo, fglobal=fglobal, frozen=frozen)
             self._diagonalize_dense(self.A, self.nstates)

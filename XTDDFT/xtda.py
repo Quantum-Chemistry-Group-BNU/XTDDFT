@@ -10,6 +10,7 @@ from .base import (
     _get_ovlp,
     _molecular_dipole_integrals,
     _molecular_ground_dipole,
+    _prepare_davidson_init_space,
     _run_davidson,
     _system,
 )
@@ -65,7 +66,7 @@ class XTDA(XTDDFT_base):
 
     def __init__(self, mf, method=0, davidson=True, davidson_backend="cpu",
                  so2st=False, dense_batch_size=64, jk_batch_size=None,
-                 jk_block_split=False, df_cache=None):
+                 jk_block_split=False, use_delta_a=True, df_cache=None):
         if method != 0:
             raise NotImplementedError("XTDA currently implements method=0 spin-conserving response only.")
         davidson_backend = davidson_backend.lower()
@@ -80,6 +81,7 @@ class XTDA(XTDDFT_base):
             raise ValueError("jk_batch_size must be a positive integer or None")
         self.jk_batch_size = jk_batch_size
         self.jk_block_split = jk_block_split
+        self.use_delta_a = bool(use_delta_a)
         self.order = _order_pyscf2my(self.nc, self.no, self.nv)
         self._raw_v = None
         self.type_u = _asnumpy(self.mf.mo_coeff).ndim == 3
@@ -173,6 +175,14 @@ class XTDA(XTDDFT_base):
             response = block_response if response is None else response + block_response
         return response
 
+    def _should_use_delta_a(self, mf, ctx):
+        return (
+            self.use_delta_a
+            and _asnumpy(mf.mo_coeff).ndim != 3
+            and ctx.no > 0
+            and _system(mf).spin != 0
+        )
+
     def gen_tda_operation(self, mf=None, ctx=None):
         mf = self.mf if mf is None else mf
         ctx = self.ctx if ctx is None else ctx
@@ -187,11 +197,7 @@ class XTDA(XTDDFT_base):
         focka_mo, fockb_mo = _get_mo_fock(mf, mo_coeff, mo_occ)
         vresp = gen_response_tda(mf, hermi=0, ctx=ctx)
 
-        use_delta_a = (
-            _asnumpy(mf.mo_coeff).ndim != 3
-            and ctx.no > 0
-            and _system(mf).spin != 0
-        )
+        use_delta_a = self._should_use_delta_a(mf, ctx)
         if use_delta_a:
             si = 0.5 * _system(mf).spin
             if abs(si) < 1e-14:
@@ -309,10 +315,10 @@ class XTDA(XTDDFT_base):
             _, hdiag = self.gen_tda_operation()
         return _build_initial_guess_from_gaps(hdiag, nstates)
 
-    def davidson_process(self, nstates):
+    def davidson_process(self, nstates, init_space=None):
         vind, hdiag = self.gen_tda_operation()
         nroots = min(nstates, int(hdiag.size))
-        x0 = self.init_guess(nroots, hdiag=hdiag)
+        x0 = _prepare_davidson_init_space(self.init_guess(nroots, hdiag=hdiag), init_space)
         converged, e, x1 = _run_davidson(
             self.mf, self.davidson_backend,
             vind, hdiag, x0, nroots,
@@ -821,10 +827,10 @@ class XTDA(XTDDFT_base):
 
     analyze_TDM = calculate_TDM
 
-    def kernel(self, nstates=1, save=False, save_file=None):
+    def kernel(self, nstates=1, save=False, save_file=None, init_space=None):
         self.nstates = nstates
         if self.davidson:
-            self.davidson_process(nstates)
+            self.davidson_process(nstates, init_space=init_space)
         else:
             self.get_Amat()
             self._diagonalize_dense(self.A, nstates)

@@ -111,6 +111,7 @@ so2st = False
 dense_batch_size = 64
 jk_batch_size = 20  # Split Davidson trial-vector JK builds; use None to disable.
 jk_block_split = True  # Split XTDA CVa/OVa/COb/CVb response blocks to lower peak memory.
+use_delta_a = True  # ROKS delta A is on by default; set False to use bare XTDA.
 analyse_threshold = 0.03
 # ========================================================
 
@@ -148,6 +149,7 @@ def main():
         dense_batch_size=dense_batch_size,
         jk_batch_size=jk_batch_size,
         jk_block_split=jk_block_split,
+        use_delta_a=use_delta_a,
     )
     ee, vv = xtda_method.kernel(nstates=nstates)
     xtda_method.analyse(threshold=analyse_threshold)
