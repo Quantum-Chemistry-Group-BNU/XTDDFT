@@ -1134,7 +1134,7 @@ class XSF_TDA():
             #start_t = time.time()
             #print(zs0.shape)
             zs0 = np.asarray(zs0)
-            cv, co, ov, oo = self._split_block_vectors(zs0)
+            cv, co, ov, oo = self._split_block_vectors(zs0，expand_oo=self.re)
             dmov = (
                 contract("xia,qa,pi->xpq", cv, orbvv.conj(), orbca)
                 + contract("xiu,qu,pi->xpq", co, orbbo.conj(), orbca)
