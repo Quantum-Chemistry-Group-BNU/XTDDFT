@@ -88,7 +88,7 @@ class XsfTdaDownDeltaS2Test(unittest.TestCase):
 
     def test_df_diagonal_backend_option_is_validated(self):
         method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
-        method.mf = SimpleNamespace(mo_coeff=np.stack([np.eye(2), np.eye(2)]))
+        method.mf = SimpleNamespace(mo_coeff=np.eye(2))
 
         old_base_init = xsf_tda_down.XTDDFT_base.__init__
         old_as_cpu_mf = xsf_tda_down._as_cpu_mf
@@ -103,6 +103,37 @@ class XsfTdaDownDeltaS2Test(unittest.TestCase):
         finally:
             xsf_tda_down.XTDDFT_base.__init__ = old_base_init
             xsf_tda_down._as_cpu_mf = old_as_cpu_mf
+
+
+    def test_restricted_constructor_defaults_re_true(self):
+        method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
+        method.mf = SimpleNamespace(mo_coeff=np.eye(2))
+
+        old_base_init = xsf_tda_down.XTDDFT_base.__init__
+        old_as_cpu_mf = xsf_tda_down._as_cpu_mf
+        try:
+            xsf_tda_down.XTDDFT_base.__init__ = lambda self, mf, method, davidson=True, df_cache=None: None
+            xsf_tda_down._as_cpu_mf = lambda mf: SimpleNamespace(spin_square=lambda: (0.0, 3.0))
+
+            xsf_tda_down.XSF_TDA_down.__init__(method, method.mf, method=1)
+        finally:
+            xsf_tda_down.XTDDFT_base.__init__ = old_base_init
+            xsf_tda_down._as_cpu_mf = old_as_cpu_mf
+
+        self.assertTrue(method.re)
+
+    def test_split_analysis_vectors_lazily_builds_removed_oo_basis(self):
+        method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
+        method.nc = 1
+        method.no = 2
+        method.nv = 1
+        method.re = True
+        value = np.arange(1 * 1 + 1 * 2 + 2 * 1 + 2 * 2 - 1, dtype=float)
+
+        _cv, _co, _ov, oo = method._split_analysis_vectors(value)
+
+        self.assertEqual(oo.shape, (2, 2))
+        self.assertTrue(hasattr(method, "vects"))
 
     def test_pbc_df_response_j_diagonals_match_batched_j_path(self):
         method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)

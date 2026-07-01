@@ -111,6 +111,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         logger.info("XSF_TDA_down method=0 ALDA0, method=1 multicollinear")
         self.isf = -1
         self.type_u = _asnumpy(self.mf.mo_coeff).ndim == 3
+        self.re = not self.type_u
         self.davidson_backend = "cpu" if davidson_backend == "auto" else davidson_backend
         self.collinear_samples = collinear_samples
         if delta_a_jk_batch_size is not None and delta_a_jk_batch_size < 1:
@@ -1119,6 +1120,8 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         x_co = value[dim1:dim2].reshape(nc, no)
         x_ov = value[dim2:dim3].reshape(no, nv)
         if self.re:
+            if not hasattr(self, "vects"):
+                self.vects = xp.asarray(self.get_vect())
             vects = np.asarray(_asnumpy(self.vects))
             x_oo = (vects @ value[dim3:].reshape(-1, 1)).reshape(no, no)
         else:
