@@ -1,5 +1,6 @@
 from pathlib import Path
 import inspect
+import tempfile
 from types import SimpleNamespace
 import unittest
 
@@ -84,6 +85,168 @@ class XsfTdaDownDeltaS2Test(unittest.TestCase):
         method._build_preconditioner_hdiag(fock_a, fock_b, fglobal=1.0, fockA_hf=fock_a_hf, fockB_hf=fock_b_hf)
 
         self.assertEqual(seen, [None])
+
+    def test_df_diagonal_backend_option_is_validated(self):
+        method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
+        method.mf = SimpleNamespace(mo_coeff=np.stack([np.eye(2), np.eye(2)]))
+
+        old_base_init = xsf_tda_down.XTDDFT_base.__init__
+        old_as_cpu_mf = xsf_tda_down._as_cpu_mf
+        try:
+            xsf_tda_down.XTDDFT_base.__init__ = lambda self, mf, method, davidson=True, df_cache=None: None
+            xsf_tda_down._as_cpu_mf = lambda mf: SimpleNamespace(spin_square=lambda: (0.0, 3.0))
+
+            xsf_tda_down.XSF_TDA_down.__init__(method, method.mf, method=1, delta_a_diag_df_backend="gpu")
+            self.assertEqual(method.delta_a_diag_df_backend, "gpu")
+            with self.assertRaises(ValueError):
+                xsf_tda_down.XSF_TDA_down.__init__(method, method.mf, method=1, delta_a_diag_df_backend="bad")
+        finally:
+            xsf_tda_down.XTDDFT_base.__init__ = old_base_init
+            xsf_tda_down._as_cpu_mf = old_as_cpu_mf
+
+    def test_pbc_df_response_j_diagonals_match_batched_j_path(self):
+        method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
+        method.nc = 1
+        method.no = 1
+        method.nv = 1
+        method.nocc_a = 2
+        method.nvir_b = 2
+        method.occidx_a = np.array([0, 1])
+        method.viridx_b = np.array([1, 2])
+        method.mo_coeff = np.stack([np.eye(3), np.eye(3)])
+
+        pair_idx = np.arange(9)
+        cderi = np.arange(1, 37, dtype=float).reshape(4, 9) / 10.0
+        method.mf = SimpleNamespace(
+            cell=object(),
+            with_df=SimpleNamespace(
+                is_gamma_point=True,
+                _cderi={0: cderi},
+                _cderi_idx=(pair_idx, np.array([0, 4, 8])),
+            ),
+        )
+        eri = np.einsum("Lp,Lq->pq", cderi, cderi).reshape(3, 3, 3, 3)
+
+        def fake_get_j(mf, dm, hermi=0):
+            return np.einsum("pqrs,xrs->xpq", eri, dm)
+
+        old_get_j = xsf_tda_down._get_j
+        try:
+            xsf_tda_down._get_j = fake_get_j
+            ref_co, ref_ov = method._response_j_diagonals(batch_size=1)
+        finally:
+            xsf_tda_down._get_j = old_get_j
+
+        co_j, ov_j = method._response_j_diagonals_from_pbc_df(
+            mo_pair_batch_size=1,
+            aux_batch_size=2,
+        )
+
+        self.assertTrue(np.allclose(co_j, ref_co))
+        self.assertTrue(np.allclose(ov_j, ref_ov))
+
+        method.delta_a_diag_method = "pbc_df"
+        method.delta_a_diag_df_aux_batch_size = 2
+        co_j, ov_j = method._response_j_diagonals(batch_size=1)
+
+        self.assertTrue(np.allclose(co_j, ref_co))
+        self.assertTrue(np.allclose(ov_j, ref_ov))
+
+    def test_molecular_df_response_j_diagonals_match_batched_j_path(self):
+        method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
+        method.nc = 1
+        method.no = 1
+        method.nv = 1
+        method.nocc_a = 2
+        method.nvir_b = 2
+        method.occidx_a = np.array([0, 1])
+        method.viridx_b = np.array([1, 2])
+        method.mo_coeff = np.stack([np.eye(3), np.eye(3)])
+
+        tri = np.tril_indices(3)
+        cderi = np.arange(1, 25, dtype=float).reshape(4, 6) / 10.0
+        cderi_full = np.zeros((4, 3, 3))
+        cderi_full[:, tri[0], tri[1]] = cderi
+        cderi_full[:, tri[1], tri[0]] = cderi
+        method.mf = SimpleNamespace(
+            mol=object(),
+            with_df=SimpleNamespace(_cderi=cderi),
+        )
+        eri = np.einsum("Lpq,Lrs->pqrs", cderi_full, cderi_full)
+
+        def fake_get_j(mf, dm, hermi=0):
+            return np.einsum("pqrs,xrs->xpq", eri, dm)
+
+        old_get_j = xsf_tda_down._get_j
+        try:
+            xsf_tda_down._get_j = fake_get_j
+            ref_co, ref_ov = method._response_j_diagonals(batch_size=1)
+        finally:
+            xsf_tda_down._get_j = old_get_j
+
+        co_j, ov_j = method._response_j_diagonals_from_df(
+            mo_pair_batch_size=1,
+            aux_batch_size=2,
+        )
+
+        self.assertTrue(np.allclose(co_j, ref_co))
+        self.assertTrue(np.allclose(ov_j, ref_ov))
+
+        method.delta_a_diag_method = "df"
+        method.delta_a_diag_df_aux_batch_size = 2
+        co_j, ov_j = method._response_j_diagonals(batch_size=1)
+
+        self.assertTrue(np.allclose(co_j, ref_co))
+        self.assertTrue(np.allclose(ov_j, ref_ov))
+
+    def test_gpu_df_backend_matches_cpu_df_backend(self):
+        try:
+            import cupy as cp
+
+            cp.cuda.runtime.getDeviceCount()
+        except Exception as err:
+            self.skipTest(f"CUDA is not available: {err}")
+
+        method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
+        method.nc = 1
+        method.no = 1
+        method.nv = 1
+        method.nocc_a = 2
+        method.nvir_b = 2
+        method.occidx_a = np.array([0, 1])
+        method.viridx_b = np.array([1, 2])
+        method.mo_coeff = np.stack([np.eye(3), np.eye(3)])
+        method.delta_a_diag_df_aux_batch_size = 2
+
+        cderi = np.arange(1, 25, dtype=float).reshape(4, 6) / 10.0
+        method.mf = SimpleNamespace(mol=object(), with_df=SimpleNamespace(_cderi=cderi))
+
+        method.delta_a_diag_df_backend = "cpu"
+        cpu_co, cpu_ov = method._response_j_diagonals_from_df(
+            mo_pair_batch_size=1,
+            aux_batch_size=2,
+        )
+        method.delta_a_diag_df_backend = "gpu"
+        gpu_co, gpu_ov = method._response_j_diagonals_from_df(
+            mo_pair_batch_size=1,
+            aux_batch_size=2,
+        )
+
+        self.assertTrue(np.allclose(gpu_co, cpu_co))
+        self.assertTrue(np.allclose(gpu_ov, cpu_ov))
+
+    def test_hdiag_checkpoint_round_trip_checks_davidson_size(self):
+        method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
+        hdiag = np.array([1.0, 2.0, 3.0])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "hdiag.npy"
+
+            method._save_hdiag_file(path, hdiag)
+            loaded = method._load_hdiag_file(path, expected_size=3)
+
+            self.assertTrue(np.allclose(loaded, hdiag))
+            with self.assertRaises(ValueError):
+                method._load_hdiag_file(path, expected_size=4)
 
     def test_uks_delta_s2_reuses_cpu_overlap_context(self):
         method = self.make_method()
@@ -273,6 +436,20 @@ class XsfTdaDownDeltaS2Test(unittest.TestCase):
         self.assertEqual(result["OO"]["target"], "O")
         self.assertIn("trace_overlap", result["OO"])
         self.assertEqual(result["OO"]["trace_overlap"].shape, (1,))
+
+    def test_davidson_matvec_batches_trial_vectors(self):
+        method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
+        zs = np.arange(5 * 3, dtype=float).reshape(5, 3)
+        batch_sizes = []
+
+        def vind(batch):
+            batch_sizes.append(batch.shape[0])
+            return batch + 1.0
+
+        out = method._apply_davidson_matvec_batch(vind, zs, batch_size=2)
+
+        self.assertEqual(batch_sizes, [2, 2, 1])
+        self.assertTrue(np.allclose(out, zs + 1.0))
 
     def test_delta_a_jk_response_batches_density_matrices(self):
         method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)

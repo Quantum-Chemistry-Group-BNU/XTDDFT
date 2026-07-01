@@ -15,7 +15,7 @@ from .base import (
     _system,
 )
 from ..utils.hxc_part import gen_response_tda
-from ..utils.backend import _asarray, _asnumpy, backend, contract, require_cupy, set_backend, xp
+from ..utils.backend import _asarray, _asnumpy, backend, contract, get_array_module, require_cupy, set_backend, xp
 from ..utils.unit import ha2eV
 
 try:
@@ -66,7 +66,8 @@ class XTDA(XTDDFT_base):
 
     def __init__(self, mf, method=0, davidson=True, davidson_backend="cpu",
                  so2st=False, dense_batch_size=64, jk_batch_size=None,
-                 jk_block_split=False, use_delta_a=True, df_cache=None):
+                 jk_block_split=False, use_delta_a=True, df_cache=None,
+                 davidson_matvec_batch_size=None):
         if method != 0:
             raise NotImplementedError("XTDA currently implements method=0 spin-conserving response only.")
         davidson_backend = davidson_backend.lower()
@@ -80,6 +81,9 @@ class XTDA(XTDDFT_base):
         if jk_batch_size is not None and jk_batch_size < 1:
             raise ValueError("jk_batch_size must be a positive integer or None")
         self.jk_batch_size = jk_batch_size
+        if davidson_matvec_batch_size is not None and davidson_matvec_batch_size < 1:
+            raise ValueError("davidson_matvec_batch_size must be a positive integer or None")
+        self.davidson_matvec_batch_size = davidson_matvec_batch_size
         self.jk_block_split = jk_block_split
         self.use_delta_a = bool(use_delta_a)
         self.order = _order_pyscf2my(self.nc, self.no, self.nv)
@@ -157,7 +161,7 @@ class XTDA(XTDDFT_base):
             for start in range(0, ntrial, batch_size):
                 stop = min(start + batch_size, ntrial)
                 blocks.append(vresp(dms[:, start:stop]))
-            return xp.concatenate(blocks, axis=1)
+            return get_array_module(blocks[0]).concatenate(blocks, axis=1)
 
         ntrial = dms.shape[0]
         if ntrial <= batch_size:
@@ -166,7 +170,7 @@ class XTDA(XTDDFT_base):
         for start in range(0, ntrial, batch_size):
             stop = min(start + batch_size, ntrial)
             blocks.append(vresp(dms[start:stop]))
-        return xp.concatenate(blocks, axis=0)
+        return get_array_module(blocks[0]).concatenate(blocks, axis=0)
 
     def _apply_response_blocks(self, vresp, dms_blocks):
         response = None
@@ -182,6 +186,17 @@ class XTDA(XTDDFT_base):
             and ctx.no > 0
             and _system(mf).spin != 0
         )
+
+    def _apply_davidson_matvec_batch(self, vind, zs, batch_size=None):
+        if batch_size is None:
+            batch_size = getattr(self, "davidson_matvec_batch_size", None)
+        if batch_size is None or getattr(zs, "ndim", 1) == 1 or zs.shape[0] <= batch_size:
+            return vind(zs)
+
+        blocks = []
+        for start in range(0, zs.shape[0], batch_size):
+            blocks.append(vind(zs[start:start + batch_size]))
+        return get_array_module(blocks[0]).concatenate(blocks, axis=0)
 
     def gen_tda_operation(self, mf=None, ctx=None):
         mf = self.mf if mf is None else mf
@@ -317,6 +332,12 @@ class XTDA(XTDDFT_base):
 
     def davidson_process(self, nstates, init_space=None):
         vind, hdiag = self.gen_tda_operation()
+        matvec_batch_size = self.davidson_matvec_batch_size
+        if matvec_batch_size is not None:
+            base_vind = vind
+            vind = lambda zs: self._apply_davidson_matvec_batch(
+                base_vind, zs, matvec_batch_size
+            )
         nroots = min(nstates, int(hdiag.size))
         x0 = _prepare_davidson_init_space(self.init_guess(nroots, hdiag=hdiag), init_space)
         converged, e, x1 = _run_davidson(

@@ -92,5 +92,19 @@ class SfTdaUpNtoTest(unittest.TestCase):
         self.assertEqual(block["holes"].shape, (10, 1))
         self.assertEqual(block["particles"].shape, (10, 1))
 
+    def test_davidson_matvec_batches_trial_vectors(self):
+        method = sf_tda_up.SF_TDA_up.__new__(sf_tda_up.SF_TDA_up)
+        zs = np.arange(5 * 3, dtype=float).reshape(5, 3)
+        batch_sizes = []
+
+        def vind(batch):
+            batch_sizes.append(batch.shape[0])
+            return batch + 1.0
+
+        out = method._apply_davidson_matvec_batch(vind, zs, batch_size=2)
+
+        self.assertEqual(batch_sizes, [2, 2, 1])
+        self.assertTrue(np.allclose(out, zs + 1.0))
+
 if __name__ == "__main__":
     unittest.main()

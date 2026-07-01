@@ -1,4 +1,5 @@
 import math
+import os
 from types import SimpleNamespace
 import numpy as np
 from pyscf import ao2mo
@@ -15,6 +16,7 @@ from .base import (
     _ao2mo_full_gamma,
     _build_initial_guess_from_gaps,
     _df_ao2mo_pbc,
+    _ensure_gamma_df,
     _get_gamma_kpt,
     _get_hf_mo_fock,
     _get_j,
@@ -34,7 +36,7 @@ from .base import (
     _make_reference_dm,
     _response_max_memory,
 )
-from ..utils.backend import _asarray, _asnumpy, backend, contract, xp
+from ..utils.backend import _asarray, _asnumpy, backend, contract, get_array_module, require_cupy, xp
 from ..utils.unit import ha2eV
 
 try:
@@ -94,7 +96,9 @@ def _convert_a2b_to_cv_co_ov_oo(amat, nc, no, nv):
 class XSF_TDA_down(XTDDFT_base): # just for ROKS
     def __init__(self, mf, method, davidson=True, SA = None, davidson_backend="cpu",
                  collinear_samples=60, delta_a_jk_batch_size=None,
-                 delta_a_diag_j_batch_size=None, df_cache=None):
+                 delta_a_diag_j_batch_size=None, df_cache=None,
+                 delta_a_diag_method="response", delta_a_diag_df_aux_batch_size=256,
+                 delta_a_diag_df_backend="auto", davidson_matvec_batch_size=None):
         """SA=0: SF-TDA
            SA=1: only add diagonal block for dA
            SA=2: add all dA except for OO block
@@ -113,8 +117,22 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             raise ValueError("delta_a_jk_batch_size must be a positive integer or None")
         self.delta_a_jk_batch_size = delta_a_jk_batch_size
         if delta_a_diag_j_batch_size is not None and delta_a_diag_j_batch_size < 1:
-            raise ValueError
+            raise ValueError("delta_a_diag_j_batch_size must be a positive integer or None")
         self.delta_a_diag_j_batch_size = delta_a_diag_j_batch_size
+        delta_a_diag_method = delta_a_diag_method.lower()
+        if delta_a_diag_method not in ("response", "df", "pbc_df", "auto"):
+            raise ValueError("delta_a_diag_method must be 'response', 'df', 'pbc_df', or 'auto'")
+        self.delta_a_diag_method = delta_a_diag_method
+        if delta_a_diag_df_aux_batch_size is not None and delta_a_diag_df_aux_batch_size < 1:
+            raise ValueError("delta_a_diag_df_aux_batch_size must be a positive integer or None")
+        self.delta_a_diag_df_aux_batch_size = delta_a_diag_df_aux_batch_size
+        delta_a_diag_df_backend = delta_a_diag_df_backend.lower()
+        if delta_a_diag_df_backend not in ("cpu", "gpu", "auto"):
+            raise ValueError("delta_a_diag_df_backend must be 'cpu', 'gpu', or 'auto'")
+        self.delta_a_diag_df_backend = delta_a_diag_df_backend
+        if davidson_matvec_batch_size is not None and davidson_matvec_batch_size < 1:
+            raise ValueError("davidson_matvec_batch_size must be a positive integer or None")
+        self.davidson_matvec_batch_size = davidson_matvec_batch_size
         self.SA = (0 if self.type_u else 3) if SA is None else SA
         spin_mf = _as_cpu_mf(mf)
         _,dsp1 = spin_mf.spin_square()
@@ -504,7 +522,168 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             raw = max(32, (raw // 32) * 32)
         return min(total, raw)
 
+    def _df_cderi_data(self, aux_batch_size=None):
+        mo_coeff = _asnumpy(self.mo_coeff)
+        nao = int(mo_coeff.shape[-2])
+        with_df = getattr(self.mf, "with_df", None)
+        if with_df is None:
+            raise ValueError("mf.with_df is not available for DF diagonal J")
+
+        if _is_pbc_mf(self.mf):
+            _ensure_gamma_df(self.mf)
+            cderi = getattr(with_df, "_cderi", None)
+            cderi0 = cderi.get(0) if isinstance(cderi, dict) else cderi
+            if cderi0 is None:
+                raise ValueError("mf.with_df._cderi[0] is not available for DF diagonal J")
+            cderi_idx = getattr(with_df, "_cderi_idx", None)
+            if cderi_idx is None:
+                if int(cderi0.shape[1]) != nao * nao:
+                    raise ValueError("PBC DF cderi pair indices are missing")
+                pair_idx = np.arange(nao * nao, dtype=np.int64)
+            else:
+                pair_idx = _asnumpy(cderi_idx[0], dtype=np.int64)
+            if pair_idx.size != int(cderi0.shape[1]):
+                raise ValueError("PBC DF cderi pair index length does not match cderi columns")
+            if pair_idx.size and int(pair_idx.max()) >= nao * nao:
+                raise ValueError("PBC DF cderi pair index is out of AO-pair range")
+            naux = int(cderi0.shape[0])
+            if aux_batch_size is None:
+                aux_batch_size = naux
+
+            def iter_blocks():
+                for l0 in range(0, naux, aux_batch_size):
+                    yield cderi0[l0:min(l0 + aux_batch_size, naux)]
+
+            return SimpleNamespace(
+                mo_coeff=mo_coeff,
+                pair_p=pair_idx // nao,
+                pair_q=pair_idx % nao,
+                symmetric_pairs=False,
+                iter_blocks=iter_blocks,
+            )
+
+        cderi0 = getattr(with_df, "_cderi", None)
+        if cderi0 is None and hasattr(with_df, "build"):
+            with_df.build()
+            cderi0 = getattr(with_df, "_cderi", None)
+
+        nao_pair = nao * (nao + 1) // 2
+        tri_p, tri_q = np.tril_indices(nao)
+        if hasattr(with_df, "loop"):
+            def iter_blocks():
+                kwargs = {} if aux_batch_size is None else {"blksize": aux_batch_size}
+                for block in with_df.loop(**kwargs):
+                    yield block
+        elif cderi0 is not None:
+            if int(cderi0.shape[1]) == nao * nao:
+                pair_idx = np.arange(nao * nao, dtype=np.int64)
+                tri_p, tri_q = pair_idx // nao, pair_idx % nao
+                symmetric_pairs = False
+            elif int(cderi0.shape[1]) == nao_pair:
+                symmetric_pairs = True
+            else:
+                raise ValueError("Molecular DF cderi has unsupported AO-pair dimension")
+            naux = int(cderi0.shape[0])
+            if aux_batch_size is None:
+                aux_batch_size = naux
+
+            def iter_blocks():
+                for l0 in range(0, naux, aux_batch_size):
+                    yield cderi0[l0:min(l0 + aux_batch_size, naux)]
+
+            return SimpleNamespace(
+                mo_coeff=mo_coeff,
+                pair_p=tri_p.astype(np.int64, copy=False),
+                pair_q=tri_q.astype(np.int64, copy=False),
+                symmetric_pairs=symmetric_pairs,
+                iter_blocks=iter_blocks,
+            )
+        else:
+            raise ValueError("Molecular DF cderi is not available; build mf.with_df first")
+
+        return SimpleNamespace(
+            mo_coeff=mo_coeff,
+            pair_p=tri_p.astype(np.int64, copy=False),
+            pair_q=tri_q.astype(np.int64, copy=False),
+            symmetric_pairs=True,
+            iter_blocks=iter_blocks,
+        )
+
+    def _response_j_diagonals_from_df(self, mo_pair_batch_size=None, aux_batch_size=None):
+        data = self._df_cderi_data(aux_batch_size=aux_batch_size)
+        df_backend = getattr(self, "delta_a_diag_df_backend", "auto")
+        use_gpu = df_backend == "gpu" or (df_backend == "auto" and backend.is_gpu)
+        arr = require_cupy() if use_gpu else np
+
+        mo_coeff = arr.asarray(data.mo_coeff)
+        nc, no, nv = self.nc, self.no, self.nv
+        orbca = mo_coeff[0][:, _asnumpy(self.occidx_a[:nc], dtype=np.int64)]
+        orboa_open = mo_coeff[0][:, _asnumpy(self.occidx_a[nc:nc + no], dtype=np.int64)]
+        orbbo = mo_coeff[1][:, _asnumpy(self.viridx_b[:no], dtype=np.int64)]
+        orbvv = mo_coeff[1][:, _asnumpy(self.viridx_b[no:], dtype=np.int64)]
+
+        total = nc * no + no * nv
+        if mo_pair_batch_size is None:
+            mo_pair_batch_size = self._response_j_batch_size(total)
+        pair_p = arr.asarray(data.pair_p)
+        pair_q = arr.asarray(data.pair_q)
+        offdiag = pair_p != pair_q
+        dtype = arr.result_type(mo_coeff.dtype, np.float64)
+
+        def pair_coeff(orbo, orbv, row, col, ket=False):
+            row = arr.asarray(row)
+            col = arr.asarray(col)
+            if ket:
+                coeff = orbo[pair_p[:, None], row] * orbv[pair_q[:, None], col].conj()
+            else:
+                coeff = orbo[pair_p[:, None], row].conj() * orbv[pair_q[:, None], col]
+            if data.symmetric_pairs:
+                if ket:
+                    coeff[offdiag] += orbo[pair_q[offdiag, None], row] * orbv[pair_p[offdiag, None], col].conj()
+                else:
+                    coeff[offdiag] += orbo[pair_q[offdiag, None], row].conj() * orbv[pair_p[offdiag, None], col]
+            return coeff
+
+        def diagonal_block(orbo, orbv):
+            nrow, ncol = orbo.shape[1], orbv.shape[1]
+            out = arr.zeros(nrow * ncol, dtype=dtype)
+            for cblk in data.iter_blocks():
+                cblk = arr.asarray(cblk if use_gpu else _asnumpy(cblk))
+                for p0 in range(0, out.size, mo_pair_batch_size):
+                    p1 = min(p0 + mo_pair_batch_size, out.size)
+                    idx = np.arange(p0, p1)
+                    row = idx // ncol
+                    col = idx % ncol
+                    bra = pair_coeff(orbo, orbv, row, col, ket=False)
+                    ket = pair_coeff(orbo, orbv, row, col, ket=True)
+                    lbra = cblk @ bra
+                    lket = cblk @ ket
+                    out[p0:p1] += arr.einsum("Lb,Lb->b", lbra, lket)
+            return _asnumpy(out).reshape(nrow, ncol)
+
+        co_j = diagonal_block(orbca, orbbo)
+        ov_j = diagonal_block(orboa_open, orbvv)
+        return xp.asarray(co_j), xp.asarray(ov_j)
+
+    def _response_j_diagonals_from_pbc_df(self, mo_pair_batch_size=None, aux_batch_size=None):
+        return self._response_j_diagonals_from_df(
+            mo_pair_batch_size=mo_pair_batch_size,
+            aux_batch_size=aux_batch_size,
+        )
+
     def _response_j_diagonals(self, batch_size=None):
+        method = getattr(self, "delta_a_diag_method", "response")
+        if method in ("df", "pbc_df", "auto"):
+            try:
+                return self._response_j_diagonals_from_df(
+                    mo_pair_batch_size=batch_size,
+                    aux_batch_size=getattr(self, "delta_a_diag_df_aux_batch_size", 256),
+                )
+            except (NotImplementedError, ValueError, AttributeError) as err:
+                if method in ("df", "pbc_df"):
+                    raise
+                logger.warning("Falling back to response-J diagonal path: {}", err)
+
         mo_coeff = _asarray(self.mo_coeff)
         nc, no, nv = self.nc, self.no, self.nv
         orbca = mo_coeff[0][:, self.occidx_a[:nc]]
@@ -625,6 +804,24 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             oo,
         ])
 
+    def _load_hdiag_file(self, filename, expected_size):
+        if filename is None or not os.path.exists(filename):
+            return None
+        hdiag = np.asarray(np.load(filename))
+        if hdiag.ndim != 1 or hdiag.size != int(expected_size):
+            raise ValueError(
+                f"Saved hdiag shape {hdiag.shape} does not match expected Davidson size {expected_size}"
+            )
+        logger.info("Loaded Davidson hdiag from {}", filename)
+        return xp.asarray(hdiag)
+
+    def _save_hdiag_file(self, filename, hdiag):
+        if filename is None:
+            return
+        with open(filename, "wb") as handle:
+            np.save(handle, _asnumpy(hdiag))
+        logger.info("Saved Davidson hdiag to {}", filename)
+
     def gen_response_sf_delta_A(self, hermi=0, max_memory=None):
         del max_memory
 
@@ -645,7 +842,8 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             vj_block, vk_block = vresp_hf(dm_hf[start:stop])
             vj_blocks.append(vj_block)
             vk_blocks.append(vk_block)
-        return xp.concatenate(vj_blocks, axis=0), xp.concatenate(vk_blocks, axis=0)
+        arr = get_array_module(vj_blocks[0], vk_blocks[0])
+        return arr.concatenate(vj_blocks, axis=0), arr.concatenate(vk_blocks, axis=0)
 
     def _apply_delta_a_jk_response_blocks(self, vresp_hf, dm_blocks):
         return [
@@ -653,7 +851,20 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             for dm_block in dm_blocks
         ]
 
-    def gen_tda_operation_sf(self, foo=1.0, fglobal=1.0):
+    def _apply_davidson_matvec_batch(self, vind, zs, batch_size=None):
+        if batch_size is None:
+            batch_size = getattr(self, "davidson_matvec_batch_size", None)
+        if batch_size is None or getattr(zs, "ndim", 1) == 1 or zs.shape[0] <= batch_size:
+            return vind(zs)
+
+        blocks = []
+        for start in range(0, zs.shape[0], batch_size):
+            stop = min(start + batch_size, zs.shape[0])
+            blocks.append(vind(zs[start:stop]))
+        arr = get_array_module(blocks[0])
+        return arr.concatenate(blocks, axis=0)
+
+    def gen_tda_operation_sf(self, foo=1.0, fglobal=1.0, hdiag_file=None):
         nc, no, nv = self.nc, self.no, self.nv
         nvir = no + nv
         nocc = nc + no
@@ -693,14 +904,19 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             fs_vv = fockS_hf[nc + no:, nc + no:]
             fs_cv = fockS_hf[:nc, nc + no:]
 
-        hdiag = self._build_preconditioner_hdiag(
-            fockA, fockB, fglobal=fglobal,
-            fockA_hf=fockA_hf if use_delta_a else None,
-            fockB_hf=fockB_hf if use_delta_a else None,
-        )
         if self.re:
             self.vects = xp.asarray(self.get_vect())
-            hdiag = self._compress_removed_hdiag(hdiag)
+        expected_hdiag_size = (nc + no) * (no + nv) - (1 if self.re else 0)
+        hdiag = self._load_hdiag_file(hdiag_file, expected_hdiag_size)
+        if hdiag is None:
+            hdiag = self._build_preconditioner_hdiag(
+                fockA, fockB, fglobal=fglobal,
+                fockA_hf=fockA_hf if use_delta_a else None,
+                fockB_hf=fockB_hf if use_delta_a else None,
+            )
+            if self.re:
+                hdiag = self._compress_removed_hdiag(hdiag)
+            self._save_hdiag_file(hdiag_file, hdiag)
 
         orbca = orboa[:, :nc]
         orboa_open = orboa[:, nc:nc + no]
@@ -725,7 +941,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
 
         def vind(zs0):
             zs0 = xp.asarray(zs0)
-            cv, co, ov, oo = self._split_block_vectors(zs0)
+            cv, co, ov, oo = self._split_block_vectors(zs0, self.re)
 
             dmov = (
                 contract("xia,qa,pi->xpq", cv, orbvv.conj(), orbca)
@@ -870,10 +1086,16 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             _, hdiag = self.gen_tda_operation_sf()
         return _build_initial_guess_from_gaps(hdiag, nstates)
 
-    def davidson_process(self, nstates, foo=1.0, fglobal=1.0, init_space=None):
+    def davidson_process(self, nstates, foo=1.0, fglobal=1.0, init_space=None, hdiag_file=None):
         vind, hdiag = self.gen_tda_operation_sf(
-            foo=foo, fglobal=fglobal
+            foo=foo, fglobal=fglobal, hdiag_file=hdiag_file
         )
+        matvec_batch_size = self.davidson_matvec_batch_size
+        if matvec_batch_size is not None:
+            base_vind = vind
+            vind = lambda zs: self._apply_davidson_matvec_batch(
+                base_vind, zs, matvec_batch_size
+            )
         nroots = min(nstates, int(hdiag.size))
         x0 = _prepare_davidson_init_space(self.init_guess(nroots, hdiag=hdiag), init_space)
         converged, e, x1 = _run_davidson(
@@ -1295,7 +1517,8 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         return self.dS2
 
     def kernel(self, nstates=1, remove=None, frozen=None, foo=1.0, d_lda=0.3,
-               fglobal=None, fit=True, save=False, save_file=None, init_space=None):
+               fglobal=None, fit=True, save=False, save_file=None, init_space=None,
+               hdiag_file=None):
         self.re = (_asnumpy(self.mf.mo_coeff).ndim != 3) if remove is None else bool(remove)
         nov = (self.nc + self.no) * (self.no + self.nv)
         effective_dim = nov - 1 if self.re else nov
@@ -1307,7 +1530,10 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         if self.davidson:
             if frozen is not None:
                 raise NotImplementedError("frozen orbital truncation is only implemented for dense XSF_TDA_down.")
-            self.davidson_process(self.nstates, foo=foo, fglobal=fglobal, init_space=init_space)
+            self.davidson_process(
+                self.nstates, foo=foo, fglobal=fglobal,
+                init_space=init_space, hdiag_file=hdiag_file,
+            )
         else:
             self._prepare_dense_A(foo=foo, fglobal=fglobal, frozen=frozen)
             self._diagonalize_dense(self.A, self.nstates)

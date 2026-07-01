@@ -28,7 +28,7 @@ from .base import (
     _make_reference_dm,
     _response_max_memory,
 )
-from ..utils.backend import _asnumpy, backend, contract, require_cupy, set_backend, xp
+from ..utils.backend import _asnumpy, backend, contract, get_array_module, require_cupy, set_backend, xp
 from ..utils.unit import ha2eV
 
 try:
@@ -74,7 +74,8 @@ def _pair_hessian_block_b2a(occ_fock_b, vir_fock_a, tensor_block):
     ).reshape(nocc_b * nvir_a, nocc_b * nvir_a)
 
 class SF_TDA_up(XTDDFT_base): # just for ROKS
-    def __init__(self, mf, method, davidson=True, davidson_backend="cpu", df_cache=None):
+    def __init__(self, mf, method, davidson=True, davidson_backend="cpu", df_cache=None,
+                 davidson_matvec_batch_size=None):
         davidson_backend = davidson_backend.lower()
         if davidson_backend not in ("cpu", "gpu", "auto"):
             raise ValueError("davidson_backend must be 'cpu', 'gpu', or 'auto'")
@@ -82,6 +83,9 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
         logger.info("SF_TDA_up method=0 ALDA0, method=1 multicollinear")
         self.isf = 1
         self.davidson_backend = "cpu" if davidson_backend == "auto" else davidson_backend
+        if davidson_matvec_batch_size is not None and davidson_matvec_batch_size < 1:
+            raise ValueError("davidson_matvec_batch_size must be a positive integer or None")
+        self.davidson_matvec_batch_size = davidson_matvec_batch_size
         self.type_u = True
 
     def _result_method_label(self):
@@ -275,11 +279,28 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
         problem = _make_spinflip_problem(self.ctx, self._get_fock_mo(), self.isf)
         return _make_spinflip_vind(problem, vresp), problem.hdiag
     
+    def _apply_davidson_matvec_batch(self, vind, zs, batch_size=None):
+        if batch_size is None:
+            batch_size = getattr(self, "davidson_matvec_batch_size", None)
+        if batch_size is None or getattr(zs, "ndim", 1) == 1 or zs.shape[0] <= batch_size:
+            return vind(zs)
+
+        blocks = []
+        for start in range(0, zs.shape[0], batch_size):
+            blocks.append(vind(zs[start:start + batch_size]))
+        return get_array_module(blocks[0]).concatenate(blocks, axis=0)
+
     def init_guess(self, nstates):
         return _build_initial_guess_from_gaps(_spinflip_gaps(self.ctx, self.isf), nstates)
     
     def davidson_process(self, nstates, init_space=None):
         vind, hdiag = self.gen_tda_operation_sf()
+        matvec_batch_size = self.davidson_matvec_batch_size
+        if matvec_batch_size is not None:
+            base_vind = vind
+            vind = lambda zs: self._apply_davidson_matvec_batch(
+                base_vind, zs, matvec_batch_size
+            )
         nroots = min(nstates, int(hdiag.size))
         x0 = _prepare_davidson_init_space(self.init_guess(nroots), init_space)
 
