@@ -23,15 +23,6 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "8")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "8")
 
 
-# 让脚本无论从哪个工作目录运行，都能 import 到本仓库的 XTDDFT_dev 包。
-# 当前文件位置是 experiment/molecule/xxx.py，所以 parents[1] 是仓库根目录。
-SCRIPT_DIR = Path(__file__).resolve().parent
-ROOT = SCRIPT_DIR.parents[1]
-PROJECT_PARENT = ROOT.parent
-if str(PROJECT_PARENT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_PARENT))
-
-
 import numpy as np
 from pyscf import dft, gto, lib
 
@@ -93,12 +84,12 @@ mol = gto.M(
 # 2. 运行 CPU ROKS reference。
 # XSF-TDA-down 通常从高自旋开壳层参考态出发，这里用 ROKS 描述 triplet reference。
 mf = dft.ROKS(mol)
-mf.xc = "CAM-B3LYP"
+mf.xc = "B3LYP"
 if use_density_fit:
     mf = mf.density_fit()
 mf.max_memory = max_memory
 mf.grids.level = grid_level
-mf.init_guess = 'huckle'
+mf.init_guess = 'atom'
 mf.max_cycle = cycle
 mf.chkfile = "xsf_tda_down_cpu_roks_ref.chk"
 mf.conv_tol = 1e-10        # 能量收敛阈值
