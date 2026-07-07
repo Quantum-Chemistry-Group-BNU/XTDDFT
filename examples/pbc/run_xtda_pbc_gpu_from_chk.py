@@ -4,17 +4,17 @@ import sys
 from pathlib import Path
 
 
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "16")
 os.environ.setdefault("MKL_NUM_THREADS", "16")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "16")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "16")
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-ROOT = SCRIPT_DIR.parents[1]
-PROJECT_PARENT = ROOT.parent
-if str(PROJECT_PARENT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_PARENT))
+# SCRIPT_DIR = Path(__file__).resolve().parent
+# ROOT = SCRIPT_DIR.parent
+# PROJECT_PARENT = ROOT.parent
+# if str(PROJECT_PARENT) not in sys.path:
+#     sys.path.insert(0, str(PROJECT_PARENT))
 
 import cupy as cp
 import numpy as np
@@ -23,23 +23,6 @@ from pyscf.pbc import dft as pbcdft
 
 from XTDDFT_dev.utils.backend import backend_info, set_backend
 from XTDDFT_dev.XTDDFT.xtda import XTDA
-
-
-def resolve_existing_file(filename, label):
-    path = Path(filename).expanduser()
-    if path.is_absolute():
-        if not path.exists():
-            raise FileNotFoundError(f"{label} file does not exist: {path}")
-        return path
-
-    for base in (Path.cwd(), SCRIPT_DIR, ROOT):
-        candidate = base / path
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(
-        f"{label} file {filename!r} was not found in cwd={Path.cwd()}, "
-        f"script_dir={SCRIPT_DIR}, or repo_root={ROOT}."
-    )
 
 
 def resolve_grid_file(filename, chk_path):
@@ -96,8 +79,8 @@ def make_gpu_roks_from_chk(chk, xc, use_density_fit=True):
 
 # ===== Manually edit these parameters on the server =====
 chk = "roks_from_uks_ccpVDZ.chk"
-xc = "b3lyp"
-nstates = 8
+xc = "pbe0"
+nstates = 15
 
 use_density_fit = True  # If GDF is problematic on the machine, try False.
 
@@ -108,25 +91,26 @@ method = 0  # XTDA currently implements method=0 spin-conserving response.
 davidson = True
 davidson_backend = "cpu"  # CPU Davidson + GPU matrix-vector product.
 so2st = False
+davidson_matvec_batch_size = 15
+jk_batch_size = 15  # Split Davidson trial-vector JK builds; use None to disable.
 dense_batch_size = 64
-jk_batch_size = 20  # Split Davidson trial-vector JK builds; use None to disable.
-jk_block_split = True  # Split XTDA CVa/OVa/COb/CVb response blocks to lower peak memory.
-use_delta_a = True  # ROKS delta A is on by default; set False to use bare XTDA.
 analyse_threshold = 0.03
+save_results = True
+save_file = 'XTDA'
 # ========================================================
 
 
 def main():
     set_backend("gpu")
-    chk_path = resolve_existing_file(chk, "chk")
-    grid_path = resolve_grid_file(grid_file, chk_path)
+    # chk_path = resolve_existing_file(chk, "chk")
+    # grid_path = resolve_grid_file(grid_file, chk_path)
 
-    print("chk path:", chk_path)
-    print("grid path:", grid_path)
+    # print("chk path:", chk_path)
+    #print("grid path:", grid_path)
 
-    cell, mf = make_gpu_roks_from_chk(chk_path, xc, use_density_fit=use_density_fit)
+    cell, mf = make_gpu_roks_from_chk(chk, xc, use_density_fit=use_density_fit)
 
-    load_becke_grids(mf, cell, grid_path, level=grid_level)
+    load_becke_grids(mf, cell, grid_file, level=grid_level)
 
     print("backend:", backend_info())
     print("CUDA device count:", cp.cuda.runtime.getDeviceCount())
@@ -147,11 +131,16 @@ def main():
         davidson_backend=davidson_backend,
         so2st=so2st,
         dense_batch_size=dense_batch_size,
+        davidson_matvec_batch_size = davidson_matvec_batch_size,
         jk_batch_size=jk_batch_size,
-        jk_block_split=jk_block_split,
-        use_delta_a=use_delta_a,
+        jk_block_split=True
     )
-    ee, vv = xtda_method.kernel(nstates=nstates)
+    #init_space = np.load("XTDA_tmp.npz")["raw_vectors"]
+    ee, vv = xtda_method.kernel(nstates=nstates,
+                                #init_space=init_space,
+                                save=save_results,
+                                save_file=f'{save_file}.npz'
+                                )
     xtda_method.analyse(threshold=analyse_threshold)
     cp.cuda.Stream.null.synchronize()
 

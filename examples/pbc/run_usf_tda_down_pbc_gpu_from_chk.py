@@ -10,11 +10,6 @@ os.environ.setdefault("MKL_NUM_THREADS", "16")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "16")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "16")
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-ROOT = SCRIPT_DIR.parents[1]
-PROJECT_PARENT = ROOT.parent
-if str(PROJECT_PARENT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_PARENT))
 
 import cupy as cp
 import numpy as np
@@ -25,49 +20,56 @@ from XTDDFT_dev.utils.backend import backend_info, set_backend
 from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
 
 
-def resolve_existing_file(filename, label):
-    path = Path(filename).expanduser()
-    if path.is_absolute():
-        if not path.exists():
-            raise FileNotFoundError(f"{label} file does not exist: {path}")
-        return path
 
-    for base in (Path.cwd(), SCRIPT_DIR, ROOT):
-        candidate = base / path
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(
-        f"{label} file {filename!r} was not found in cwd={Path.cwd()}, "
-        f"script_dir={SCRIPT_DIR}, or repo_root={ROOT}."
-    )
+def load_or_build_becke_grids(mf, cell, filename, level=4):
+    filename = Path(filename).expanduser().resolve()
 
+    print("cwd =", Path.cwd())
+    print("grid_file =", filename)
+    print("grid exists =", filename.is_file())
 
-def resolve_grid_file(filename, chk_path):
-    path = Path(filename).expanduser()
-    if path.is_absolute():
-        if not path.exists():
-            raise FileNotFoundError(f"grid file does not exist: {path}")
-        return path
+    # 不要重新 mf.grids = pbcdft.BeckeGrids(cell)
+    # 尽量保留 mf.to_gpu() 后已有的 grids 对象
+    if getattr(mf, "grids", None) is None:
+        mf.grids = pbcdft.BeckeGrids(cell)
 
-    for base in (Path.cwd(), chk_path.parent, SCRIPT_DIR, ROOT):
-        candidate = base / path
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(
-        f"grid file {filename!r} was not found in cwd={Path.cwd()}, "
-        f"chk_dir={chk_path.parent}, script_dir={SCRIPT_DIR}, or repo_root={ROOT}."
-    )
-
-
-def load_becke_grids(mf, cell, filename, level=4):
-    data = np.load(filename)
-    mf.grids = pbcdft.BeckeGrids(cell)
     mf.grids.level = level
-    mf.grids.coords = cp.asarray(data["coords"])
-    mf.grids.weights = cp.asarray(data["weights"])
-    print(f"Loaded Becke grids from {filename}")
+
+    if filename.is_file():
+        data = np.load(filename)
+        mf.grids.coords = cp.asarray(data["coords"])
+        mf.grids.weights = cp.asarray(data["weights"])
+        print(f"Loaded Becke grids from {filename}")
+
+    else:
+        print(f"Saved grids not found. Building Becke grids at level {level} ...")
+        mf.grids.build()
+
+        if not isinstance(mf.grids.coords, cp.ndarray):
+            mf.grids.coords = cp.asarray(mf.grids.coords)
+        if not isinstance(mf.grids.weights, cp.ndarray):
+            mf.grids.weights = cp.asarray(mf.grids.weights)
+
+        save_becke_grids(mf.grids, filename)
+
+    # 避免沿用旧的筛选表
+    for key in ("non0tab", "screen_index"):
+        if hasattr(mf.grids, key):
+            setattr(mf.grids, key, None)
+
+    print("grids class:", type(mf.grids))
+    print("coords type:", type(mf.grids.coords))
+    print("weights type:", type(mf.grids.weights))
     print("ngrids =", mf.grids.coords.shape[0])
     print("sum weights =", mf.grids.weights.sum())
+
+    # 防止后续 XSF_TDA_down / numint 再次调用 grids.build() 重新生成 grids
+    def _reuse_loaded_grids(*args, **kwargs):
+        print("Skip mf.grids.build(): using current Becke grids")
+        return mf.grids
+
+    mf.grids.build = _reuse_loaded_grids
+
     return mf.grids
 
 
@@ -108,16 +110,16 @@ def make_gpu_uks_from_chk(chk, xc, use_density_fit=True):
 
 
 # ===== Manually edit these parameters on the server =====
-chk = "hse06_uks_ccpVDZ.chk"
-xc = "hse06"
-nstates = 8
+chk = "pbe0_uks_ccpVDZ.chk"
+xc = "pbe0"
+nstates = 15
 
 use_density_fit = True
 
 grid_level = 4
-grid_file = "becke_grids_ccpVDZ_level4.npz"
+grid_file = "becke_grids_ccpvdz_level4.npz"
 
-method = 0  # method=0 ALDA0 spin-flip response.
+method = 1  # method=0 ALDA0 spin-flip response.
 SA = 0      # USF-TDA: no finite-spin Delta A correction.
 remove = False
 foo = 1.0
@@ -126,23 +128,19 @@ fglobal = 0.0
 fit = False
 davidson_backend = "cpu"  # CPU Davidson + GPU matrix-vector product.
 
-run_analyse = False
+davidson_matvec_batch_size = 15
+run_analyse = True
 analyse_threshold = 0.05
 save_results = True
-save_file = None
+save_file = 'USF'
 # ========================================================
 
 
 def main():
     set_backend("gpu")
-    chk_path = resolve_existing_file(chk, "chk")
-    grid_path = resolve_grid_file(grid_file, chk_path)
 
-    print("chk path:", chk_path)
-    print("grid path:", grid_path)
-
-    cell, mf = make_gpu_uks_from_chk(chk_path, xc, use_density_fit=use_density_fit)
-    load_becke_grids(mf, cell, grid_path, level=grid_level)
+    cell, mf = make_gpu_uks_from_chk(chk, xc, use_density_fit=use_density_fit)
+    load_or_build_becke_grids(mf, cell, grid_file, level=grid_level)
 
     print("backend:", backend_info())
     print("CUDA device count:", cp.cuda.runtime.getDeviceCount())
@@ -165,9 +163,12 @@ def main():
         SA=SA,
         davidson=True,
         davidson_backend=davidson_backend,
+        davidson_matvec_batch_size = davidson_matvec_batch_size,
     )
+    #init_space = np.load("USF_tmp.npz")["vectors"]
     ee, vv = usf_method.kernel(
         nstates=nstates,
+        #init_space=init_space,
         remove=remove,
         foo=foo,
         d_lda=d_lda,

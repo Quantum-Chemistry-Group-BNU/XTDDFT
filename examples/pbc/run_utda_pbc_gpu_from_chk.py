@@ -10,12 +10,6 @@ os.environ.setdefault("MKL_NUM_THREADS", "16")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "16")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "16")
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-ROOT = SCRIPT_DIR.parents[1]
-PROJECT_PARENT = ROOT.parent
-if str(PROJECT_PARENT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_PARENT))
-
 import cupy as cp
 import numpy as np
 from pyscf.pbc.scf import chkfile as pbc_chkfile
@@ -23,40 +17,6 @@ from pyscf.pbc import dft as pbcdft
 
 from XTDDFT_dev.utils.backend import backend_info, set_backend
 from XTDDFT_dev.XTDDFT.xtda import XTDA
-
-
-def resolve_existing_file(filename, label):
-    path = Path(filename).expanduser()
-    if path.is_absolute():
-        if not path.exists():
-            raise FileNotFoundError(f"{label} file does not exist: {path}")
-        return path
-
-    for base in (Path.cwd(), SCRIPT_DIR, ROOT):
-        candidate = base / path
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(
-        f"{label} file {filename!r} was not found in cwd={Path.cwd()}, "
-        f"script_dir={SCRIPT_DIR}, or repo_root={ROOT}."
-    )
-
-
-def resolve_grid_file(filename, chk_path):
-    path = Path(filename).expanduser()
-    if path.is_absolute():
-        if not path.exists():
-            raise FileNotFoundError(f"grid file does not exist: {path}")
-        return path
-
-    for base in (Path.cwd(), chk_path.parent, SCRIPT_DIR, ROOT):
-        candidate = base / path
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(
-        f"grid file {filename!r} was not found in cwd={Path.cwd()}, "
-        f"chk_dir={chk_path.parent}, script_dir={SCRIPT_DIR}, or repo_root={ROOT}."
-    )
 
 
 def load_becke_grids(mf, cell, filename, level=4):
@@ -109,39 +69,38 @@ def make_gpu_uks_from_chk(chk, xc, use_density_fit=True):
 
 
 # ===== Manually edit these parameters on the server =====
-chk = "pre_uks_ccpVDZ.chk"
+chk = "pbe0_uks_ccpVDZ.chk"
 xc = "pbe0"
-nstates = 8
+nstates = 15
 
 use_density_fit = True  # Use GDF for hybrid PBC response; set False only for FFTDF fallback.
 
 grid_level = 4
-grid_file = "becke_grids_ccpVDZ_level4.npz"
+grid_file = "becke_grids_ccpvdz_level4.npz"
 
 method = 0  # UKS input makes XTDA run unrestricted TDA.
 davidson = True
 davidson_backend = "cpu"  # CPU Davidson + GPU matrix-vector product.
 so2st = False  # Spin-tensor transformation is not used for UKS amplitudes.
 dense_batch_size = 64
-analyse_threshold = 0.1
-run_analyse = False
-analyse_delta_s2 = False
+davidson_matvec_batch_size = 15
+#analyse_threshold = 0.1
+run_analyse = True
+analyse_delta_s2 = True
 save_results = True
-save_file = f"utda_method{method}_spin_conserving_{'davidson' if davidson else 'dense'}_nstates{nstates}_results.npz"
+save_file = 'UTDA'
 # ========================================================
 
 
 def main():
     set_backend("gpu")
-    chk_path = resolve_existing_file(chk, "chk")
-    grid_path = resolve_grid_file(grid_file, chk_path)
 
-    print("chk path:", chk_path)
-    print("grid path:", grid_path)
+    #print("chk path:", chk_path)
+    #print("grid path:", grid_path)
 
-    cell, mf = make_gpu_uks_from_chk(chk_path, xc, use_density_fit=use_density_fit)
+    cell, mf = make_gpu_uks_from_chk(chk, xc, use_density_fit=use_density_fit)
 
-    load_becke_grids(mf, cell, grid_path, level=grid_level)
+    load_becke_grids(mf, cell, grid_file, level=grid_level)
 
     print("backend:", backend_info())
     print("CUDA device count:", cp.cuda.runtime.getDeviceCount())
@@ -163,9 +122,12 @@ def main():
         davidson_backend=davidson_backend,
         so2st=so2st,
         dense_batch_size=dense_batch_size,
+        davidson_matvec_batch_size = davidson_matvec_batch_size,
     )
+    #init_space = np.load("UTDA_tmp.npz")["raw_vectors"]
     ee, vv = utda_method.kernel(
         nstates=nstates,
+        #init_space=init_space,
         save=save_results,
         save_file=save_file,
     )
@@ -179,7 +141,7 @@ def main():
 
     if run_analyse:
         utda_method.analyse(
-            threshold=analyse_threshold,
+            #threshold=analyse_threshold,
             compute_s2=analyse_delta_s2,
         )
     return utda_method, ee, vv

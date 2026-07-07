@@ -570,11 +570,34 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
 
         nao_pair = nao * (nao + 1) // 2
         tri_p, tri_q = np.tril_indices(nao)
+        sparse_pair_p = sparse_pair_q = None
+        intopt = getattr(with_df, "intopt", None)
+        if (
+            intopt is not None
+            and hasattr(intopt, "cderi_row")
+            and hasattr(intopt, "cderi_col")
+        ):
+            sparse_pair_p = _asnumpy(intopt.cderi_row, dtype=np.int64)
+            sparse_pair_q = _asnumpy(intopt.cderi_col, dtype=np.int64)
         if hasattr(with_df, "loop"):
+            def normalize_loop_block(block):
+                if isinstance(block, (tuple, list)):
+                    if len(block) == 2 and block[1] is not None:
+                        block = block[1].T
+                    elif len(block) == 1:
+                        block = block[0]
+                    else:
+                        raise ValueError("Molecular DF loop did not return a CDERI block")
+                return block
+
             def iter_blocks():
                 kwargs = {} if aux_batch_size is None else {"blksize": aux_batch_size}
-                for block in with_df.loop(**kwargs):
-                    yield block
+                try:
+                    blocks = with_df.loop(**kwargs, unpack=False)
+                except TypeError:
+                    blocks = with_df.loop(**kwargs)
+                for block in blocks:
+                    yield normalize_loop_block(block)
         elif cderi0 is not None:
             if int(cderi0.shape[1]) == nao * nao:
                 pair_idx = np.arange(nao * nao, dtype=np.int64)
@@ -602,10 +625,12 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         else:
             raise ValueError("Molecular DF cderi is not available; build mf.with_df first")
 
+        pair_p = sparse_pair_p if sparse_pair_p is not None else tri_p
+        pair_q = sparse_pair_q if sparse_pair_q is not None else tri_q
         return SimpleNamespace(
             mo_coeff=mo_coeff,
-            pair_p=tri_p.astype(np.int64, copy=False),
-            pair_q=tri_q.astype(np.int64, copy=False),
+            pair_p=pair_p.astype(np.int64, copy=False),
+            pair_q=pair_q.astype(np.int64, copy=False),
             symmetric_pairs=True,
             iter_blocks=iter_blocks,
         )

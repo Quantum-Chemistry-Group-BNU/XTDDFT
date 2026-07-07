@@ -230,6 +230,45 @@ class XsfTdaDownDeltaS2Test(unittest.TestCase):
         self.assertTrue(np.allclose(co_j, ref_co))
         self.assertTrue(np.allclose(ov_j, ref_ov))
 
+    def test_molecular_gpu4pyscf_df_loop_tuple_matches_cderi_path(self):
+        method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
+        method.nc = 1
+        method.no = 1
+        method.nv = 1
+        method.nocc_a = 2
+        method.nvir_b = 2
+        method.occidx_a = np.array([0, 1])
+        method.viridx_b = np.array([1, 2])
+        method.mo_coeff = np.stack([np.eye(3), np.eye(3)])
+        method.delta_a_diag_df_backend = "cpu"
+
+        tri = np.tril_indices(3)
+        cderi = np.arange(1, 25, dtype=float).reshape(4, 6) / 10.0
+        method.mf = SimpleNamespace(mol=object(), with_df=SimpleNamespace(_cderi=cderi))
+        ref_co, ref_ov = method._response_j_diagonals_from_df(
+            mo_pair_batch_size=1,
+            aux_batch_size=2,
+        )
+
+        class LoopDF:
+            _cderi = None
+
+            def __init__(self):
+                self.intopt = SimpleNamespace(cderi_row=tri[0], cderi_col=tri[1])
+
+            def loop(self, blksize=None, unpack=True):
+                for p0 in range(0, cderi.shape[0], blksize):
+                    yield (None, cderi[p0:p0 + blksize].T)
+
+        method.mf = SimpleNamespace(mol=object(), with_df=LoopDF())
+        co_j, ov_j = method._response_j_diagonals_from_df(
+            mo_pair_batch_size=1,
+            aux_batch_size=2,
+        )
+
+        self.assertTrue(np.allclose(co_j, ref_co))
+        self.assertTrue(np.allclose(ov_j, ref_ov))
+
     def test_gpu_df_backend_matches_cpu_df_backend(self):
         try:
             import cupy as cp
