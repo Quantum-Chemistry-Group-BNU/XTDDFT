@@ -1273,7 +1273,7 @@ class XSF_TDA():
                 vs_ov += fglobal * dov
                 vs_oo += fglobal * doo
                 
-            return self._join_block_vectors(vs_cv, vs_co, vs_ov, vs_oo)
+            return self._join_block_vectors(vs_cv, vs_co, vs_ov, vs_oo, self.re)
         return vind, hdiag
     
     def _join_block_vectors(self, cv, co, ov, oo, compress_oo=True):
