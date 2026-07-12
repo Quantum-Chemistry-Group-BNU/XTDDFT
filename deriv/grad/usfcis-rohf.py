@@ -148,9 +148,9 @@ def grad_elec(td_grad, singlet=True, atmlst = None,
     Qt = Q_a + Q_b
     qt = Qt - Qt.T
 
-    wvc = wvoa[:,:nc] + wvob[no:,:]  #Q_ai-Q_ia                   
-    wvo = wvoa[:,nc:]                #Q_at-Q_ta
-    woc = wvob[:no,:]                #Q_ti-Q_it
+    wvc = qt[:,:nc] + qt[no:,:]  #Q_ai-Q_ia                   
+    wvo = qt[:,nc:]                #Q_at-Q_ta
+    woc = qt[:no,:]                #Q_ti-Q_it
     w = numpy.hstack((wvc.ravel(),wvo.ravel(),woc.ravel()))
   
     vresp = mf.gen_response(hermi=1)    
