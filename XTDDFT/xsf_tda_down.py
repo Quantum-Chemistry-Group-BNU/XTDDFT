@@ -674,6 +674,13 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             nrow, ncol = orbo.shape[1], orbv.shape[1]
             out = arr.zeros(nrow * ncol, dtype=dtype)
             for cblk in data.iter_blocks():
+                if isinstance(cblk, (tuple, list)):
+                    if len(cblk) == 2 and cblk[1] is not None:
+                        cblk = cblk[1].T
+                    elif len(cblk) == 1:
+                        cblk = cblk[0]
+                    else:
+                        raise ValueError("DF loop did not return a CDERI block")
                 cblk = arr.asarray(cblk if use_gpu else _asnumpy(cblk))
                 for p0 in range(0, out.size, mo_pair_batch_size):
                     p1 = min(p0 + mo_pair_batch_size, out.size)
