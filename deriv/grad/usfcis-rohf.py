@@ -120,19 +120,39 @@ def grad_elec(td_grad, singlet=True, atmlst = None,
     #G[T](ao)
     veff0dooa = vj[0]+vj[1] - vk[0]  
     veff0doob = vj[0]+vj[1] - vk[1]
-    #wvoa = -(Q^alpha_ia - Q^alpha_ai)
-    #= -(2*G^alpha_ia[T] + 2*T^alpha_ik*F^alpha_ak - 2*X_pi*K_pa[X])
-    wvoa = numpy.einsum('ik,kl,la->ai', orboa.T, veff0dooa, orbva) * 2  
-    wvoa+= numpy.einsum('ik,ak->ai', ta, fockamo[nocca:,:nocca]) * 2
-    wvoa-= numpy.einsum('bi,ba->ai', x_ab, vkmop[noccb:,nocca:]) * 2
-    wvoa-= numpy.einsum('bi,ba->ai', x_ab, vkmom[noccb:,nocca:]) * 2
-    #wvob = -(Q^beta_ia - Q^beta_ai)
-    #= -(2*G^beta_ia[T] - 2*T^beta_ac*F^beta_ic + 2*X_aq*K_iq[X])
-    wvob = numpy.einsum('ik,kl,la->ai', orbob.T, veff0doob, orbvb) * 2
-    wvob-= numpy.einsum('ac,ic->ai', tb, fockbmo[:noccb,noccb:]) * 2               
-    wvob+= numpy.einsum('aj,ij->ai', x_ab, vkmop[:noccb,:nocca]) * 2  
-    wvob+= numpy.einsum('aj,ij->ai', x_ab, vkmom[:noccb,:nocca]) * 2
 
+    Q_a = numpy.zeros((nmoa,nmoa))
+    Q_b = numpy.zeros((nmob,nmob))
+    #Q^alpha_ij
+    Q_a[:nocca,:nocca]+= numpy.einsum('ik,jk->ij', ta, fockamo[:nocca,:nocca]) * 2
+    Q_a[:nocca,:nocca]+= numpy.einsum('ik,kl,lj->ij', orboa.T, veff0dooa, orboa) * 2
+    Q_a[:nocca,:nocca]-= numpy.einsum('ai,aj->ij', x_ab, vkmop[noccb:,:nocca]) * 2
+    Q_a[:nocca,:nocca]-= numpy.einsum('ai,aj->ij', x_ab, vkmom[noccb:,:nocca]) * 2
+    #Q^alpha_ia
+    Q_a[:nocca,nocca:]+= numpy.einsum('ik,kl,la->ia', orboa.T, veff0dooa, orbva) * 2  
+    Q_a[:nocca,nocca:]+= numpy.einsum('ik,ak->ia', ta, fockamo[nocca:,:nocca]) * 2
+    Q_a[:nocca,nocca:]-= numpy.einsum('bi,ba->ia', x_ab, vkmop[noccb:,nocca:]) * 2
+    Q_a[:nocca,nocca:]-= numpy.einsum('bi,ba->ia', x_ab, vkmom[noccb:,nocca:]) * 2
+    #Q^beta_ij
+    Q_b[:noccb,:noccb]+= numpy.einsum('ik,kl,lj->ij', orbob.T, veff0doob, orbob) * 2
+    #Q^beta_ab
+    Q_b[noccb:,noccb:]+= numpy.einsum('ac,bc->ab', tb, fockbmo[noccb:,noccb:]) * 2
+    Q_b[noccb:,noccb:]-= numpy.einsum('ai,bi->ab', x_ab, vkmop[noccb:,:nocca]) * 2
+    Q_b[noccb:,noccb:]-= numpy.einsum('ai,bi->ab', x_ab, vkmom[noccb:,:nocca]) * 2
+    #Q^beta_ia
+    Q_b[:noccb,noccb:]+= numpy.einsum('ik,kl,la->ia', orbob.T, veff0doob, orbvb) * 2
+    #Q^beta_ai
+    Q_b[noccb:,:noccb]+= numpy.einsum('ac,ic->ai', tb, fockbmo[:noccb,noccb:]) * 2               
+    Q_b[noccb:,:noccb]-= numpy.einsum('aj,ij->ai', x_ab, vkmop[:noccb,:nocca]) * 2  
+    Q_b[noccb:,:noccb]-= numpy.einsum('aj,ij->ai', x_ab, vkmom[:noccb,:nocca]) * 2
+    Qt = Q_a + Q_b
+    qt = Qt - Qt.T
+
+    wvc = wvoa[:,:nc] + wvob[no:,:]  #Q_ai-Q_ia                   
+    wvo = wvoa[:,nc:]                #Q_at-Q_ta
+    woc = wvob[:no,:]                #Q_ti-Q_it
+    w = numpy.hstack((wvc.ravel(),wvo.ravel(),woc.ravel()))
+  
     vresp = mf.gen_response(hermi=1)    
     def matvec(x):
         xvc = x[:nv*nc].reshape(nv,nc)                               #Z_ai
@@ -180,11 +200,6 @@ def grad_elec(td_grad, singlet=True, atmlst = None,
         Fxoc -= numpy.einsum('at,ai->ti',xvo,fockavc)
         Fxoc += voc * 2
         return numpy.hstack((Fxvc.ravel(),Fxvo.ravel(),Fxoc.ravel()))
-
-    wvc = wvoa[:,:nc] + wvob[no:,:]  #Q_ia-Q_ai                   
-    wvo = wvoa[:,nc:]                #Q_ta-Q_at
-    woc = wvob[:no,:]                #Q_it-Q_ti
-    w = -numpy.hstack((wvc.ravel(),wvo.ravel(),woc.ravel()))
 
     #get_z
     z = lib.solve(
