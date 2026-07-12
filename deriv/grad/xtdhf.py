@@ -142,8 +142,7 @@ def grad_elec(td_grad, singlet=True, atmlst = None,
     #xd(ao)
     xtao = numpy.einsum('ki,ij,jl->kl', orbc, xtcc, orbc.T) + numpy.einsum('ka,ab,bl->kl', orbv, xtvv, orbv.T)
 
-    #wvo = -(Q_ia-Q_ai)
-    #    = -(2*G_ia[T] + 2*R_ib*G_ab[R^S] + 2*L_ib*G_ab[L^A] - 2*R_ja*G_ji[R^S] - 2*L_ja*G_ji[L^A] + 2*T_ij*F_aj - 2*T_ba*F_bi)
+    
     vj, vk = mf.get_jk(mol, (dmzooa, dmSa, dmAa,
                              dmzoob, dmSb, dmAb), hermi=0)
     vj = vj.reshape(2,3,nao,nao)
@@ -159,7 +158,9 @@ def grad_elec(td_grad, singlet=True, atmlst = None,
     #G[L^A](mo)
     veff0moma = numpy.einsum('pk,kl,lq->pq', mo_coeff.T, veff[0], mo_coeff)
     veff0momb = numpy.einsum('pk,kl,lq->pq', mo_coeff.T, veff[1], mo_coeff)
-
+    
+    Q_a = numpy.zeros((nmo,nmo))
+    Q_b = numpy.zeros((nmo,nmo))
     #Qia
     Q_a[:nocca,nocca:]+= numpy.einsum('ik,kl,la->ia', orboa.T, veff0doo[0], orbva) * 2  
     Q_b[:noccb,noccb:]+= numpy.einsum('ik,kl,la->ia', orbob.T, veff0doo[1], orbvb) * 2   
