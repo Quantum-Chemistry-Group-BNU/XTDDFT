@@ -1,5 +1,6 @@
 import math
 import os
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 import numpy as np
 from pyscf import ao2mo
@@ -23,6 +24,7 @@ from .base import (
     _get_jk,
     _get_mo_fock,
     _get_ovlp,
+    _is_gpu4pyscf_df,
     _is_pbc_mf,
     _iter_block_data,
     _make_rohf_reference_mf,
@@ -635,11 +637,39 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             iter_blocks=iter_blocks,
         )
 
-    def _response_j_diagonals_from_df(self, mo_pair_batch_size=None, aux_batch_size=None):
+    def _response_j_diagonals_from_df(
+        self, mo_pair_batch_size=None, aux_batch_size=None, _single_device=False
+    ):
         data = self._df_cderi_data(aux_batch_size=aux_batch_size)
         df_backend = getattr(self, "delta_a_diag_df_backend", "auto")
         use_gpu = df_backend == "gpu" or (df_backend == "auto" and backend.is_gpu)
         arr = require_cupy() if use_gpu else np
+
+        with_df = getattr(self.mf, "with_df", None)
+        cderi = getattr(with_df, "_cderi", None)
+        if (
+            use_gpu
+            and not _single_device
+            and not _is_pbc_mf(self.mf)
+            and _is_gpu4pyscf_df(with_df)
+            and isinstance(cderi, (tuple, list))
+        ):
+            num_devices = min(len(cderi), arr.cuda.runtime.getDeviceCount())
+            if num_devices > 1:
+                def calculate(device_id):
+                    with arr.cuda.Device(device_id):
+                        part = self._response_j_diagonals_from_df(
+                            mo_pair_batch_size=mo_pair_batch_size,
+                            aux_batch_size=aux_batch_size,
+                            _single_device=True,
+                        )
+                        return _asnumpy(part[0]), _asnumpy(part[1])
+
+                with ThreadPoolExecutor(max_workers=num_devices) as executor:
+                    partials = list(executor.map(calculate, range(num_devices)))
+                co_j = np.add.reduce([part[0] for part in partials])
+                ov_j = np.add.reduce([part[1] for part in partials])
+                return xp.asarray(co_j), xp.asarray(ov_j)
 
         mo_coeff = arr.asarray(data.mo_coeff)
         nc, no, nv = self.nc, self.no, self.nv

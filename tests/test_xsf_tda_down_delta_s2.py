@@ -1,8 +1,10 @@
 from pathlib import Path
 import inspect
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -266,6 +268,77 @@ class XsfTdaDownDeltaS2Test(unittest.TestCase):
             aux_batch_size=2,
         )
 
+        self.assertTrue(np.allclose(co_j, ref_co))
+        self.assertTrue(np.allclose(ov_j, ref_ov))
+
+    def test_molecular_gpu_df_diagonal_reduces_all_device_cderi_slices(self):
+        method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
+        method.nc = 1
+        method.no = 1
+        method.nv = 1
+        method.nocc_a = 2
+        method.nvir_b = 2
+        method.occidx_a = np.array([0, 1])
+        method.viridx_b = np.array([1, 2])
+        method.mo_coeff = np.stack([np.eye(3), np.eye(3)])
+
+        tri = np.tril_indices(3)
+        cderi = np.arange(1, 25, dtype=float).reshape(4, 6) / 10.0
+        method.delta_a_diag_df_backend = "cpu"
+        method.mf = SimpleNamespace(
+            mol=object(), with_df=SimpleNamespace(_cderi=cderi)
+        )
+        ref_co, ref_ov = method._response_j_diagonals_from_df(
+            mo_pair_batch_size=1, aux_batch_size=1
+        )
+
+        current_device = threading.local()
+        visited = set()
+
+        class FakeDevice:
+            def __init__(self, device_id=None):
+                self.id = getattr(current_device, "value", 0) if device_id is None else device_id
+
+            def __enter__(self):
+                self.previous = getattr(current_device, "value", 0)
+                current_device.value = self.id
+                return self
+
+            def __exit__(self, *_):
+                current_device.value = self.previous
+
+        fake_cp = SimpleNamespace(
+            cuda=SimpleNamespace(
+                Device=FakeDevice,
+                runtime=SimpleNamespace(getDeviceCount=lambda: 2),
+            ),
+            asarray=np.asarray,
+            result_type=np.result_type,
+            zeros=np.zeros,
+            einsum=np.einsum,
+        )
+
+        class MultiGpuDF:
+            def __init__(self):
+                self._cderi = [cderi[:2], cderi[2:]]
+                self.intopt = SimpleNamespace(cderi_row=tri[0], cderi_col=tri[1])
+
+            def loop(self, blksize=None, unpack=True):
+                device_id = FakeDevice().id
+                visited.add(device_id)
+                shard = self._cderi[device_id]
+                for p0 in range(0, shard.shape[0], blksize):
+                    yield shard[p0:p0 + blksize]
+
+        MultiGpuDF.__module__ = "gpu4pyscf.df.df"
+        method.delta_a_diag_df_backend = "gpu"
+        method.mf = SimpleNamespace(mol=object(), with_df=MultiGpuDF())
+        with patch.object(xsf_tda_down, "require_cupy", return_value=fake_cp):
+            co_j, ov_j = method._response_j_diagonals_from_df(
+                mo_pair_batch_size=1, aux_batch_size=1
+            )
+
+        self.assertEqual(visited, {0, 1})
         self.assertTrue(np.allclose(co_j, ref_co))
         self.assertTrue(np.allclose(ov_j, ref_ov))
 
