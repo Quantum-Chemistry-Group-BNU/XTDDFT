@@ -100,7 +100,8 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
                  collinear_samples=60, delta_a_jk_batch_size=None,
                  delta_a_diag_j_batch_size=None, df_cache=None,
                  delta_a_diag_method="response", delta_a_diag_df_aux_batch_size=256,
-                 delta_a_diag_df_backend="auto", davidson_matvec_batch_size=None):
+                 delta_a_diag_df_backend="auto", davidson_matvec_batch_size=None,
+                 debug_sa0_hdiag=False):
         """SA=0: SF-TDA
            SA=1: only add diagonal block for dA
            SA=2: add all dA except for OO block
@@ -136,6 +137,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         if davidson_matvec_batch_size is not None and davidson_matvec_batch_size < 1:
             raise ValueError("davidson_matvec_batch_size must be a positive integer or None")
         self.davidson_matvec_batch_size = davidson_matvec_batch_size
+        self.debug_sa0_hdiag = bool(debug_sa0_hdiag)
         self.SA = (0 if self.type_u else 3) if SA is None else SA
         spin_mf = _as_cpu_mf(mf)
         _,dsp1 = spin_mf.spin_square()
@@ -575,6 +577,12 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         sparse_pair_p = sparse_pair_q = None
         intopt = getattr(with_df, "intopt", None)
         if (
+            _is_gpu4pyscf_df(with_df)
+            and intopt is not None
+            and hasattr(intopt, "sort_orbitals")
+        ):
+            mo_coeff = _asnumpy(intopt.sort_orbitals(mo_coeff, axis=[1]))
+        if (
             intopt is not None
             and hasattr(intopt, "cderi_row")
             and hasattr(intopt, "cderi_col")
@@ -811,10 +819,13 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
 
         use_delta_a = (
             self.SA > 0
+            and not getattr(self, "debug_sa0_hdiag", False)
             and not self.type_u
             and fockA_hf is not None
             and fockB_hf is not None
         )
+        if self.SA > 0 and getattr(self, "debug_sa0_hdiag", False):
+            logger.warning("Debug: using the SA=0 Davidson hdiag for SA=%s", self.SA)
         if use_delta_a:
             fockS = (fockB_hf - fockA_hf) * 0.5
             diag_s = fockS.diagonal()

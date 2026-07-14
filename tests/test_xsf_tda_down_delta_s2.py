@@ -88,6 +88,28 @@ class XsfTdaDownDeltaS2Test(unittest.TestCase):
 
         self.assertEqual(seen, [None])
 
+    def test_debug_sa0_hdiag_skips_delta_a_diagonal(self):
+        method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
+        method.nc = 1
+        method.no = 2
+        method.nv = 1
+        method.nocc_a = 3
+        method.nocc_b = 2
+        method.SA = 1
+        method.type_u = False
+        method.debug_sa0_hdiag = True
+        method._response_j_diagonals = lambda **_: self.fail("Delta-A hdiag was evaluated")
+        fock_a = np.diag(np.arange(1.0, 6.0))
+        fock_b = np.diag(np.arange(2.0, 7.0))
+
+        hdiag = method._build_preconditioner_hdiag(
+            fock_a, fock_b, fglobal=1.0,
+            fockA_hf=fock_a + 10.0, fockB_hf=fock_b + 10.0,
+        )
+        expected = np.array([5.0, 3.0, 4.0, 4.0, 3.0, 2.0, 3.0, 1.0, 2.0])
+
+        self.assertTrue(np.allclose(hdiag, expected))
+
     def test_df_diagonal_backend_option_is_validated(self):
         method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
         method.mf = SimpleNamespace(mo_coeff=np.eye(2))
@@ -270,6 +292,40 @@ class XsfTdaDownDeltaS2Test(unittest.TestCase):
 
         self.assertTrue(np.allclose(co_j, ref_co))
         self.assertTrue(np.allclose(ov_j, ref_ov))
+
+    def test_molecular_gpu_df_sorts_mo_coeff_to_cderi_ao_order(self):
+        method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
+        mo_coeff = np.arange(18.0).reshape(2, 3, 3)
+        method.mo_coeff = mo_coeff
+        tri = np.tril_indices(3)
+
+        class IntOpt:
+            def __init__(self):
+                self.cderi_row = tri[0]
+                self.cderi_col = tri[1]
+                self.axes = []
+
+            def sort_orbitals(self, mat, axis=None):
+                self.axes.append(axis)
+                return mat[:, [2, 0, 1], :]
+
+        class LoopDF:
+            _cderi = None
+
+            def __init__(self):
+                self.intopt = IntOpt()
+
+            def loop(self, blksize=None, unpack=True):
+                return iter(())
+
+        LoopDF.__module__ = "gpu4pyscf.df.df"
+        with_df = LoopDF()
+        method.mf = SimpleNamespace(mol=object(), with_df=with_df)
+
+        data = method._df_cderi_data(aux_batch_size=2)
+
+        self.assertEqual(with_df.intopt.axes, [[1]])
+        self.assertTrue(np.array_equal(data.mo_coeff, mo_coeff[:, [2, 0, 1], :]))
 
     def test_molecular_gpu_df_diagonal_reduces_all_device_cderi_slices(self):
         method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
