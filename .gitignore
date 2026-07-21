@@ -1,0 +1,10 @@
+# macOS system files
+.DS_Store
+ 
+# Python cache
+__pycache__/
+
+# python compile file and Jython file
+*.py[cod]
+*$py.class
+ 
