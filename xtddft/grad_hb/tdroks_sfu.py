@@ -213,8 +213,6 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
     dmzoob = orbo_b @ doob @ orbo_b.T  # T_{\mu\nu}^{\beta}
     dmt = orbo_b @ v @ orbv_a.T  # X_{\mu\nu}^{\beta\alpha}
     dm = mf.make_rdm1()
-    dmSx = (dmt + dmt.T) / 2  # X_{\mu\nu}^{S}
-    dmAx = (dmt - dmt.T) / 2  # X_{\mu\nu}^{A}
     vhf = mf.get_veff(mol, dm)
     h1e = mf.get_hcore()
     focka = h1e + vhf[0]
@@ -269,8 +267,8 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
         wvob += lib.einsum('ac,ka->ck', doob, fockbmo[:nc, nc:])
 
     wvc = wvoa[:, :nc] + wvob[no:, :]  # 1/2 (Q_{ia} - Q_{ai})
-    wvo = wvoa[:, nc:]  # 1/2 (Q_{at} - Q_{ta})
-    woc = wvob[:no, :]  # 1/2 (Q_{ti} - Q_{it})
+    wvo = wvoa[:, nc:]  # 1/2 (Q_{ta} - Q_{at})
+    woc = wvob[:no, :]  # 1/2 (Q_{it} - Q_{ti})
     w = np.hstack((wvc.ravel(), wvo.ravel(), woc.ravel())) * 2
 
     # 4. constuct G[Z^S] and solve Z-vector equation
@@ -510,6 +508,6 @@ if __name__ == "__main__":
     sfu_roks_td = SFU_gradient(td, method=2)
     sfu_roks_td.kernel()
 
-    g_fd = fd_gradient(ch2o, 1, xc=xc, method=2)
-    print('finite-diff:\n', g_fd)
+    # g_fd = fd_gradient(ch2o, 1, xc=xc, method=2)
+    # print('finite-diff:\n', g_fd)
 
