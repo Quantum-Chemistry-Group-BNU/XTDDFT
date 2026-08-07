@@ -143,7 +143,7 @@ class SI_driver():
         time1 = time.time()
         self.eso, self.vso = scipy.linalg.eigh(self.heff, driver='evd')
         if self.cal_osc:
-            self.dmso = einsum('ij,ikn,kl->iln',self.vso.conjugate(),self.dm,self.vso)
+            self.dmso = einsum('pi,pqn,ql->iln',self.vso.conjugate(),self.dm,self.vso)
         self.esf = numpy.diag(self.vso.T.conjugate()@self.Omega@self.vso).real
         time2 = time.time()
         self.codetime = time2-time0
