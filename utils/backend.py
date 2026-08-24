@@ -164,6 +164,17 @@ def set_backend(mode: str = "auto") -> None:
     backend.set(mode)
 
 
+def resolve_backend(mode: str = "auto") -> str:
+    """Resolve ``auto``/``cpu``/``gpu`` to an explicit backend name."""
+
+    mode = (mode or "auto").lower()
+    if mode == "auto":
+        return "gpu" if backend.is_gpu else "cpu"
+    if mode not in ("cpu", "gpu"):
+        raise ValueError(f"backend mode must be 'auto', 'cpu', or 'gpu', got {mode}")
+    return mode
+
+
 def require_cupy() -> ModuleType:
     """Return CuPy or raise an actionable import error."""
 

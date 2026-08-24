@@ -62,6 +62,8 @@ def find_existing_path(name, bases):
 def load_reference(chk_path, kind):
     try:
         cell, rec = pbc_chkfile.load_scf(str(chk_path))
+        if np.asarray(cell.lattice_vectors()).shape != (3, 3):
+            raise ValueError("checkpoint does not contain valid PBC lattice vectors")
         if kind in ("utda", "usf"):
             mf = pbcdft.UKS(cell)
         else:
