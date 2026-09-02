@@ -1,4 +1,6 @@
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 import inspect
 import unittest
 
@@ -32,6 +34,20 @@ class DavidsonInitSpaceTest(unittest.TestCase):
         for cls in (xtda.XTDA, xsf_tda_down.XSF_TDA_down, sf_tda_up.SF_TDA_up):
             self.assertIn("init_space", inspect.signature(cls.kernel).parameters)
             self.assertIn("init_space", inspect.signature(cls.davidson_process).parameters)
+
+    def test_dft_setup_errors_are_not_silently_treated_as_hf(self):
+        class FakeLibXC:
+            @staticmethod
+            def test_deriv_order(*args, **kwargs):
+                raise RuntimeError("bad functional derivative")
+
+        fake_mf = SimpleNamespace(
+            xc="PBE",
+            _numint=SimpleNamespace(libxc=FakeLibXC()),
+        )
+        with mock.patch.object(base, "_build_sf_context", return_value=SimpleNamespace()):
+            with self.assertRaisesRegex(RuntimeError, "bad functional derivative"):
+                base.XTDDFT_base(fake_mf, method=0)
 
 
 if __name__ == "__main__":

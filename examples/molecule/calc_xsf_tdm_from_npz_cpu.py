@@ -30,7 +30,7 @@ xsf_file = "XSF.npz"
 out_file = "XSF_TDM.npz"
 
 xc = "pbe0"
-#auxbasis = "cc-pvdz-jkfit"
+auxbasis = None
 method = 1
 SA = 3
 use_density_fit = True

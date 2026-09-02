@@ -3,7 +3,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "experiment" / "molecule" / "calc_xsf_nto_from_saved_states_mol.py"
+SCRIPT = ROOT / "examples" / "molecule" / "calc_xsf_nto_from_saved_states_mol.py"
 
 
 class XsfNtoScriptTest(unittest.TestCase):

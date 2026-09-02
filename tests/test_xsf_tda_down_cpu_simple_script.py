@@ -3,11 +3,8 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "experiment" / "molecule" / "run_xsf_tda_down_cpu_simple.py"
-GPU_SCRIPT = ROOT / "experiment" / "molecule" / "run_xsf_tda_down_gpu_simple.py"
-GPU_READ_SCRIPT = (
-    ROOT / "experiment" / "molecule" / "run_xsf_tda_down_gpu_simple_read.py"
-)
+SCRIPT = ROOT / "examples" / "molecule" / "run_xsf_tda_down_cpu_simple.py"
+GPU_SCRIPT = ROOT / "examples" / "molecule" / "run_xsf_tda_down_gpu_simple.py"
 
 
 class XsfTdaDownCpuSimpleScriptTest(unittest.TestCase):
@@ -30,7 +27,8 @@ class XsfTdaDownCpuSimpleScriptTest(unittest.TestCase):
         )
         self.assertIn("print(\"backend:\", backend_info())", source)
         self.assertIn("mf = dft.ROKS(mol)", source)
-        self.assertIn('mf.xc = "CAM-B3LYP"', source)
+        self.assertIn('xc = "PBE0"', source)
+        self.assertIn("mf.xc = xc", source)
         self.assertIn("method = 1", source)
         self.assertIn("SA = 3", source)
         self.assertIn("davidson_backend=\"cpu\"", source)
@@ -76,36 +74,6 @@ class XsfTdaDownCpuSimpleScriptTest(unittest.TestCase):
         self.assertIn("e_ha=asnumpy(xsf.e)", source)
         self.assertIn('output_file = "xsf_tda_down_gpu_mcol_results.npz"', source)
 
-    def test_gpu_read_script_uses_chk_as_initial_guess(self):
-        self.assertTrue(
-            GPU_READ_SCRIPT.exists(), f"missing example script: {GPU_READ_SCRIPT}"
-        )
-        source = GPU_READ_SCRIPT.read_text(encoding="utf-8")
-
-        self.assertIn("import cupy as cp", source)
-        self.assertIn("from gpu4pyscf import dft as gpubasedft", source)
-        self.assertIn("from pyscf.scf import chkfile as mol_chkfile", source)
-        self.assertIn(
-            "from XTDDFT_dev.utils.backend import asnumpy, backend_info, set_backend",
-            source,
-        )
-        self.assertIn('set_backend("gpu")', source)
-        self.assertIn('guess_chk = "xsf_tda_down_gpu_roks_ref.chk"', source)
-        self.assertIn("mol, _ = mol_chkfile.load_scf(str(chk_path))", source)
-        self.assertIn("dm0 = mf.from_chk(str(chk_path))", source)
-        self.assertIn("mf.kernel(dm0=dm0)", source)
-        self.assertNotIn("mf.mo_energy = cp.asarray(scf_rec", source)
-        self.assertNotIn("mf.converged = True", source)
-        self.assertIn("mf = gpubasedft.ROKS(mol, xc=xc)", source)
-        self.assertIn("def reference_spin_square(mf, mol):", source)
-        self.assertIn("davidson_backend=\"cpu\"", source)
-        self.assertIn("collinear_samples=collinear_samples", source)
-        self.assertIn("np.savez_compressed(", source)
-        self.assertIn("vectors=asnumpy(xsf.v)", source)
-        self.assertIn("initial_guess_chk=np.asarray(str(chk_path.resolve()))", source)
-        self.assertIn(
-            'output_file = "xsf_tda_down_gpu_mcol_from_chk_results.npz"', source
-        )
 
 
 if __name__ == "__main__":

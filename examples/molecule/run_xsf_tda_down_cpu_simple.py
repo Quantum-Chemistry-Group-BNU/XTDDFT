@@ -84,7 +84,7 @@ mol = gto.M(
 # 2. 运行 CPU ROKS reference。
 # XSF-TDA-down 通常从高自旋开壳层参考态出发，这里用 ROKS 描述 triplet reference。
 mf = dft.ROKS(mol)
-mf.xc = "B3LYP"
+mf.xc = xc
 if use_density_fit:
     mf = mf.density_fit()
 mf.max_memory = max_memory

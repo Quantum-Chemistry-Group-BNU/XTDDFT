@@ -6,7 +6,16 @@ from pyscf.dft import numint, xc_deriv
 from pyscf.pbc import scf as pbc_scf
 from pyscf.pbc.dft import numint as pbc_numint
 
-from ..utils.backend import backend, contract, require_cupy, xp, _asarray, _asnumpy, set_backend
+from ..utils.backend import (
+    backend,
+    contract,
+    get_array_module,
+    require_cupy,
+    xp,
+    _asarray,
+    _asnumpy,
+    set_backend,
+)
 from ..utils.unit import ha2eV
 from ..utils.df_cderi_cache import (
     normalize_df_cderi_cache_config,
@@ -661,7 +670,7 @@ def _prepare_davidson_init_space(x0, init_space=None, lindep=1e-14):
         raise ValueError("init_space and x0 do not contain any nonzero vector.")
     q, r = np.linalg.qr(candidates.T, mode="reduced")
     keep = np.abs(np.diag(r)) > lindep
-    return xp.asarray(q[:, keep].T)
+    return get_array_module(x0, init_space).asarray(q[:, keep].T)
 
 def _make_spinflip_problem(ctx, fock_mo, isf):
     focka_mo, fockb_mo = fock_mo
@@ -784,22 +793,25 @@ class XTDDFT_base:
         self.converged = None
         self.result_file = None
         # 在这里先给出泛函参数
-        try: # dft
+        if _is_ks_mf(self.mf):
             self.mfxctype = self.mf.xc
             self.ni = self.mf._numint
-            self.ni.libxc.test_deriv_order(mf.xc, 2, raise_error=True)
-            if getattr(mf, "nlc", None) or self.ni.libxc.is_nlc(mf.xc):
+            self.ni.libxc.test_deriv_order(self.mf.xc, 2, raise_error=True)
+            if getattr(self.mf, "nlc", None) or self.ni.libxc.is_nlc(self.mf.xc):
                 logger.warning(
                         'NLC functional found in DFT object. Its second '
                         'derivative is not available and is not included in '
                         'the response function.'
                 )
-            self.omega, self.alpha, self.hyb = self.ni.rsh_and_hybrid_coeff(mf.xc, _system(mf).spin)
+            self.omega, self.alpha, self.hyb = self.ni.rsh_and_hybrid_coeff(
+                self.mf.xc, _system(self.mf).spin
+            )
             logger.info(f'Omega:{self.omega}, alpha:{self.alpha}, hyb:{self.hyb}')
-            self.xctype = self.ni._xc_type(mf.xc)
-        except: # HF
+            self.xctype = self.ni._xc_type(self.mf.xc)
+        else:  # HF
             self.mfxctype = None
             self.omega = 0
+            self.alpha = 1.0
             self.hyb = 1.0
             self.xctype = None
 

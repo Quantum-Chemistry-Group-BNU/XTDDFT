@@ -22,18 +22,18 @@ from XTDDFT_dev.utils.backend import set_backend
 
 set_backend("cpu")
 
-from XTDDFT_dev.XTDDFT.soc.soc_si import SOCSI
+from XTDDFT_dev.XTDDFT.soc import SOCSI
 
 lib.num_threads(int(os.environ["OMP_NUM_THREADS"]))
 
 # ===== User parameters =====
 xc = "bhandhlyp"
-basis = "cc-pVDZ"
-atom = "As 0 0 0"
+basis = "6-31G"
+atom = "N 0 0 0"
 charge = 0
 spin = 3  # 2S = 3，即 S=3/2 开壳层
-nstates = (20, 20, 20)  # (|S->, |So>, |S+>) 各取 20 个态
-backend = "auto"  # "auto"/"cpu"/"gpu"：SOC 计算（Vso/SI）使用的后端
+nstates = (2, 2, 2)  # (|S->, |So>, |S+>) 各取 2 个态
+backend = "cpu"  # "auto"/"cpu"/"gpu"：SOC 计算（Vso/SI）使用的后端
 output_file = "soc_si_results.npz"
 # ===========================
 

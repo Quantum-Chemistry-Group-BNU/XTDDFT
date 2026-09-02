@@ -274,14 +274,12 @@ def attach_pbc_gamma_cderi_cache(gdf, path, group="pbc_gamma") -> PbcGammaCderiC
             gdf._cderip = {}
         pair_idx = np.asarray(h5g["cderi_idx_pair"])
         diag_idx = np.asarray(h5g["cderi_idx_diag"])
-        try:
+        if gdf.__class__.__module__.startswith("gpu4pyscf"):
             import cupy as cp
 
             cp.cuda.runtime.getDeviceCount()
             pair_idx = cp.asarray(pair_idx)
             diag_idx = cp.asarray(diag_idx)
-        except Exception:
-            pass
         gdf._cderi_idx = (pair_idx, diag_idx)
         return PbcGammaCderiCacheHandle(gdf, handle)
     except Exception:

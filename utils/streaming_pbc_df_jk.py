@@ -129,8 +129,8 @@ def _gamma_madelung(cell, *, tools_module=None):
     return tools_module.pbc.madelung(cell, np.zeros((1, 3)))
 
 
-def _gamma_overlap(cell, *, kpts=None, int1e_module=None):
-    if int1e_module is None:
+def _gamma_overlap(cell, *, kpts=None, use_gpu=False, int1e_module=None):
+    if int1e_module is None and use_gpu:
         try:
             from gpu4pyscf.pbc.gto import int1e as int1e_module
         except Exception:
@@ -146,17 +146,23 @@ def _gamma_overlap(cell, *, kpts=None, int1e_module=None):
     return overlap
 
 
-def _gamma_ewald_terms(dfobj, omega, *, kpts=None, tools_module=None, int1e_module=None):
+def _gamma_ewald_terms(
+    dfobj, omega, *, kpts=None, use_gpu=False, tools_module=None, int1e_module=None
+):
     """Return gamma-point overlap and Madelung in the requested range context."""
 
     actual_omega = _omega_key(omega)
     if actual_omega == 0.0:
-        overlap = _gamma_overlap(dfobj.cell, kpts=kpts, int1e_module=int1e_module)
+        overlap = _gamma_overlap(
+            dfobj.cell, kpts=kpts, use_gpu=use_gpu, int1e_module=int1e_module
+        )
         madelung = _gamma_madelung(dfobj.cell, tools_module=tools_module)
         return overlap, madelung
 
     with dfobj.range_coulomb(actual_omega) as rsh_df:
-        overlap = _gamma_overlap(rsh_df.cell, kpts=kpts, int1e_module=int1e_module)
+        overlap = _gamma_overlap(
+            rsh_df.cell, kpts=kpts, use_gpu=use_gpu, int1e_module=int1e_module
+        )
         madelung = _gamma_madelung(rsh_df.cell, tools_module=tools_module)
         return overlap, madelung
 
@@ -329,7 +335,9 @@ def install_streaming_df_jk(
             use_gpu=use_gpu,
         )
         if _should_apply_ewald_exxdiv(with_k=with_k, exxdiv=exxdiv):
-            overlap, madelung = _gamma_ewald_terms(self, actual_omega, kpts=kpts)
+            overlap, madelung = _gamma_ewald_terms(
+                self, actual_omega, kpts=kpts, use_gpu=use_gpu
+            )
             xp = _array_module(use_gpu)
             vk = _apply_ewald_exxdiv_for_gamma(vk, dm, overlap, madelung, xp)
         return vj, vk

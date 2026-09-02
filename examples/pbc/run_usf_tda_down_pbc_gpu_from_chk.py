@@ -21,6 +21,13 @@ from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
 
 
 
+def save_becke_grids(grids, filename):
+    coords = cp.asnumpy(grids.coords) if isinstance(grids.coords, cp.ndarray) else np.asarray(grids.coords)
+    weights = cp.asnumpy(grids.weights) if isinstance(grids.weights, cp.ndarray) else np.asarray(grids.weights)
+    np.savez_compressed(filename, coords=coords, weights=weights, level=np.array([grids.level]))
+    print(f"Saved Becke grids to {filename}")
+
+
 def load_or_build_becke_grids(mf, cell, filename, level=4):
     filename = Path(filename).expanduser().resolve()
 

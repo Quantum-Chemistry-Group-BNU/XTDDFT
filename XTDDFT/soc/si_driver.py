@@ -93,7 +93,7 @@ class SI_driver():
             S: float = None,
             Vso: np.ndarray = None,
             ngs: Optional[Union[int, bool]] = 1,
-            states:dict = {},
+            states: Optional[dict] = None,
             cal_osc:bool = False,
             tdm_blocks: Optional[dict] = None,
             backend: str = "auto",
@@ -107,7 +107,8 @@ class SI_driver():
         self.xp = require_cupy() if mode == "gpu" else np
         # Spin and corresponding relationship
         self.S = S
-        assert self.S == self.mol.spin/2.
+        if not np.isclose(self.S, self.mol.spin / 2.0):
+            raise ValueError("S must equal mol.spin / 2")
         self.str2S = {'|GS>': self.S, '|So>': self.S, '|S+>': self.S+1, '|S->': self.S-1}
         self.S2str = {(self.S, 1):'|GS>', (self.S, 0):'|So>', (self.S+1, 0):'|S+>', (self.S-1, 0):'|S->'}
         # Vso to hm
@@ -123,6 +124,7 @@ class SI_driver():
             self.mu_nuc = self.xp.asarray(_molecular_ground_dipole(mf))
         # check state label
         self.ngs = ngs
+        states = {} if states is None else states
         self.states = {
             key: [(e, self.xp.asarray(x)) for e, x in values]
             for key, values in states.items()
@@ -165,7 +167,6 @@ class SI_driver():
         if self.cal_osc:
             self.dmso = einsum('pi,pqn,ql->iln', self.vso.conjugate(), self.dm, self.vso)
         self.esf = np.diag(self.vso.T.conjugate() @ self.Omega @ self.vso).real
-        time2 = time.time()
         time2 = time.time()
         self.codetime = time2-time0
         logger.info(f"End diagonalization, cost time {time2-time1:.2f}s")
@@ -255,8 +256,10 @@ class SI_driver():
         hm[...,0]  =  1j*Vso[0,:,:] - Vso[1,:,:] # h^1
         hm[...,1]  =  1j*Vso[2,:,:]*sqrt2 # h^0
         hm[...,2]  = -1j*Vso[0,:,:] - Vso[1,:,:] # h^-1
-        assert self.xp.allclose(hm[...,0], hm[...,-1].conjugate())
-        assert self.xp.allclose(hm[...,1], -hm[...,1].conjugate())
+        if not bool(self.xp.allclose(hm[..., 0], hm[..., -1].conjugate())):
+            raise ValueError("Vso does not satisfy the h(+1)/h(-1) symmetry")
+        if not bool(self.xp.allclose(hm[..., 1], -hm[..., 1].conjugate())):
+            raise ValueError("Vso does not satisfy the h(0) anti-Hermitian symmetry")
         return hm[...,::-1]
     
     # Transition dipoles come from the local method classes via tdm_blocks.
@@ -282,7 +285,8 @@ class SI_driver():
         logger.info(f"slc {self.slc} length: {self.nc}")
         logger.info(f"slo {self.slo} length: {self.no}")
         logger.info(f"slv {self.slv} length: {self.nv}")
-        assert self.nc+self.no+self.nv == self.norb
+        if self.nc + self.no + self.nv != self.norb:
+            raise ValueError("inconsistent core/open/virtual orbital dimensions")
         self.cv = self.nc * self.nv
         self.co = self.nc * self.no
         self.ov = self.no * self.nv
@@ -409,6 +413,7 @@ class SI_driver():
         Omega = self.xp.zeros((self.dim_hso, self.dim_hso,))
         count = 0
         n_sum = int((self.dim_hso**2+self.dim_hso)//2)
+        progress_stride = max(1, n_sum // 10)
         for L_index in States_list: # [L_index]: |S->, |GS>, |So>, |S+> Different [SL]
             SL = self.str2S[L_index]
             for Li, L_value in enumerate(self.states[L_index]): # [L_value]: Different eigenvecter for fixed SL
@@ -447,12 +452,13 @@ class SI_driver():
                                         if abs(MR-ML)<1e-6 and abs(SR-SL)<=1e-6:
                                             self.dm[Lpos, Rpos, :] = d
                                     count += 1
-                                    if count%int(n_sum/10) == 0:
-                                        logger.info(f"{count//int(n_sum/10)}0% -- finish {count}/{n_sum}")
+                                    if count % progress_stride == 0 or count == n_sum:
+                                        logger.info(f"{100*count//n_sum}% -- finish {count}/{n_sum}")
                                 if Lpos == Rpos: # E^{(0)}_I
                                     if self.cal_osc:
                                         self.dm[Lpos, Rpos, :] += self.mu_nuc
-                                    assert abs(L_value[0]-R_value[0])<1e-6 # share the same energy
+                                    if abs(L_value[0] - R_value[0]) >= 1e-6:
+                                        raise ValueError("diagonal SI states must share the same energy")
                                     if abs(hso[Lpos, Rpos].imag) > 1e-6: # real if diagonal
                                         logger.warning(f"{(Lpos, Rpos), (SL,ML,Li,igsL,SR,MR,Ri,igsR)},abs(hso[Lpos, Rpos].imag) = {abs(hso[Lpos, Rpos].imag):.2e}")
                                     Omega[Lpos, Rpos] = L[1][0]

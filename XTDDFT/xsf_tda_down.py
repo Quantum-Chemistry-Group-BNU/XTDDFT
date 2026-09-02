@@ -59,7 +59,7 @@ def add_hf_a_a2b(a_a2b, mf, orbo_a, orbv_b, nocc_a, nvir_b, hyb=1, omega=None):
         )
     else:
         if omega is not None and abs(omega) >= 1e-14:
-            raise NotImplementedError("Range-separated molecular HF exchange is not implemented in SF_TDA_up.")
+            raise NotImplementedError("Range-separated molecular HF exchange is not implemented in XSF_TDA_down.")
         eri_mo = ao2mo.general(mf.mol, [orbo_a, orbo_a, orbv_b, orbv_b], compact=False)
 
     eri_mo = np.asarray(eri_mo).reshape(nocc_a,nocc_a,nvir_b,nvir_b)
@@ -107,11 +107,15 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
            SA=2: add all dA except for OO block
            SA=3: full dA
         """
+        if method not in (0, 1, 2):
+            raise ValueError("method must be 0 (ALDA0), 1 (multicollinear), or 2 (collinear)")
+        if method == 2 and not davidson:
+            raise NotImplementedError("method=2 collinear response is only implemented with Davidson")
         davidson_backend = davidson_backend.lower()
         if davidson_backend not in ("cpu", "gpu", "auto"):
             raise ValueError("davidson_backend must be 'cpu', 'gpu', or 'auto'")
         super().__init__(mf, method, davidson=davidson, df_cache=df_cache)
-        logger.info("XSF_TDA_down method=0 ALDA0, method=1 multicollinear")
+        logger.info("XSF_TDA_down method=0 ALDA0, method=1 multicollinear, method=2 collinear")
         self.isf = -1
         self.type_u = _asnumpy(self.mf.mo_coeff).ndim == 3
         self.re = not self.type_u
@@ -144,7 +148,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         self.ground_s = (dsp1-1)/2
 
     def _result_method_label(self):
-        return {0: "ALDA0", 1: "MCOL"}.get(self.method, f"method{self.method}")
+        return {0: "ALDA0", 1: "MCOL", 2: "COL"}.get(self.method, f"method{self.method}")
     
     def get_Amat_ALDA0(self):
         mf = _as_cpu_mf(self.mf)
@@ -312,6 +316,8 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             self.get_Amat_ALDA0()
         elif self.method == 1:
             self.get_Amat_MCOL(self.collinear_samples)
+        elif self.method == 2:
+            raise NotImplementedError("method=2 collinear response is only implemented with Davidson")
         else:
             raise NotImplementedError(f"Unsupported method={self.method!r}.")
 
@@ -955,14 +961,15 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         orbvb = mo_coeff[1][:, self.viridx_b]
         fockA, fockB = self._get_fock_mo()
 
-        vresp = (
-            gen_response_sf_mc(
+        if self.method == 1:
+            vresp = gen_response_sf_mc(
                 self.mf, hermi=0, collinear_samples=self.collinear_samples,
                 ctx=self.ctx,
             )
-            if self.method == 1
-            else gen_response_sf(self.mf, hermi=0, ctx=self.ctx)
-        )
+        else:
+            vresp = gen_response_sf(
+                self.mf, hermi=0, ctx=self.ctx, with_xc=self.method == 0,
+            )
 
         use_delta_a = self.SA > 0 and _asnumpy(self.mf.mo_coeff).ndim != 3
         if use_delta_a:

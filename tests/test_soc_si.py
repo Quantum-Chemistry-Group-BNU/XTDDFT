@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 from pyscf import dft, gto, scf
@@ -8,6 +9,22 @@ from XTDDFT_dev.XTDDFT.soc.soc_si import SOCSI
 
 
 class SocSiTest(unittest.TestCase):
+    def test_si_driver_small_matrix(self):
+        from XTDDFT_dev.XTDDFT.soc.si_driver import SI_driver
+
+        mol = SimpleNamespace(spin=1, nao=1, nelectron=1)
+        mf = SimpleNamespace(mol=mol)
+        driver = SI_driver(
+            mf=mf,
+            S=0.5,
+            Vso=np.zeros((3, 1, 1)),
+            states={},
+            cal_osc=False,
+            backend="cpu",
+        )
+
+        self.assertEqual(driver.make_heff().shape, (2, 2))
+
     def test_soc_si_end_to_end(self):
         set_backend("cpu")  # TDA 层保持 CPU；SOC 后端由 backend 参数单独控制
         mol = gto.M(atom="N 0 0 0", basis="6-31G", spin=3, verbose=0)

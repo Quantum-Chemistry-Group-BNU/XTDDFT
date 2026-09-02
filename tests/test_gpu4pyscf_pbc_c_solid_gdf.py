@@ -97,7 +97,7 @@ def describe_df(dfobj, label):
     print()
 
 
-def test_loop_gamma_point(dfobj, blksize=8, max_blocks=4):
+def check_loop_gamma_point(dfobj, blksize=8, max_blocks=4):
     import cupy as cp
 
     print(f"== loop_gamma_point blksize={blksize} ==")
@@ -138,7 +138,7 @@ def collect_loop_gamma_norms(dfobj, blksize=8, max_blocks=4):
     return out
 
 
-def test_get_jk(dfobj, nao):
+def check_get_jk(dfobj, nao):
     import cupy as cp
 
     print("== get_jk identity-density smoke ==")
@@ -167,7 +167,7 @@ def compare_get_jk(df_a, df_b, nao, label):
     print()
 
 
-def test_cached_pbc_gamma_df(cell, source_df, label):
+def check_cached_pbc_gamma_df(cell, source_df, label):
     print(f"== HDF5 cache attach {label} ==")
     with tempfile.TemporaryDirectory() as tmpdir:
         cache_path = Path(tmpdir) / f"{label.replace(' ', '_')}.h5"
@@ -194,7 +194,7 @@ def test_cached_pbc_gamma_df(cell, source_df, label):
             handle.close()
 
 
-def test_outcore_cached_pbc_gamma_df(cell, source_df, label):
+def check_outcore_cached_pbc_gamma_df(cell, source_df, label):
     print(f"== out-of-core HDF5 cache build {label} ==")
     with tempfile.TemporaryDirectory() as tmpdir:
         cache_path = Path(tmpdir) / f"{label.replace(' ', '_')}_outcore.h5"
@@ -231,14 +231,14 @@ def test_outcore_cached_pbc_gamma_df(cell, source_df, label):
             handle.close()
 
 
-def test_rsh_df(cell, base_df, omega):
+def check_rsh_df(cell, base_df, omega):
     print(f"== range_coulomb omega={omega} ==")
     with base_df.range_coulomb(omega) as rsh_df:
         rsh_df.is_gamma_point = True
         rsh_df.build()
         describe_df(rsh_df, f"RSH DF omega={omega}")
-        test_loop_gamma_point(rsh_df, blksize=8, max_blocks=2)
-        test_cached_pbc_gamma_df(cell, rsh_df, "rsh_omega_minus_0p11")
+        check_loop_gamma_point(rsh_df, blksize=8, max_blocks=2)
+        check_cached_pbc_gamma_df(cell, rsh_df, "rsh_omega_minus_0p11")
 
 
 def main() -> int:
@@ -260,11 +260,11 @@ def main() -> int:
         cp.cuda.Stream.null.synchronize()
 
         describe_df(mf.with_df, "Base gamma GDF")
-        test_loop_gamma_point(mf.with_df, blksize=8, max_blocks=4)
-        test_get_jk(mf.with_df, cell.nao_nr())
-        test_cached_pbc_gamma_df(cell, mf.with_df, "base_gamma")
-        test_outcore_cached_pbc_gamma_df(cell, mf.with_df, "base_gamma")
-        test_rsh_df(cell, mf.with_df, omega=-0.11)
+        check_loop_gamma_point(mf.with_df, blksize=8, max_blocks=4)
+        check_get_jk(mf.with_df, cell.nao_nr())
+        check_cached_pbc_gamma_df(cell, mf.with_df, "base_gamma")
+        check_outcore_cached_pbc_gamma_df(cell, mf.with_df, "base_gamma")
+        check_rsh_df(cell, mf.with_df, omega=-0.11)
         print("SUCCESS")
         return 0
     except Exception:

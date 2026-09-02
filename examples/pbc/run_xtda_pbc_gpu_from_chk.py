@@ -10,11 +10,11 @@ os.environ.setdefault("MKL_NUM_THREADS", "16")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "16")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "16")
 
-# SCRIPT_DIR = Path(__file__).resolve().parent
-# ROOT = SCRIPT_DIR.parent
-# PROJECT_PARENT = ROOT.parent
-# if str(PROJECT_PARENT) not in sys.path:
-#     sys.path.insert(0, str(PROJECT_PARENT))
+SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT = SCRIPT_DIR.parents[1]
+PROJECT_PARENT = ROOT.parent
+if str(PROJECT_PARENT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_PARENT))
 
 import cupy as cp
 import numpy as np

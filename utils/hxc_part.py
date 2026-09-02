@@ -155,12 +155,13 @@ def _add_spin_conserving_jk(mf, v1, dm1, hybrid, hyb, omega, alpha, hermi, with_
     coul = vj if vj.ndim == 2 else vj[0] + vj[1]
     return v1 + coul - vk
 
-def _make_gpu_response_vind(mf, xctype, hybrid, omega, alpha, hyb, hermi, apply_xc):
+def _make_gpu_response_vind(mf, xctype, hybrid, omega, alpha, hyb, hermi, apply_xc,
+                            with_xc=True):
     cp = require_cupy()
 
     def vind(dm1):
         dm1 = cp.asarray(dm1)
-        v1 = cp.zeros_like(dm1) if xctype == "HF" else apply_xc(dm1)
+        v1 = cp.zeros_like(dm1) if xctype == "HF" or not with_xc else apply_xc(dm1)
         return _add_hybrid_k(mf, v1, dm1, hybrid, hyb, omega, alpha, hermi)
 
     return vind
@@ -193,8 +194,10 @@ def cache_xc_kernel_sf(mf, mo_coeff, mo_occ, spin=1,max_memory=2000): # for ALDA
 
     ao_deriv = _xc_ao_deriv(xctype, MGGA_DENSITY_LAPL)
 
-    assert mo_coeff[0].ndim == 2
-    assert spin == 1
+    if mo_coeff[0].ndim != 2:
+        raise ValueError("mo_coeff spin blocks must be two-dimensional")
+    if spin != 1:
+        raise ValueError("spin must be 1 for the spin-flip XC kernel")
 
     nao = mo_coeff[0].shape[0]
     dm0 = mf.make_rdm1()
@@ -230,8 +233,10 @@ def cache_xc_kernel_sf_mc(self, mf, mol, grids, xc_code, mo_coeff, mo_occ, deriv
     ao_deriv = _xc_ao_deriv(xctype, MGGA_DENSITY_LAPL)
     with_lapl = MGGA_DENSITY_LAPL
 
-    assert mo_coeff[0].ndim == 2
-    assert spin == 1
+    if mo_coeff[0].ndim != 2:
+        raise ValueError("mo_coeff spin blocks must be two-dimensional")
+    if spin != 1:
+        raise ValueError("spin must be 1 for the multicollinear XC kernel")
 
     nao = mo_coeff[0].shape[0]
     rhoa = []
@@ -603,24 +608,30 @@ def _gen_response_tda_gpu_pbc(mf, mo_coeff, mo_occ, hermi=0,
         )
     return vind
 
-def gen_response_sf(mf,hermi=0,max_memory=None,ctx=None):
+def gen_response_sf(mf,hermi=0,max_memory=None,ctx=None,with_xc=True):
     if ctx is None:
         _, mo_occ, mo_coeff = mf_info(mf)
     else:
         mo_occ, mo_coeff = ctx.mo_occ, ctx.mo_coeff
     if _is_gpu_mf(mf):
         return _gen_response_sf_gpu(mf, mo_coeff, mo_occ, hermi=hermi,
-                                    max_memory=max_memory)
+                                    max_memory=max_memory, with_xc=with_xc)
 
     if _is_ks_mf(mf):
         ni = mf._numint
         ni.libxc.test_deriv_order(mf.xc, 2, raise_error=True)
         xctype, hybrid, omega, alpha, hyb = _xc_response_params(mf, ni)
         max_memory = _response_max_memory(mf, max_memory)
-        vxc = cache_xc_kernel_sf(mf, mo_coeff, mo_occ,1,max_memory) # XC kerkel
+        vxc = (
+            cache_xc_kernel_sf(mf, mo_coeff, mo_occ, 1, max_memory)
+            if with_xc and xctype != "HF" else None
+        )
 
         def vind(dm1):
-            v1 = _make_response_vxc(ni, mf, dm1, hermi, vxc, max_memory)
+            v1 = (
+                _make_response_vxc(ni, mf, dm1, hermi, vxc, max_memory)
+                if with_xc and xctype != "HF" else np.zeros_like(dm1)
+            )
             return _add_hybrid_k(mf, v1, dm1, hybrid, hyb, omega, alpha, hermi)
     else: # in HF case
         def vind(dm1):
@@ -812,13 +823,14 @@ def _nr_uks_fxc_sf_tda_gpu_pbc(ni, mf, dm1, hermi=0, vxc=None):
     )
 
 
-def _gen_response_sf_gpu(mf, mo_coeff, mo_occ, hermi=0, max_memory=None):
+def _gen_response_sf_gpu(mf, mo_coeff, mo_occ, hermi=0, max_memory=None,
+                         with_xc=True):
     ni = mf._numint if _is_ks_mf(mf) else None
     max_memory = _response_max_memory(mf, max_memory)
 
     if _is_ks_mf(mf):
         xctype, hybrid, omega, alpha, hyb = _xc_response_params(mf, ni)
-        if xctype != "HF":
+        if with_xc and xctype != "HF":
             vxc = (
                 _cache_xc_kernel_sf_gpu_pbc(mf, mo_coeff, mo_occ, max_memory)
                 if _is_pbc_mf(mf)
@@ -834,7 +846,10 @@ def _gen_response_sf_gpu(mf, mo_coeff, mo_occ, hermi=0, max_memory=None):
             def apply_xc(dm1):
                 from gpu4pyscf.tdscf._uhf_resp_sf import nr_uks_fxc_sf
                 return nr_uks_fxc_sf(ni, mf.mol, mf.grids, mf.xc, None, dm1, 0, hermi, None, None, vxc)
-        return _make_gpu_response_vind(mf, xctype, hybrid, omega, alpha, hyb, hermi, apply_xc)
+        return _make_gpu_response_vind(
+            mf, xctype, hybrid, omega, alpha, hyb, hermi, apply_xc,
+            with_xc=with_xc,
+        )
     else:
         cp = require_cupy()
 
