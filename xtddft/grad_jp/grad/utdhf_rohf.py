@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 from functools import reduce
 import os
 import sys
@@ -12,8 +14,8 @@ from pyscf.lib import logger
 from pyscf.grad import rohf as rohf_grad
 from pyscf import __config__
 
-def grad_elec(td_grad, singlet=True, atmlst = None,
-              max_memory=2000, verbose=logger.INFO,with_nlc=None, state_idx=1):
+def grad_elec(td_grad, x_y, singlet=True, atmlst = None,
+              max_memory=2000, verbose=logger.INFO,with_nlc=None):
     '''
     Electronic part of TDA, TDHF nuclear gradients
 
@@ -34,12 +36,12 @@ def grad_elec(td_grad, singlet=True, atmlst = None,
 
     mol = td_grad.mol
     mf = td_grad.base._scf
-    utda = td_grad.base
     mo_coeff = mf.mo_coeff
-    occidxa = ucis.occidx_a  # UTDA内置的α占据轨道索引
-    viridxa = ucis.viridx_a  # UTDA内置的α虚轨道索引
-    occidxb = ucis.occidx_b  # UTDA内置的β占据轨道索引
-    viridxb = ucis.viridx_b  # UTDA内置的β虚轨道索引
+    mo_occ = mf.mo_occ
+    occidxa = numpy.where(mo_occ[0]>0)[0]
+    occidxb = numpy.where(mo_occ[1]>0)[0]
+    viridxa = numpy.where(mo_occ[0]==0)[0]
+    viridxb = numpy.where(mo_occ[1]==0)[0]
     nocca = len(occidxa)
     noccb = len(occidxb)
     nvira = len(viridxa)
@@ -51,18 +53,17 @@ def grad_elec(td_grad, singlet=True, atmlst = None,
     nao = mo_coeff[0].shape[0]
     nmoa = nocca + nvira
     nmob = noccb + nvirb
-    nc = ucis.nc  #double occupied number
-    no = ucis.no  #single occupied number
-    nv = ucis.nv  #virtual occupied number
+    nc = min(nocca, noccb)
+    no = abs(nocca - noccb)
+    nv = min(nvira, nvirb)
 
-    #get_x
-    x_vc_a = ucis.xycv_a[state_idx].reshape(nc,nv).T
-    x_vo_a = ucis.xyov_a[state_idx].reshape(no,nv).T
-    x_oc_b = ucis.xyco_b[state_idx].reshape(nc,no).T
-    x_vc_b = ucis.xycv_b[state_idx].reshape(nc,nv).T
-    x_a = numpy.hstack((x_vc_a, x_vo_a))
-    x_b = numpy.vstack((x_oc_b, x_vc_b))
+    #只测TDA，不调用y
     
+    x_a = x_y[:nc*nv + no*nv].reshape(-1)  
+    x_b = x_y[nc*nv + no*nv:].reshape(-1)
+    x_a = numpy.hstack((x_a[:nc*nv].reshape(nc,nv).T,x_a[nc*nv:].reshape(no,nv).T))
+    x_b = numpy.vstack((x_b[:nc*no].reshape(nc,no).T,x_b[nc*no:].reshape(nc,nv).T))
+
     fock_ao = mf.get_fock()  #fock(ao)
     focka = fock_ao[0]  #focka(ao)
     fockb = fock_ao[1]  #fockb(ao)
@@ -110,41 +111,45 @@ def grad_elec(td_grad, singlet=True, atmlst = None,
     dmzooa+= numpy.einsum('ka,ab,bl->kl', orbva, dvva, orbva.T)
     dmzoob+= numpy.einsum('ka,ab,bl->kl', orbvb, dvvb, orbvb.T)
 
-    
+    Q_a = numpy.zeros((nmoa,nmoa))
+    Q_b = numpy.zeros((nmob,nmob))
+    #wvo = -(Q_ia-Q_ai)
+    #    = -(2*G_ia[T] + 2*R_ib*G_ab[R^S] + 2*L_ib*G_ab[L^A] - 2*R_ja*G_ji[R^S] - 2*L_ja*G_ji[L^A] + 2*T_ij*F_aj - 2*T_ba*F_bi)
     vj, vk = mf.get_jk(mol, (dmzooa, dmSa, dmAa,
                              dmzoob, dmSb, dmAb), hermi=0)
     vj = vj.reshape(2,3,nao,nao)
     vk = vk.reshape(2,3,nao,nao)
     veff0doo = vj[0,0]+vj[1,0] - vk[:,0]  #G[T](ao)
-              
+   #G_ia[T]
+    Q_a[:nocca,nocca:]+= numpy.einsum('ik,kl,la->ia', orboa.T, veff0doo[0], orbva) * 2  
+    Q_b[:noccb,noccb:]+= numpy.einsum('ik,kl,la->ia', orbob.T, veff0doo[1], orbvb) * 2
+    veff = vj[0,1]+vj[1,1] - vk[:,1]  #G[R^S](ao)
     #G[R^S](mo)
     veff0mopa = numpy.einsum('pk,kl,lq->pq', mo_coeff[0].T, veff[0], mo_coeff[0]) 
     veff0mopb = numpy.einsum('pk,kl,lq->pq', mo_coeff[1].T, veff[1], mo_coeff[1])  
-    veff = -vk[:,2]  #G[L^A](ao)
-    
+    veff = - vk[:,2]  #G[L^A](ao)
     #G[L^A](mo)
     veff0moma = numpy.einsum('pk,kl,lq->pq', mo_coeff[0].T, veff[0], mo_coeff[0])
     veff0momb = numpy.einsum('pk,kl,lq->pq', mo_coeff[1].T, veff[1], mo_coeff[1])
-
-    Q_a = numpy.zeros((nmoa,nmoa))
-    Q_b = numpy.zeros((nmob,nmob))
-    #Qia
-    Q_a[:nocca,nocca:]+= numpy.einsum('ik,kl,la->ia', orboa.T, veff0doo[0], orbva) * 2  
-    Q_b[:noccb,noccb:]+= numpy.einsum('ik,kl,la->ia', orbob.T, veff0doo[1], orbvb) * 2
+    #R_biG_ba[R^S]
     Q_a[:nocca,nocca:] += numpy.einsum('bi,ba->ia', x_a, veff0mopa[nocca:,nocca:]) * 2  
     Q_b[:noccb,noccb:] += numpy.einsum('bi,ba->ia', x_b, veff0mopb[noccb:,noccb:]) * 2
+    #L_biG_ba[L^A]
     Q_a[:nocca,nocca:] += numpy.einsum('bi,ba->ia', x_a, veff0moma[nocca:,nocca:]) * 2  
     Q_b[:noccb,noccb:] += numpy.einsum('bi,ba->ia', x_b, veff0momb[noccb:,noccb:]) * 2
+    #T_ij*F_aj
     Q_a[:nocca,nocca:] += numpy.einsum('ij,aj->ia', dooa, fockamo[nocca:,:nocca]) * 2
     Q_b[:noccb,noccb:] += numpy.einsum('ij,aj->ia', doob, fockbmo[noccb:,:noccb]) * 2
-    #Qai
+    #R_ajG_ij[R^S]
     Q_a[nocca:,:nocca] += numpy.einsum('ai,ki->ak', x_a, veff0mopa[:nocca,:nocca]) * 2  
     Q_b[noccb:,:noccb] += numpy.einsum('ai,ki->ak', x_b, veff0mopb[:noccb,:noccb]) * 2
+    #L_ajG_ij[L^A]
     Q_a[nocca:,:nocca] += numpy.einsum('ai,ki->ak', x_a, veff0moma[:nocca,:nocca]) * 2  
     Q_b[noccb:,:noccb] += numpy.einsum('ai,ki->ak', x_b, veff0momb[:noccb,:noccb]) * 2
+    #T_ba*F_bi
     Q_a[nocca:,:nocca] += numpy.einsum('ba,bi->ai', dvva, fockamo[nocca:,:nocca]) * 2
     Q_b[noccb:,:noccb] += numpy.einsum('ba,bi->ai', dvvb, fockbmo[noccb:,:noccb]) * 2
-    #Qij
+
     Q_a[:nocca,:nocca] += numpy.einsum('ik,kl,lj->ij', orboa.T, veff0doo[0], orboa) * 2
     Q_b[:noccb,:noccb] += numpy.einsum('ik,kl,lj->ij', orbob.T, veff0doo[1], orbob) * 2
     Q_a[:nocca,:nocca] += numpy.einsum('bi,bj->ij', x_a, veff0mopa[nocca:,:nocca]) * 2
@@ -153,22 +158,22 @@ def grad_elec(td_grad, singlet=True, atmlst = None,
     Q_b[:noccb,:noccb] += numpy.einsum('bi,bj->ij', x_b, veff0momb[noccb:,:noccb]) * 2
     Q_a[:nocca,:nocca] += numpy.einsum('ik,jk->ij', dooa, fockamo[:nocca,:nocca]) * 2
     Q_b[:noccb,:noccb] += numpy.einsum('ik,jk->ij', doob, fockbmo[:noccb,:noccb]) * 2
-    #Qab
+
     Q_a[nocca:,nocca:] += numpy.einsum('ai,bi->ab', x_a, veff0mopa[nocca:,:nocca]) * 2
     Q_b[noccb:,noccb:] += numpy.einsum('ai,bi->ab', x_b, veff0mopb[noccb:,:noccb]) * 2
     Q_a[nocca:,nocca:] += numpy.einsum('ai,bi->ab', x_a, veff0moma[nocca:,:nocca]) * 2
     Q_b[noccb:,noccb:] += numpy.einsum('ai,bi->ab', x_b, veff0momb[noccb:,:noccb]) * 2
     Q_a[nocca:,nocca:] += numpy.einsum('ac,bc->ab', dvva,fockamo[nocca:,nocca:]) * 2
     Q_b[noccb:,noccb:] += numpy.einsum('ac,bc->ab', dvvb,fockbmo[noccb:,noccb:]) * 2
+    Q_t = Q_a + Q_b
+    qt = Q_t - Q_t.T
 
-    Qt = Q_a + Q_b
-    qt = Qt.T - Qt.T
-    
     wvc = qt[(nc+no):,:nc]
     wvo = qt[(nc+no):,nc:(nc+no)]
     woc = qt[nc:(nc+no),:nc]
-    w = numpy.hstack((wvc.ravel(),wvo.ravel(),woc.ravel()))
     
+    w = numpy.hstack((wvc.ravel(),wvo.ravel(),woc.ravel()))
+
     vresp = mf.gen_response(hermi=1)
     def matvec(x):
         xvc = x[:nv*nc].reshape(nv,nc)                               #Z_ai
@@ -217,11 +222,6 @@ def grad_elec(td_grad, singlet=True, atmlst = None,
         Fxoc += voc * 2
         return numpy.hstack((Fxvc.ravel(),Fxvo.ravel(),Fxoc.ravel()))
 
-    wvc = wvoa[:,:nc] + wvob[no:,:]  #Q_ia-Q_ai                   
-    wvo = wvoa[:,nc:]                #Q_ta-Q_at
-    woc = wvob[:no,:]                #Q_it-Q_ti
-    w = -numpy.hstack((wvc.ravel(),wvo.ravel(),woc.ravel()))
-
     #get_z
     z = lib.solve(
         matvec, w, tol=1e-20, max_cycle=500, dot=numpy.dot,
@@ -243,28 +243,33 @@ def grad_elec(td_grad, singlet=True, atmlst = None,
     #G[Z^S]
     veff = vresp((z1ao+z1ao.transpose(0,2,1)) * .5)
 
-    #W matrix
+
     im0a = numpy.zeros((nmoa,nmoa))
     im0b = numpy.zeros((nmob,nmob))
     #Ground state: W_ij = F_ij
     im0a[:nocca,:nocca]+= fockamo[:nocca,:nocca]
     im0b[:noccb,:noccb]+= fockbmo[:noccb,:noccb]
-    #W_ij = G_ij[T+Z^S] + R_ai*G_aj[R^S] + L_ai*G_ai[L^A] - T_ik*F_kj
+    
+    
+    #W_ij = G_ij[T+Z^S] + R_ai*G_aj[R^S] + L_ai*G_ai[L^A] + T_ik*F_kj
+  
     im0a[:nocca,:nocca]+= numpy.einsum('ik,kl,lj->ij', orboa.T, veff0doo[0]+veff[0], orboa)
     im0b[:noccb,:noccb]+= numpy.einsum('ik,kl,lj->ij', orbob.T, veff0doo[1]+veff[1], orbob)
     im0a[:nocca,:nocca]+= numpy.einsum('ak,ai->ki', x_a, veff0mopa[nocca:,:nocca])
     im0b[:noccb,:noccb]+= numpy.einsum('ak,ai->ki', x_b, veff0mopb[noccb:,:noccb])
     im0a[:nocca,:nocca]+= numpy.einsum('ak,ai->ki', x_a, veff0moma[nocca:,:nocca])
     im0b[:noccb,:noccb]+= numpy.einsum('ak,ai->ki', x_b, veff0momb[noccb:,:noccb])
-    im0a[:nocca,:nocca]+= numpy.einsum('ik,kj->ij', dooa,fockamo[:nocca,:nocca])
-    im0b[:noccb,:noccb]+= numpy.einsum('ik,kj->ij', doob,fockbmo[:noccb,:noccb])
+    im0a[:nocca,:nocca]+= numpy.einsum('ik,jk->ij', dooa,fockamo[:nocca,:nocca])
+    im0b[:noccb,:noccb]+= numpy.einsum('ik,jk->ij', doob,fockbmo[:noccb,:noccb])
+
     #W_ab = R_ai*G_bi[R^S] + L_ai*G_bi[L^A] + T_ac*F_cb
     im0a[nocca:,nocca:] = numpy.einsum('ai,ci->ac', x_a, veff0mopa[nocca:,:nocca])
     im0b[noccb:,noccb:] = numpy.einsum('ai,ci->ac', x_b, veff0mopb[noccb:,:noccb])
     im0a[nocca:,nocca:]+= numpy.einsum('ai,ci->ac', x_a, veff0moma[nocca:,:nocca])
     im0b[noccb:,noccb:]+= numpy.einsum('ai,ci->ac', x_b, veff0momb[noccb:,:noccb])
-    im0a[nocca:,nocca:]+= numpy.einsum('ac,cb->ab', dvva,fockamo[nocca:,nocca:])
-    im0b[noccb:,noccb:]+= numpy.einsum('ac,cb->ab', dvvb,fockbmo[noccb:,noccb:])
+    im0a[nocca:,nocca:]+= numpy.einsum('ac,bc->ab', dvva,fockamo[nocca:,nocca:])
+    im0b[noccb:,noccb:]+= numpy.einsum('ac,bc->ab', dvvb,fockbmo[noccb:,noccb:])
+    #W_ai和W_ia合并
     #W_ai = R_ja*G_ji[R^S] + L_ja*G_ji[L^A] + T_ba*F_bi + Z_aj*F^_ji / 2
     im0a[nocca:,:nocca] = numpy.einsum('ai,ki->ak', x_a, veff0mopa[:nocca,:nocca]) 
     im0b[noccb:,:noccb] = numpy.einsum('ai,ki->ak', x_b, veff0mopb[:noccb,:noccb]) 
@@ -272,9 +277,10 @@ def grad_elec(td_grad, singlet=True, atmlst = None,
     im0b[noccb:,:noccb]+= numpy.einsum('ai,ki->ak', x_b, veff0momb[:noccb,:noccb]) 
     im0a[nocca:,:nocca]+= numpy.einsum('ba,bi->ai', dvva, fockamo[nocca:,:nocca]) 
     im0b[noccb:,:noccb]+= numpy.einsum('ba,bi->ai', dvvb, fockbmo[noccb:,:noccb]) 
-    im0a[nocca:,:nocca]+= numpy.einsum('aj,ji->ai', z1a, fockamo[:nocca,:nocca]) / 2
-    im0b[noccb:,:noccb]+= numpy.einsum('aj,ji->ai', z1b, fockbmo[:noccb,:noccb]) / 2
+    im0a[nocca:,:nocca]+= numpy.einsum('aj,ij->ai', z1a, fockamo[:nocca,:nocca]) / 2
+    im0b[noccb:,:noccb]+= numpy.einsum('aj,ij->ai', z1b, fockbmo[:noccb,:noccb]) / 2
     im0b[nc:(nc+no),:nc]+= numpy.einsum('bt,bi->ti', zvo, fockavc) / 2
+
     #W_ia = G_ia[T+Z^S] + R_bi*G_ba[R^S] + L_bi*G_ba[L^A] + T_ij*F_ja + Z_bi*F^_ba / 2
     im0a[:nocca,nocca:]+= numpy.einsum('ik,kl,la->ia', orboa.T, veff0doo[0]+veff[0], orbva)
     im0b[:noccb,noccb:]+= numpy.einsum('ik,kl,la->ia', orbob.T, veff0doo[1]+veff[1], orbvb)
@@ -286,12 +292,16 @@ def grad_elec(td_grad, singlet=True, atmlst = None,
     im0b[:noccb,noccb:]+= numpy.einsum('ij,ja->ia', doob, fockbmo[:noccb,noccb:])
     im0a[:nocca,nocca:]+= numpy.einsum('bi,ba->ia', z1a, fockamo[nocca:,nocca:]) / 2
     im0b[:noccb,noccb:]+= numpy.einsum('bi,ba->ia', z1b, fockbmo[noccb:,noccb:]) / 2
-    im0a[nc:(nc+no),(nc+no):]+= numpy.einsum('tj,aj->ta', zoc, fockbvc) / 2 
-    
-    im0 = im0a + im0b
+    im0a[nc:(nc+no),(nc+no):]+= numpy.einsum('tj,aj->ta', zoc, fockbvc) / 2
 
+
+    im0 = im0a + im0b
+    print(nc,no,nv)
+    print(im0-im0.T)
     im0 = numpy.einsum('kp,pq,ql->kl',mo_coeff[0], im0 ,mo_coeff[0].T)
+
     
+
     #(T+Z^S)(ao)
     dmz1dooa = (z1ao[0] + z1ao[0].T)/2 + dmzooa
     dmz1doob = (z1ao[1] + z1ao[1].T)/2 + dmzoob
@@ -388,18 +398,12 @@ class MyGradients(rohf_grad.Gradients):
             raise NotImplementedError('Nuclear Gradients for DF-TDDFT')
     @lib.with_doc(grad_elec.__doc__)
     
-    def grad_elec(self, singlet, atmlst=None, with_nlc=None):
+    def grad_elec(self, xy, singlet, atmlst=None, with_nlc=None):
         if with_nlc is None:
             with_nlc = self.with_nlc
-        return grad_elec(td_grad=self,          # 对应内层td_grad
-            singlet=singlet,       # 对应内层singlet
-            atmlst=atmlst,         # 对应内层atmlst
-            max_memory=self.max_memory,  # 对应内层max_memory
-            verbose=self.verbose,  # 对应内层verbose
-            with_nlc=with_nlc,     # 对应内层with_nlc
-            state_idx=self.state-1)
+        return grad_elec(self, xy, singlet, atmlst, self.max_memory, self.verbose)
 
-    def kernel(self, state=None, singlet=None, atmlst=None, with_nlc=None):
+    def kernel(self, xy=None, state=None, singlet=None, atmlst=None, with_nlc=None):
         '''
         Args:
         state : int
@@ -408,7 +412,20 @@ class MyGradients(rohf_grad.Gradients):
             Whether to include Nuclear-Lagrangian contributions.
             If None, use self.with_nlc
         '''
-        
+        if xy is None:
+            if state is None:
+                state = self.state
+            else:
+                self.state = state
+
+            if state == 0:
+                logger.warn(self, 'state=0 found in the input. '
+                        'Gradients of ground state is computed.')
+                return self.base._scf.nuc_grad_method().kernel(atmlst=atmlst)
+
+            xy = self.base.v[:,state-1]
+
+
         if singlet is None: 
             singlet = self.base.singlet
         if atmlst is None:
@@ -426,7 +443,7 @@ class MyGradients(rohf_grad.Gradients):
         if self.verbose >= logger.INFO:
             self.dump_flags()
 
-        de = self.grad_elec(singlet, atmlst, with_nlc=with_nlc)
+        de = self.grad_elec(xy, singlet, atmlst, with_nlc=with_nlc)
         self.de = de = de + self.grad_nuc(atmlst=atmlst)
         if self.mol.symmetry:
             self.de = self.symmetrize(self.de, atmlst)
@@ -464,19 +481,20 @@ class UTDHF_ROHF(UCIS):
     def __init__(self, mf):
         if isinstance(mf, scf.rohf.ROHF):
             mf = mf.to_uhf()
-        super().__init__(mf.mol,mf,             
-            nstates=1,    
+        super().__init__(mf.mol, mf,  
             savedata=False)
         self.frozen = None
 
     
     def nuc_grad_method(self):
         return MyGradients(self)
-
+    
 
 from pyscf import scf
-mol = gto.M(atom=''' N 0. 0. 0.; 
-            N 0. 0. 0.97''',charge = 1 , spin=1 ,basis = '6-31g')
+mol = gto.M(atom ='''O 0.000000 0.000000 1.207800;
+            C 0.000000 0.000000 0.000000;
+            H 0.000000 1.092733 -0.356967;
+            H 0.000000 -1.092733 -0.356967''',charge = 1 , spin= 1 ,basis = '6-31g**')
 mf = scf.ROHF(mol)
 mf.conv_tol = 1e-12
 mf.max_cycle = 1000
@@ -484,10 +502,5 @@ mf.kernel()
 
 
 td = UTDHF_ROHF(mf)  
-td.conv_tol = 1e-15
-td.max_cycle = 1000
 td.kernel()
-
-
 my_grad = td.nuc_grad_method().kernel()
-
