@@ -1,3 +1,32 @@
+Metadata-Version: 2.4
+Name: xtddft_dev
+Version: 0.1.0
+Summary: Spin-adapted time-dependent density functional theory for open-shell systems
+Author: XTDDFT developers
+License: Apache-2.0
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: pandas
+Requires-Dist: pyscf
+Requires-Dist: h5py
+Requires-Dist: joblib
+Requires-Dist: opt_einsum
+Requires-Dist: psutil
+Requires-Dist: spglib
+Requires-Dist: libmsym
+Requires-Dist: sympy
+Provides-Extra: gpu
+Requires-Dist: cupy; extra == "gpu"
+Requires-Dist: gpu4pyscf; extra == "gpu"
+Provides-Extra: gpu-cuda11x
+Requires-Dist: cupy-cuda11x; extra == "gpu-cuda11x"
+Requires-Dist: gpu4pyscf; extra == "gpu-cuda11x"
+Provides-Extra: gpu-cuda12x
+Requires-Dist: cupy-cuda12x; extra == "gpu-cuda12x"
+Requires-Dist: gpu4pyscf; extra == "gpu-cuda12x"
+
 <div align="left">
   <img src="./docs/logo-xtddft.jpg" height="80px"/>
 </div>

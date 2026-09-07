@@ -3,7 +3,7 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "xtddft"
+name = "xtddft_dev"
 version = "0.1.0"
 description = "Spin-adapted time-dependent density functional theory for open-shell systems"
 readme = "README.md"
@@ -17,20 +17,43 @@ dependencies = [
   "scipy",
   "pandas",
   "pyscf",
+  "h5py",
   "joblib",
+  "opt_einsum",
   "psutil",
+  "spglib",
+  "libmsym",
+  "sympy",
 ]
 
 [project.optional-dependencies]
+test = [
+  "pytest",
+]
 gpu = [
   "cupy",
+  "gpu4pyscf",
+]
+gpu-cuda11x = [
+  "cupy-cuda11x",
+  "gpu4pyscf",
+]
+gpu-cuda12x = [
+  "cupy-cuda12x",
   "gpu4pyscf",
 ]
 
 [tool.setuptools]
 include-package-data = true
+packages = ["XTDDFT_dev", "XTDDFT_dev.XTDDFT", "XTDDFT_dev.XTDDFT.soc", "XTDDFT_dev.utils", "XTDDFT_dev.experiment", "XTDDFT_dev.XTDDFT.grad"]
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["xtddft*", "x2c_hamiltonian*"]
-namespaces = true
+[tool.setuptools.package-dir]
+"XTDDFT_dev" = "."
+"XTDDFT_dev.XTDDFT" = "XTDDFT"
+"XTDDFT_dev.utils" = "utils"
+"XTDDFT_dev.experiment" = "experiment"
+
+[tool.pytest.ini_options]
+markers = [
+  "slow: numerical finite-difference tests",
+]
