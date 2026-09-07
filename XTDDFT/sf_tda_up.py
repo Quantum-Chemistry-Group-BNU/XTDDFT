@@ -1,3 +1,5 @@
+from numbers import Integral
+
 import numpy as np
 from pyscf import ao2mo
 from pyscf.dft import numint2c
@@ -74,11 +76,18 @@ def _pair_hessian_block_b2a(occ_fock_b, vir_fock_a, tensor_block):
     ).reshape(nocc_b * nvir_a, nocc_b * nvir_a)
 
 class SF_TDA_up(XTDDFT_base): # just for ROKS
-    def __init__(self, mf, method, davidson=True, davidson_backend="cpu", df_cache=None,
+    def __init__(self, mf, method, davidson=True, davidson_backend="cpu",
+                 collinear_samples=20, df_cache=None,
                  davidson_matvec_batch_size=None):
         davidson_backend = davidson_backend.lower()
         if davidson_backend not in ("cpu", "gpu", "auto"):
             raise ValueError("davidson_backend must be 'cpu', 'gpu', or 'auto'")
+        if method == 1 and (
+            isinstance(collinear_samples, bool)
+            or not isinstance(collinear_samples, Integral)
+            or collinear_samples < 1
+        ):
+            raise ValueError("collinear_samples must be a positive integer for method=1")
         super().__init__(mf, method, davidson=davidson, df_cache=df_cache)
         logger.info("SF_TDA_up method=0 ALDA0, method=1 multicollinear")
         self.isf = 1
@@ -87,6 +96,7 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
             raise ValueError("davidson_matvec_batch_size must be a positive integer or None")
         self.davidson_matvec_batch_size = davidson_matvec_batch_size
         self.type_u = True
+        self.collinear_samples = int(collinear_samples) if method == 1 else collinear_samples
 
     def _result_method_label(self):
         return {0: "ALDA0", 1: "MCOL"}.get(self.method, f"method{self.method}")
@@ -253,7 +263,7 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
     
     def get_Amat(self):
         if self.method == 1:  # multicollinear
-            self.get_Amat_MCOL()
+            self.get_Amat_MCOL(self.collinear_samples)
         else:
             self.get_Amat_ALDA0()
         return self.A
@@ -273,7 +283,10 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
     
     def gen_tda_operation_sf(self):
         if self.method == 1:
-            vresp = gen_response_sf_mc(self.mf,hermi=0,collinear_samples=50,ctx=self.ctx)
+            vresp = gen_response_sf_mc(
+                self.mf,hermi=0,collinear_samples=self.collinear_samples,
+                ctx=self.ctx
+            )
         else:
             vresp = gen_response_sf(self.mf,hermi=0,ctx=self.ctx)
         problem = _make_spinflip_problem(self.ctx, self._get_fock_mo(), self.isf)

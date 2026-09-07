@@ -820,6 +820,10 @@ class XTDDFT_base:
             self._fock_mo = _get_mo_fock(self.mf, self.mo_coeff, self.mo_occ)
         return self._fock_mo
 
+    def nuc_grad_method(self, state=1):
+        from .grad import nuc_grad_method
+        return nuc_grad_method(self, state=state)
+
     def get_Amat(self):  # 完整的A矩阵
         raise NotImplementedError
     

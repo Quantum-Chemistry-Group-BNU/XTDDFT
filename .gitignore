@@ -1,5 +1,10 @@
 __pycache__/
+build/
 *.py[cod]
 *$py.class
 
 .pytest_cache/
+.vscode/
+
+# macOS system files
+.DS_Store

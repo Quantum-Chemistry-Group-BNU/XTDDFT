@@ -55,6 +55,17 @@ def _so2st_matrix(nc, no, nv):
     return _so2st(np.eye(dim), nc, no, nv)
 
 
+def _st2so(eigvec, nc, no, nv):
+    """Convert CV(0)|CO(0)|OV(0)|CV(1) to CVa|OVa|COb|CVb order."""
+    cv0 = eigvec[:nc * nv]
+    co0 = eigvec[nc * nv:nc * (no + nv)]
+    ov0 = eigvec[nc * (no + nv):nc * (no + nv) + no * nv]
+    cv1 = eigvec[nc * (no + nv) + no * nv:]
+    cva = (cv0 + cv1) / np.sqrt(2.0)
+    cvb = (cv0 - cv1) / np.sqrt(2.0)
+    return np.vstack((cva, ov0, co0, cvb))
+
+
 class XTDA(XTDDFT_base):
     """Spin-conserving open-shell TDA.
 
