@@ -58,9 +58,10 @@ def test_st2so_restores_spin_orbital_block_order():
     cvb = np.arange(31, 37, dtype=float)[:, None]
     spin_orbital = np.vstack((cva, ova, cob, cvb))
     spin_tensor = np.vstack(
-        ((cva + cvb) / np.sqrt(2), cob, ova, (cva - cvb) / np.sqrt(2))
+        ((cva + cvb) / np.sqrt(2), cob, ova, (cvb - cva) / np.sqrt(2))
     )
 
+    np.testing.assert_allclose(xtda._so2st(spin_orbital, nc, no, nv), spin_tensor)
     actual = xtda._st2so(spin_tensor, nc, no, nv)
 
     np.testing.assert_allclose(actual, spin_orbital)

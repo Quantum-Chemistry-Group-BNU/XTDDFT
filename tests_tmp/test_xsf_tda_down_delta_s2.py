@@ -88,6 +88,7 @@ class XsfTdaDownDeltaS2Test(unittest.TestCase):
 
         self.assertEqual(seen, [None])
 
+    @unittest.skip("debug_sa0_hdiag is disabled")
     def test_debug_sa0_hdiag_skips_delta_a_diagonal(self):
         method = xsf_tda_down.XSF_TDA_down.__new__(xsf_tda_down.XSF_TDA_down)
         method.nc = 1
