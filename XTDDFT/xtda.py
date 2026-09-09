@@ -46,7 +46,7 @@ def _so2st(eigvec, nc, no, nv):
     cob = eigvec[(nc + no) * nv:(nc + no) * nv + nc * no]
     cvb = eigvec[(nc + no) * nv + nc * no:]
     cv0 = np.sqrt(0.5) * (cva + cvb)
-    cv1 = np.sqrt(0.5) * (cva - cvb)
+    cv1 = np.sqrt(0.5) * (cvb - cva)
     return np.vstack([cv0, cob, ova, cv1])
 
 
@@ -61,9 +61,16 @@ def _st2so(eigvec, nc, no, nv):
     co0 = eigvec[nc * nv:nc * (no + nv)]
     ov0 = eigvec[nc * (no + nv):nc * (no + nv) + no * nv]
     cv1 = eigvec[nc * (no + nv) + no * nv:]
-    cva = (cv0 + cv1) / np.sqrt(2.0)
-    cvb = (cv0 - cv1) / np.sqrt(2.0)
+    cva = (cv0 - cv1) / np.sqrt(2.0)
+    cvb = (cv0 + cv1) / np.sqrt(2.0)
     return np.vstack((cva, ov0, co0, cvb))
+
+
+def _st2so_matrix(nc, no, nv):
+    dim = 2 * nc * nv + nc * no + no * nv
+    return _st2so(np.eye(dim), nc, no, nv)
+
+
 
 
 class XTDA(XTDDFT_base):
@@ -112,6 +119,10 @@ class XTDA(XTDDFT_base):
     def _split_vectors(self, zs, ctx):
         nocca, nvira = ctx.nocc_a, ctx.nvir_a
         noccb, nvirb = ctx.nocc_b, ctx.nvir_b
+        # PySCF 工作顺序 alpha|beta；x 为试探向量编号，i/a 为占据/虚轨道指标。
+        # za[:, :nc, :]=CVa，za[:, nc:, :]=OVa；
+        # zb[:, :, :no]=COb，zb[:, :, no:]=CVb。
+        # beta 展平后每个 C 的 O/V 列交错；self.order 才把 COb、CVb 分别聚拢。
         za = zs[:, :nocca * nvira].reshape(zs.shape[0], nocca, nvira)
         zb = zs[:, nocca * nvira:].reshape(zs.shape[0], noccb, nvirb)
         return za, zb
@@ -149,7 +160,6 @@ class XTDA(XTDDFT_base):
             core_delta = diag_delta[:ctx.nc]
             virt_delta = diag_delta[ctx.nocc_a:]
 
-            # Li-Liu finite-spin correction only changes the CVa/CVb
             # self-block diagonals; CVa-CVb terms are off-diagonal couplings.
             e_ia_a[:ctx.nc, :] += (
                 factor_a * virt_delta + factor_b * core_delta[:, None]
@@ -190,9 +200,10 @@ class XTDA(XTDDFT_base):
             response = block_response if response is None else response + block_response
         return response
 
-    def _should_use_delta_a(self, mf, ctx):
+    def _should_use_delta_a(self, mf, ctx, enabled=None):
+        enabled = self.use_delta_a if enabled is None else bool(enabled)
         return (
-            self.use_delta_a
+            enabled
             and _asnumpy(mf.mo_coeff).ndim != 3
             and ctx.no > 0
             and _system(mf).spin != 0
@@ -209,7 +220,7 @@ class XTDA(XTDDFT_base):
             blocks.append(vind(zs[start:start + batch_size]))
         return get_array_module(blocks[0]).concatenate(blocks, axis=0)
 
-    def gen_tda_operation(self, mf=None, ctx=None):
+    def gen_tda_operation(self, mf=None, ctx=None, use_delta_a=None):
         mf = self.mf if mf is None else mf
         ctx = self.ctx if ctx is None else ctx
 
@@ -223,21 +234,25 @@ class XTDA(XTDDFT_base):
         focka_mo, fockb_mo = _get_mo_fock(mf, mo_coeff, mo_occ)
         vresp = gen_response_tda(mf, hermi=0, ctx=ctx)
 
-        use_delta_a = self._should_use_delta_a(mf, ctx)
-        if use_delta_a:
+        # 仅 use_delta_a=True 的非零自旋 RO 开壳层启用额外修正；UHF/UKS 不启用。
+        # S_i=mol.spin/2；HF Fock 在当前参考密度上构造，不另做一次 HF 自洽计算。
+        apply_delta_a = self._should_use_delta_a(mf, ctx, enabled=use_delta_a)
+        if apply_delta_a:
+            # Si
             si = 0.5 * _system(mf).spin
-            if abs(si) < 1e-14:
-                use_delta_a = False
+            if abs(si) < 1e-14:  # 如果是0，那么
+                apply_delta_a = False
             else:
                 focka_hf, fockb_hf = _get_hf_mo_fock(mf, mo_coeff, mo_occ)
+                # the coefficient \delta A for the Spin-orbital basis
                 factor_a = 0.5 * (1 - xp.sqrt((si + 1) / si) + 1 / (2 * si))
                 factor_b = 0.5 * (-1 + xp.sqrt((si + 1) / si) + 1 / (2 * si))
                 factor_ab = 0.5 / (2 * si)
         hdiag = self._hdiag_from_fock(
             ctx, focka_mo, fockb_mo,
-            focka_hf=focka_hf if use_delta_a else None,
-            fockb_hf=fockb_hf if use_delta_a else None,
-            spin=_system(mf).spin if use_delta_a else None,
+            focka_hf=focka_hf if apply_delta_a else None,
+            fockb_hf=fockb_hf if apply_delta_a else None,
+            spin=_system(mf).spin if apply_delta_a else None,
         )
 
         def vind(zs0):
@@ -247,7 +262,7 @@ class XTDA(XTDDFT_base):
             nz = zs.shape[0]
             za, zb = self._split_vectors(zs, ctx)
 
-            def response_dm(za_part, zb_part):
+            def response_dm(za_part, zb_part):   # transform to AO
                 mo1a_part = contract("xov,pv->xpo", za_part, orbva)
                 dmsa_part = contract("xpo,qo->xpq", mo1a_part, orboa.conj())
                 mo1b_part = contract("xov,pv->xpo", zb_part, orbvb)
@@ -257,46 +272,58 @@ class XTDA(XTDDFT_base):
                     dms_part, mo1a_part, mo1b_part, orboa, orbob
                 )
 
+            # 只拆分响应的输入密度；每块仍投影到全部输出通道并相加，保留交叉耦合。
             if self.jk_block_split:
                 def response_blocks():
                     za_part = xp.zeros_like(za)
                     zb_part = xp.zeros_like(zb)
+                    # 输入 CVa：C_alpha -> V_alpha。
                     za_part[:, :ctx.nc, :] = za[:, :ctx.nc, :]
                     yield response_dm(za_part, zb_part)
 
                     za_part = xp.zeros_like(za)
                     zb_part = xp.zeros_like(zb)
+                    # 输入 OVa：O_alpha -> V_alpha。
                     za_part[:, ctx.nc:, :] = za[:, ctx.nc:, :]
                     yield response_dm(za_part, zb_part)
 
                     za_part = xp.zeros_like(za)
                     zb_part = xp.zeros_like(zb)
+                    # 输入 COb：C_beta -> O_beta。
                     zb_part[:, :, :ctx.no] = zb[:, :, :ctx.no]
                     yield response_dm(za_part, zb_part)
 
                     za_part = xp.zeros_like(za)
                     zb_part = xp.zeros_like(zb)
+                    # 输入 CVb：C_beta -> V_beta。
                     zb_part[:, :, ctx.no:] = zb[:, :, ctx.no:]
                     yield response_dm(za_part, zb_part)
 
                 v1ao = self._apply_response_blocks(vresp, response_blocks())
             else:
                 v1ao = self._apply_response_in_batches(vresp, response_dm(za, zb))
+            # ab 是 alpha 保自旋激发与 beta 保自旋激发的耦合，不是自旋翻转激发。
             v1ao = xp.asarray(v1ao)
             v1a = contract("xpq,qo->xpo", v1ao[0], orboa)
             v1a = contract("xpo,pv->xov", v1a, orbva.conj())
             v1b = contract("xpq,qo->xpo", v1ao[1], orbob)
             v1b = contract("xpo,pv->xov", v1b, orbvb.conj())
 
+            # 常规 Fock 项 delta_ij*F_ab - F_ij*delta_ab：
+            # alpha 覆盖 {CVa,OVa}x{CVa,OVa}；beta 覆盖 {COb,CVb}x{COb,CVb}。
+            # 非对角 Fock 元素也包含 CVa<->OVa、COb<->CVb 的一电子耦合。
             v1a += contract("xib,ab->xia", za, focka_mo[ctx.viridx_a[:, None], ctx.viridx_a])
             v1a -= contract("xja,ij->xia", za, focka_mo[ctx.occidx_a[:, None], ctx.occidx_a])
             v1b += contract("xib,ab->xia", zb, fockb_mo[ctx.viridx_b[:, None], ctx.viridx_b])
             v1b -= contract("xja,ij->xia", zb, fockb_mo[ctx.occidx_b[:, None], ctx.occidx_b])
 
-            if use_delta_a:
+            # 以下仅添加 Delta A：只改 CVa/CVb 的 2x2 通道子矩阵，
+            # CO、OV 及其耦合已由上方处理。A[P,Q] 表示输出 P、输入 Q。
+            if apply_delta_a:
                 nc, no, nv = ctx.nc, ctx.no, ctx.nv
                 cv_a = za[:, :nc, :]
                 cv_b = zb[:, :, -nv:]
+                # Delta A[CVa,CVa]
                 v1a[:, :nc, :] += (
                     factor_a * (
                         contract("xib,ab->xia", cv_a, fockb_hf[ctx.nocc_a:, ctx.nocc_a:])
@@ -307,6 +334,7 @@ class XTDA(XTDDFT_base):
                         - contract("xja,ij->xia", cv_a, focka_hf[:nc, :nc])
                     )
                 )
+                # Delta A[CVa,CVb]
                 cv_coupling = (
                     contract("xib,ab->xia", cv_b, fockb_hf[ctx.nocc_a:, ctx.nocc_a:])
                     - contract("xib,ab->xia", cv_b, focka_hf[ctx.nocc_a:, ctx.nocc_a:])
@@ -315,12 +343,14 @@ class XTDA(XTDDFT_base):
                 )
                 v1a[:, :nc, :] -= factor_ab * cv_coupling
 
+                # Delta A[CVb,CVa]
                 v1b[:, :, -nv:] -= factor_ab * (
                     contract("xib,ab->xia", cv_a, fockb_hf[ctx.nocc_a:, ctx.nocc_a:])
                     - contract("xib,ab->xia", cv_a, focka_hf[ctx.nocc_a:, ctx.nocc_a:])
                     + contract("xja,ij->xia", cv_a, fockb_hf[:nc, :nc])
                     - contract("xja,ij->xia", cv_a, focka_hf[:nc, :nc])
                 )
+                # Delta A[CVb,CVb]
                 v1b[:, :, -nv:] += (
                     factor_b * (
                         contract("xib,ab->xia", cv_b, fockb_hf[ctx.nocc_a:, ctx.nocc_a:])
@@ -331,7 +361,6 @@ class XTDA(XTDDFT_base):
                         - contract("xja,ij->xia", cv_b, focka_hf[:nc, :nc])
                     )
                 )
-
             return xp.hstack([v1a.reshape(nz, -1), v1b.reshape(nz, -1)])
 
         return vind, hdiag
@@ -359,6 +388,8 @@ class XTDA(XTDDFT_base):
         self.e = xp.asarray(e)
         raw_v = xp.asarray(_asnumpy(x1)).T
         self._raw_v = raw_v
+        # 先重排为 CVa|OVa|COb|CVb；RO 再转张量基，U 参考保留轨道基。
+        # 当前实现由 type_u 决定是否转换，并不由构造参数 so2st 控制。
         ordered_v = raw_v[self.order]
         if self.type_u:
             self.v = ordered_v
@@ -367,31 +398,286 @@ class XTDA(XTDDFT_base):
         logger.info("XTDA Davidson converged: {}", converged)
         return self.e, self.v
 
-    def get_Amat(self, batch_size=None):
-        batch_size = self.dense_batch_size if batch_size is None else batch_size
+    def _get_dense_integrals(self):
+        """Return Fock and Hxc integrals shared by the two dense builders."""
+        from pyscf import ao2mo
+        from .base import (
+            _df_ao2mo_pbc, _is_pbc_mf, _iter_block_data, _response_max_memory,
+        )
+
         mf = _as_cpu_mf(self.mf)
         ctx = _as_cpu_ctx(mf, self.ctx)
         mode = backend.mode
         set_backend("cpu")
         try:
-            vind, hdiag = self.gen_tda_operation(mf=mf, ctx=ctx)
-            ndim = int(hdiag.size)
-            cols = []
-            eye = np.eye(ndim)
-            for p0 in range(0, ndim, batch_size):
-                cols.append(_asnumpy(vind(eye[p0:p0 + batch_size])))
-            amat = np.vstack(cols).T
-            order = _order_pyscf2my(ctx.nc, ctx.no, ctx.nv)
-            amat = amat[np.ix_(order, order)]
-            amat = np.asarray((amat + amat.T) * 0.5)
-            if not self.type_u:
-                transform = _so2st_matrix(ctx.nc, ctx.no, ctx.nv)
-                amat = transform @ amat @ transform.T
-                amat = np.asarray((amat + amat.T) * 0.5)
-            self.A = amat
+            mo_coeff = np.asarray(ctx.mo_coeff)
+            mo_occ = np.asarray(ctx.mo_occ)
+            if np.iscomplexobj(mo_coeff):
+                raise NotImplementedError("Dense XTDA requires real molecular or Gamma orbitals")
+            occ = (ctx.occidx_a, ctx.occidx_b)
+            vir = (ctx.viridx_a, ctx.viridx_b)
+            orbo = [mo_coeff[s][:, occ[s]] for s in range(2)]
+            orbv = [mo_coeff[s][:, vir[s]] for s in range(2)]
+
+            def eri(coeffs, omega=None):
+                shape = tuple(c.shape[1] for c in coeffs)
+                if 0 in shape:
+                    return np.zeros(shape)
+                if _is_pbc_mf(mf):
+                    from pyscf.pbc.df import aft, df
+                    from .base import _get_gamma_kpt
+
+                    # Match GDF.get_jk's AFT integrator for long-range exchange.
+                    if (omega is not None and omega > 0
+                            and isinstance(mf.with_df, df.GDF)
+                            and mf.cell.dimension >= 2
+                            and mf.cell.low_dim_ft_type != "inf_vacuum"):
+                        lr_df = aft.AFTDF(mf.cell, mf.with_df.kpts)
+                        cutoff = aft.estimate_ke_cutoff_for_omega(mf.cell, omega)
+                        lr_df.mesh = mf.cell.cutoff_to_mesh(cutoff)
+                        with lr_df.range_coulomb(omega) as rsh_df:
+                            value = rsh_df.ao2mo(
+                                coeffs, _get_gamma_kpt(mf), compact=False
+                            )
+                    else:
+                        value = _df_ao2mo_pbc(mf, coeffs, omega=omega, compact=False)
+                elif getattr(mf, "with_df", None) is not None:
+                    if omega is None:
+                        value = mf.with_df.ao2mo(coeffs, compact=False)
+                    else:
+                        with mf.with_df.range_coulomb(omega) as rsh_df:
+                            value = rsh_df.ao2mo(coeffs, compact=False)
+                elif omega is None:
+                    value = ao2mo.general(mf.mol, coeffs, compact=False)
+                else:
+                    with mf.mol.with_range_coulomb(omega):
+                        value = ao2mo.general(mf.mol, coeffs, compact=False)
+                return np.asarray(value).reshape(shape)
+
+            # ao2mo omits the exchange G=0 correction included by get_k.
+            exx_shift = 0.0
+            if _is_pbc_mf(mf) and getattr(mf, "exxdiv", None) is not None:
+                from pyscf.pbc.tools import pbc
+                from .base import _get_gamma_kpt
+
+                if mf.exxdiv != "ewald":
+                    raise NotImplementedError("Dense XTDA supports exxdiv=None or 'ewald'")
+                kpt = _get_gamma_kpt(mf)
+                exx_shift = self.hyb * pbc.madelung(mf.cell, kpt)
+                if self.omega != 0 and self.alpha != self.hyb:
+                    exx_shift += (self.alpha - self.hyb) * pbc.madelung(
+                        mf.cell, kpt, omega=self.omega
+                    )
+
+            # K^{aa,aa}, K^{aa,bb}, K^{bb,bb}; no one-electron terms.
+            kernels = []
+            for s, t in ((0, 0), (0, 1), (1, 1)):
+                k = eri((orbo[s], orbv[s], orbo[t], orbv[t]))
+                if s == t:
+                    coeffs = (orbo[s], orbo[s], orbv[s], orbv[s])
+                    if self.hyb != 0:
+                        k -= self.hyb * eri(coeffs).transpose(0, 2, 1, 3)
+                    if self.omega != 0 and self.alpha != self.hyb:
+                        k -= (self.alpha - self.hyb) * eri(
+                            coeffs, self.omega
+                        ).transpose(0, 2, 1, 3)
+                    if exx_shift != 0:
+                        overlap = np.asarray(_get_ovlp(mf))
+                        k -= exx_shift * np.einsum(
+                            "ij,ab->iajb",
+                            orbo[s].T @ overlap @ orbo[s],
+                            orbv[s].T @ overlap @ orbv[s],
+                        )
+                kernels.append(k)
+
+            if self.mfxctype is not None and self.xctype != "HF":
+                ni = mf._numint
+                dm = np.asarray([
+                    (mo_coeff[s] * mo_occ[s]) @ mo_coeff[s].T for s in range(2)
+                ])
+                make_rho = ni._gen_rho_evaluator(
+                    _system(mf), dm, hermi=1, with_lapl=False
+                )[0]
+                max_memory = _response_max_memory(mf, None)
+                deriv = 0 if self.xctype == "LDA" else 1
+                for ao, mask, weight, coords in _iter_block_data(
+                    mf, ni, deriv, max_memory, force_cpu=True
+                ):
+                    rho = [make_rho(s, ao, mask, self.xctype) for s in range(2)]
+                    fxc = ni.eval_xc_eff(
+                        mf.xc, rho, deriv=2, xctype=self.xctype
+                    )[2]
+                    pairs = []
+                    for s in range(2):
+                        if self.xctype == "LDA":
+                            pair = np.einsum(
+                                "ri,ra->ria", ao @ orbo[s], ao @ orbv[s]
+                            )[None]
+                        else:
+                            ro = np.einsum("xrp,pi->xri", ao, orbo[s])
+                            rv = np.einsum("xrp,pa->xra", ao, orbv[s])
+                            pair = np.einsum("xri,ra->xria", ro, rv[0])
+                            pair[1:4] += np.einsum("ri,xra->xria", ro[0], rv[1:4])
+                            if self.xctype == "MGGA":
+                                tau = 0.5 * np.einsum("xri,xra->ria", ro[1:4], rv[1:4])
+                                pair = np.concatenate((pair, tau[None]), axis=0)
+                        pairs.append(pair)
+                    for k, (s, t) in zip(kernels, ((0, 0), (0, 1), (1, 1))):
+                        k += np.einsum(
+                            "xria,xyr,yrjb,r->iajb",
+                            pairs[s], fxc[s, :, t, :], pairs[t], weight,
+                            optimize=True,
+                        )
+
+            focka, fockb = _get_mo_fock(mf, mo_coeff, mo_occ)
+            delta_f = None
+            if self._should_use_delta_a(mf, ctx):
+                fha, fhb = _get_hf_mo_fock(mf, mo_coeff, mo_occ)
+                delta_f = np.asarray(fhb - fha)
+            return ctx, focka, fockb, kernels, delta_f
         finally:
             set_backend(mode)
+
+    def get_Amat(self):
+        """Build SO A; self.so2st optionally converts the completed RO matrix.
+
+        batch_size is retained for call compatibility; no matvec expansion is used.
+        """
+        ctx, focka, fockb, (aa, ab, bb), delta_f = self._get_dense_integrals()
+        nc, no, nv = ctx.nc, ctx.no, ctx.nv
+        na, nb = ctx.nocc_a * ctx.nvir_a, ctx.nocc_b * ctx.nvir_b
+        aa += (
+            np.einsum("ij,ab->iajb", np.eye(ctx.nocc_a),
+                      focka[np.ix_(ctx.viridx_a, ctx.viridx_a)])
+            - np.einsum("ab,ji->iajb", np.eye(ctx.nvir_a),
+                        focka[np.ix_(ctx.occidx_a, ctx.occidx_a)])
+        )
+        bb += (
+            np.einsum("ij,ab->iajb", np.eye(ctx.nocc_b),
+                      fockb[np.ix_(ctx.viridx_b, ctx.viridx_b)])
+            - np.einsum("ab,ji->iajb", np.eye(ctx.nvir_b),
+                        fockb[np.ix_(ctx.occidx_b, ctx.occidx_b)])
+        )
+
+        if delta_f is not None:
+            si = 0.5 * _system(self.mf).spin
+            q = np.sqrt((si + 1) / si)
+            factor_a = 0.5 * (1 - q + 1 / (2 * si))
+            factor_b = 0.5 * (-1 + q + 1 / (2 * si))
+            dv = np.einsum("ij,ab->iajb", np.eye(nc), delta_f[nc + no:, nc + no:])
+            dc = np.einsum("ab,ji->iajb", np.eye(nv), delta_f[:nc, :nc])
+            aa[:nc, :, :nc, :] += factor_a * dv + factor_b * dc
+            bb[:, no:, :, no:] += factor_b * dv + factor_a * dc
+            # Table II, including the 2013 erratum.
+            ab[:nc, :, :, no:] -= (dv + dc) / (4 * si)
+
+        amat = np.block([
+            [aa.reshape(na, na), ab.reshape(na, nb)],
+            [ab.reshape(na, nb).T, bb.reshape(nb, nb)],
+        ])
+        order = _order_pyscf2my(nc, no, nv)
+        amat = amat[np.ix_(order, order)]
+        if self.so2st and not self.type_u:
+            transform = _so2st_matrix(nc, no, nv)
+            amat = transform @ amat @ transform.T
+        self.A = amat
         logger.info("XTDA dense A dimension: {}", self.A.shape[0])
+        return self.A
+
+    def get_Amat_ST(self):
+        """Build CV(0)|CO(0)|OV(0)|CV(1) blocks directly from integrals.
+
+        batch_size is retained for call compatibility; no matvec expansion is used.
+        """
+        if self.type_u:
+            raise ValueError("get_Amat_ST requires a restricted reference")
+        ctx, fa, fb, (aa, ab, bb), delta_f = self._get_dense_integrals()
+        nc, no, nv = ctx.nc, ctx.no, ctx.nv
+        ba = ab.transpose(2, 3, 0, 1)
+        c, o, v = slice(0, nc), slice(nc, nc + no), slice(nc + no, None)
+        ic, io, iv = np.eye(nc), np.eye(no), np.eye(nv)
+        dim1 = nc * nv
+        dim2 = dim1 + nc * no
+        dim3 = dim2 + no * nv
+        amat = np.zeros((dim3 + dim1, dim3 + dim1))
+        # X-TDA uses A(S_i=infinity) + Delta A, not the finite-S S-TDA A.
+        fmean = 0.5 * (fa + fb)
+        fspin = 0.5 * (fb - fa)
+
+        # CV(0)-CV(0)
+        amat[:dim1, :dim1] = (
+            0.5 * (aa[:nc, :, :nc, :] + bb[:, no:, :, no:]
+                   + ab[:nc, :, :, no:] + ba[:, no:, :nc, :])
+            + np.einsum("ij,ab->iajb", ic, fmean[v, v])
+            - np.einsum("ab,ji->iajb", iv, fmean[c, c])
+        ).reshape(dim1, dim1)
+        # CV(0)-CO(0)
+        amat[:dim1, dim1:dim2] = (
+            ab[:nc, :, :, :no] + bb[:, no:, :, :no]
+            + np.einsum("ij,av->iajv", ic, fb[v, o])
+        ).reshape(dim1, nc * no) / np.sqrt(2)
+        # CV(0)-OV(0)
+        amat[:dim1, dim2:dim3] = (
+            aa[:nc, :, nc:, :] + ba[:, no:, nc:, :]
+            - np.einsum("ab,vi->iavb", iv, fa[o, c])
+        ).reshape(dim1, no * nv) / np.sqrt(2)
+        # CV(0)-CV(1), with CV(1)=(CVb-CVa)/sqrt(2).
+        amat[:dim1, dim3:] = (
+            0.5 * (-aa[:nc, :, :nc, :] + bb[:, no:, :, no:]
+                   + ab[:nc, :, :, no:] - ba[:, no:, :nc, :])
+            + np.einsum("ij,ab->iajb", ic, fspin[v, v])
+            - np.einsum("ab,ji->iajb", iv, fspin[c, c])
+        ).reshape(dim1, dim1)
+        # CO(0)-CO(0)
+        amat[dim1:dim2, dim1:dim2] = (
+            bb[:, :no, :, :no]
+            + np.einsum("ij,uv->iujv", ic, fb[o, o])
+            - np.einsum("uv,ji->iujv", io, fb[c, c])
+        ).reshape(nc * no, nc * no)
+        # CO(0)-OV(0)
+        amat[dim1:dim2, dim2:dim3] = ba[:, :no, nc:, :].reshape(nc * no, no * nv)
+        # CO(0)-CV(1)
+        amat[dim1:dim2, dim3:] = (
+            -ba[:, :no, :nc, :] + bb[:, :no, :, no:]
+            + np.einsum("ij,ub->iujb", ic, fb[o, v])
+        ).reshape(nc * no, dim1) / np.sqrt(2)
+        # OV(0)-OV(0)
+        amat[dim2:dim3, dim2:dim3] = (
+            aa[nc:, :, nc:, :]
+            + np.einsum("uv,ab->uavb", io, fa[v, v])
+            - np.einsum("ab,vu->uavb", iv, fa[o, o])
+        ).reshape(no * nv, no * nv)
+        # OV(0)-CV(1)
+        amat[dim2:dim3, dim3:] = (
+            -aa[nc:, :, :nc, :] + ab[nc:, :, :, no:]
+            + np.einsum("ab,ju->uajb", iv, fa[c, o])
+        ).reshape(no * nv, dim1) / np.sqrt(2)
+        # CV(1)-CV(1)
+        amat[dim3:, dim3:] = (
+            0.5 * (aa[:nc, :, :nc, :] + bb[:, no:, :, no:]
+                   - ab[:nc, :, :, no:] - ba[:, no:, :nc, :])
+            + np.einsum("ij,ab->iajb", ic, fmean[v, v])
+            - np.einsum("ab,ji->iajb", iv, fmean[c, c])
+        ).reshape(dim1, dim1)
+
+        if delta_f is not None:
+            si = 0.5 * _system(self.mf).spin
+            q = np.sqrt((si + 1) / si)
+            fs = 0.5 * delta_f
+            dv = np.einsum("ij,ab->iajb", ic, fs[v, v])
+            dc = np.einsum("ab,ji->iajb", iv, fs[c, c])
+            # Table II with the corrected CV(0)-CV(1) sign.
+            amat[:dim1, dim3:] += (q - 1) * (dv - dc).reshape(dim1, dim1)
+            amat[dim3:, dim3:] += ((dv + dc) / si).reshape(dim1, dim1)
+
+        bounds = (0, dim1, dim2, dim3, dim3 + dim1)
+        for i in range(4):
+            for j in range(i + 1, 4):
+                rows = slice(bounds[i], bounds[i + 1])
+                cols = slice(bounds[j], bounds[j + 1])
+                amat[cols, rows] = amat[rows, cols].T
+        self.A = amat
+        logger.info("XTDA spin-tensor A dimension: {}", self.A.shape[0])
         return self.A
 
     def _diagonalize_dense(self, amat, nstates):
@@ -408,6 +694,7 @@ class XTDA(XTDDFT_base):
         return self.e, self.v
 
     def _split_analysis_vectors(self, data=None):
+        # CVα | OVα | COβ | CVβ  (UKS)  or CV(0) | CO(0) | OV(0) | CV(1) (ROKS)
         data = _asnumpy(self.v if data is None else data)
         dim1 = self.nc * self.nv
         if self.type_u:
@@ -429,6 +716,7 @@ class XTDA(XTDDFT_base):
         )
 
     def deltaS2(self):
+        # refer to 10.1063/1.3573374, Eq A9
         if not self.type_u:
             _cv0, _co0, _ov0, cv1 = self._split_analysis_vectors()
             return 2.0 * np.einsum("nij,nij->n", cv1, cv1)
@@ -494,6 +782,7 @@ class XTDA(XTDDFT_base):
         return self._split_analysis_vectors(_asnumpy(self.v[:, state:state + 1]))
 
     def _transition_density_matrix_restricted_ground(self, state):
+        # Already compared and verified against the NTO_XTDDFT.pdf & xtda+soc derivation.pdf  by Longfei Chang 26.09.08
         cv0, co0, ov0, _cv1 = [block[0] for block in self._state_blocks(state)]
         nmo = self.nc + self.no + self.nv
         gamma = np.zeros((nmo, nmo), dtype=np.result_type(cv0, co0, ov0))
@@ -506,6 +795,7 @@ class XTDA(XTDDFT_base):
         return gamma
 
     def _transition_density_matrix_restricted_excited(self, state_f, state_i):
+        # Already compared and verified against the NTO_XTDDFT.pdf & xtda+soc derivation.pdf  by Longfei Chang 26.09.08
         cv0_f, co0_f, ov0_f, cv1_f = [block[0].conj() for block in self._state_blocks(state_f)]
         cv0_i, co0_i, ov0_i, cv1_i = [block[0] for block in self._state_blocks(state_i)]
         nmo = self.nc + self.no + self.nv
@@ -540,6 +830,7 @@ class XTDA(XTDDFT_base):
         return gamma
 
     def _unrestricted_ground_amplitudes(self, state):
+        # Already compared and verified against the NTO_XTDDFT.pdf   by Longfei Chang 26.09.08
         cv_a, ov_a, co_b, cv_b = [block[0] for block in self._state_blocks(state)]
         dtype = np.result_type(cv_a, ov_a, co_b, cv_b)
         amp_a = np.zeros((self.nc + self.no, self.nv), dtype=dtype)
@@ -551,6 +842,7 @@ class XTDA(XTDDFT_base):
         return amp_a, amp_b
 
     def _transition_density_matrix_unrestricted_ground(self, state):
+        # Already compared and verified against the NTO_XTDDFT.pdf   by Longfei Chang 26.09.08
         amp_a, amp_b = self._unrestricted_ground_amplitudes(state)
         ctx = self.ctx
         occ_a = _asnumpy(ctx.occidx_a).astype(int)
@@ -567,6 +859,8 @@ class XTDA(XTDDFT_base):
         return gamma
 
     def _transition_density_matrix_unrestricted_excited(self, state_f, state_i):
+        # Already compared and verified against the NTO_XTDDFT.pdf   by Longfei Chang 26.09.08
+        # have vertified against pyscf by Longfei Chang 26.09.08
         amp_a_f, amp_b_f = self._unrestricted_ground_amplitudes(state_f)
         amp_a_i, amp_b_i = self._unrestricted_ground_amplitudes(state_i)
         ctx = self.ctx
@@ -581,10 +875,10 @@ class XTDA(XTDDFT_base):
             (nmo_a + nmo_b, nmo_a + nmo_b),
             dtype=np.result_type(amp_a_f, amp_b_f, amp_a_i, amp_b_i),
         )
-        gamma[np.ix_(occ_a, occ_a)] -= contract("ia,ja->ij", amp_a_f.conj(), amp_a_i)
+        gamma[np.ix_(occ_a, occ_a)] -= contract("ia,ja->ji", amp_a_f.conj(), amp_a_i)
         gamma[np.ix_(vir_a, vir_a)] += contract("ia,ib->ab", amp_a_f.conj(), amp_a_i)
         beta = nmo_a
-        gamma[np.ix_(beta + occ_b, beta + occ_b)] -= contract("ia,ja->ij", amp_b_f.conj(), amp_b_i)
+        gamma[np.ix_(beta + occ_b, beta + occ_b)] -= contract("ia,ja->ji", amp_b_f.conj(), amp_b_i)
         gamma[np.ix_(beta + vir_b, beta + vir_b)] += contract("ia,ib->ab", amp_b_f.conj(), amp_b_i)
         return gamma
 
@@ -597,7 +891,7 @@ class XTDA(XTDDFT_base):
         """
         if state_f is None and state_i is None:
             raise ValueError("At least one of state_f/state_i must be an excited-state index")
-        if self.type_u:
+        if self.type_u: # have vertified against pyscf
             if state_i is None:
                 return self._transition_density_matrix_unrestricted_ground(state_f)
             if state_f is None:
@@ -710,7 +1004,7 @@ class XTDA(XTDDFT_base):
                     + contract("xua,ua->x", ints_aa[:, o, v], ov0[istate])
                 )
             return tdm
-
+        # have vertified against pyscf by Longfei Chang 26.09.08 for UTDA
         occ_a = _asnumpy(ctx.occidx_a)
         vir_a = _asnumpy(ctx.viridx_a)
         occ_b = _asnumpy(ctx.occidx_b)
@@ -749,6 +1043,7 @@ class XTDA(XTDDFT_base):
         return amps_a, amps_b
 
     def _transition_dipole_matrix_restricted(self, include_ground_dipole=False):
+        # Already compared and verified against the NTO_XTDDFT.pdf & xtda+soc derivation.pdf  by Longfei Chang 26.09.08
         ints_mo, _ints_bb, _ctx, mf = self._dipole_mo_blocks()
         vectors = _asnumpy(self.v)
         nstates = min(self.nstates, vectors.shape[1])
@@ -802,6 +1097,7 @@ class XTDA(XTDDFT_base):
         if not self.type_u:
             return self._transition_dipole_matrix_restricted(include_ground_dipole=include_ground_dipole)
 
+        # have vertified against pyscf for UKS
         ints_aa, ints_bb, ctx, mf = self._dipole_mo_blocks()
         occ_a = _asnumpy(ctx.occidx_a)
         vir_a = _asnumpy(ctx.viridx_a)
@@ -820,9 +1116,9 @@ class XTDA(XTDDFT_base):
             for j, (a1, b1) in enumerate(zip(amps_a, amps_b)):
                 tdm[i, j] = (
                     np.einsum("ia,xab,ib->x", a0, r_vv_a, a1, optimize=True)
-                    - np.einsum("ia,xij,ja->x", a0, r_oo_a, a1, optimize=True)
+                    - np.einsum("ia,xji,ja->x", a0, r_oo_a, a1, optimize=True)
                     + np.einsum("ia,xab,ib->x", b0, r_vv_b, b1, optimize=True)
-                    - np.einsum("ia,xij,ja->x", b0, r_oo_b, b1, optimize=True)
+                    - np.einsum("ia,xji,ja->x", b0, r_oo_b, b1, optimize=True)
                 )
         if include_ground_dipole:
             gs = _molecular_ground_dipole(mf)

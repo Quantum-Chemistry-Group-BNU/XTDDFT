@@ -729,7 +729,7 @@ def _cpu_davidson(vind, hdiag, x0, nroots, positive_eig_threshold=None):
 
     return lib.davidson1(
         aop, x0, hdiag,
-        tol=1e-7, lindep=1e-14,
+        tol=1e-8, lindep=1e-14,
         nroots=nroots, max_cycle=3000, max_space=max_space, pick=pick,
         verbose=5
     )

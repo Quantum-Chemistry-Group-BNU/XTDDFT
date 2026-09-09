@@ -11,7 +11,7 @@ from ..utils.hxc_part import (
     gen_response_sf,
     gen_response_sf_mc,
     AldA0
-) 
+)
 from .base import (
     XTDDFT_base,
     _ao2mo_full_gamma,
@@ -58,9 +58,10 @@ def add_hf_a_a2b(a_a2b, mf, orbo_a, orbv_b, nocc_a, nvir_b, hyb=1, omega=None):
             omega=omega, compact=False,
         )
     else:
-        if omega is not None and abs(omega) >= 1e-14:
-            raise NotImplementedError("Range-separated molecular HF exchange is not implemented in XSF_TDA_down.")
-        eri_mo = ao2mo.general(mf.mol, [orbo_a, orbo_a, orbv_b, orbv_b], compact=False)
+        with mf.mol.with_range_coulomb(omega):
+            eri_mo = ao2mo.general(
+                mf.mol, [orbo_a, orbo_a, orbv_b, orbv_b], compact=False,
+            )
 
     eri_mo = np.asarray(eri_mo).reshape(nocc_a,nocc_a,nvir_b,nvir_b)
     a_a2b -= contract('ijba->iajb', eri_mo) * hyb
@@ -100,8 +101,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
                  collinear_samples=60, delta_a_jk_batch_size=None,
                  delta_a_diag_j_batch_size=None, df_cache=None,
                  delta_a_diag_method="response", delta_a_diag_df_aux_batch_size=256,
-                 delta_a_diag_df_backend="auto", davidson_matvec_batch_size=None,
-                 debug_sa0_hdiag=False):
+                 delta_a_diag_df_backend="auto", davidson_matvec_batch_size=None,):
         """SA=0: SF-TDA
            SA=1: only add diagonal block for dA
            SA=2: add all dA except for OO block
@@ -117,11 +117,14 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         super().__init__(mf, method, davidson=davidson, df_cache=df_cache)
         logger.info("XSF_TDA_down method=0 ALDA0, method=1 multicollinear, method=2 collinear")
         self.isf = -1
+        # spin flip down
         self.type_u = _asnumpy(self.mf.mo_coeff).ndim == 3
         self.re = not self.type_u
+        # whether to project OO and remove redundant states
         self.davidson_backend = "cpu" if davidson_backend == "auto" else davidson_backend
         self.collinear_samples = collinear_samples
         if delta_a_jk_batch_size is not None and delta_a_jk_batch_size < 1:
+            # construct the jk matrix according to the batch sizes
             raise ValueError("delta_a_jk_batch_size must be a positive integer or None")
         self.delta_a_jk_batch_size = delta_a_jk_batch_size
         if delta_a_diag_j_batch_size is not None and delta_a_diag_j_batch_size < 1:
@@ -132,6 +135,8 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             raise ValueError("delta_a_diag_method must be 'response', 'df', 'pbc_df', or 'auto'")
         self.delta_a_diag_method = delta_a_diag_method
         if delta_a_diag_df_aux_batch_size is not None and delta_a_diag_df_aux_batch_size < 1:
+            # Controls how many auxiliary functions are processed per batch along
+            # the auxiliary-basis index \(L\) in the DF three-center integrals.
             raise ValueError("delta_a_diag_df_aux_batch_size must be a positive integer or None")
         self.delta_a_diag_df_aux_batch_size = delta_a_diag_df_aux_batch_size
         delta_a_diag_df_backend = delta_a_diag_df_backend.lower()
@@ -139,9 +144,12 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             raise ValueError("delta_a_diag_df_backend must be 'cpu', 'gpu', or 'auto'")
         self.delta_a_diag_df_backend = delta_a_diag_df_backend
         if davidson_matvec_batch_size is not None and davidson_matvec_batch_size < 1:
+            # perform matrix multiplication for several roots at a time
             raise ValueError("davidson_matvec_batch_size must be a positive integer or None")
         self.davidson_matvec_batch_size = davidson_matvec_batch_size
-        self.debug_sa0_hdiag = bool(debug_sa0_hdiag)
+        # The SA=0 hdiag debug shortcut is disabled; keep the argument only for
+        # compatibility with existing callers.
+        # self.debug_sa0_hdiag = bool(debug_sa0_hdiag)
         self.SA = (0 if self.type_u else 3) if SA is None else SA
         spin_mf = _as_cpu_mf(mf)
         _,dsp1 = spin_mf.spin_square()
@@ -149,7 +157,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
 
     def _result_method_label(self):
         return {0: "ALDA0", 1: "MCOL", 2: "COL"}.get(self.method, f"method{self.method}")
-    
+
     def get_Amat_ALDA0(self):
         mf = _as_cpu_mf(self.mf)
         ctx = _as_cpu_ctx(mf, self.ctx)
@@ -178,7 +186,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
                     rho0b = make_rho(1, ao, mask, self.xctype)
                     rho = (rho0a, rho0b)
                     fxc_ab = AldA0(ni, mf, rho, weight, self.xctype, omega=self.omega)
-                    a_a2b += construct_xc_a2b(ao, ctx.orbo_a, ctx.orbv_b, fxc_ab)
+                    a_a2b += construct_xc_a2b(ao, ctx.orbo_a, ctx.orbv_b, fxc_ab)   # transform to MO basis
 
             elif self.xctype == 'GGA' and not getattr(self, "collinear", False):  # 进行简化
                 ao_deriv = 0
@@ -192,7 +200,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
                     rha[0] = rho0a
                     rhb[0] = rho0b
                     fxc_ab = AldA0(ni, mf, (rha, rhb), weight, self.xctype, omega=self.omega)
-                    a_a2b += construct_xc_a2b(ao, ctx.orbo_a, ctx.orbv_b, fxc_ab)
+                    a_a2b += construct_xc_a2b(ao, ctx.orbo_a, ctx.orbv_b, fxc_ab)  # transform to MO basis
 
         else:
             a_a2b = add_hf_a_a2b(a_a2b, mf, ctx.orbo_a, ctx.orbv_b, ctx.nocc_a, ctx.nvir_b, hyb=1)
@@ -213,7 +221,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         del a_a2b
         self.sf_tda_A = np.asarray(Amat)
         return self.sf_tda_A
-    
+
     def get_Amat_MCOL(self, collinear_samples=30):
         r'''A and B matrices for TDDFT response function.
 
@@ -825,13 +833,13 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
 
         use_delta_a = (
             self.SA > 0
-            and not getattr(self, "debug_sa0_hdiag", False)
+            # and not getattr(self, "debug_sa0_hdiag", False)
             and not self.type_u
             and fockA_hf is not None
             and fockB_hf is not None
         )
-        if self.SA > 0 and getattr(self, "debug_sa0_hdiag", False):
-            logger.warning("Debug: using the SA=0 Davidson hdiag for SA=%s", self.SA)
+        # if self.SA > 0 and getattr(self, "debug_sa0_hdiag", False):
+        #     logger.warning("Debug: using the SA=0 Davidson hdiag for SA=%s", self.SA)
         if use_delta_a:
             fockS = (fockB_hf - fockA_hf) * 0.5
             diag_s = fockS.diagonal()

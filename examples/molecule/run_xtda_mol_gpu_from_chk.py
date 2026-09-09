@@ -2,7 +2,7 @@
 import os
 import sys
 from pathlib import Path
-
+from pyscf import dft, gto
 
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 os.environ.setdefault("OMP_NUM_THREADS", "16")
@@ -70,11 +70,33 @@ def make_gpu_roks_from_chk(chk, xc, use_density_fit=True, auxbasis=None):
 
 
 # ===== Manually edit these parameters on the server =====
-chk = "ROKS.chk"
-xc = "pbe0"
-nstates = 15
+# mol = gto.M(
+#     atom="""
+#     C -2.91400807 -0.55823559 0.03052752
+#     H -2.37721823 -1.66302155 0.09965968
+#     H -3.96527633 -0.77226144 -0.33224522
+#     N -2.34030191 0.59563094 0.25221390
+#     H -2.80790566 1.54696657 0.05511270
+#     """,
+#     basis='cc-pvdz',
+#     unit='A',
+#     spin=1,
+#     charge=1,
+#     verbose=4,
+# )
+# mf = dft.ROKS(mol)
+# mf.xc = 'b3lyp'
+# mf.conv_tol = 1e-11
+# mf.conv_tol_grad = 1e-8
+# mf.max_cycle = 200
+# mf.chkfile = 'ROKS.chk'
+# mf.kernel()
 
-use_density_fit = True
+chk = "ROKS.chk"
+xc = "b3lyp"
+nstates = 20
+
+use_density_fit = False
 auxbasis = None
 grid_level = 4
 
@@ -122,7 +144,8 @@ def main():
     ee, vv = xtda_method.kernel(nstates=nstates, save=save_results, save_file=save_file)
     xtda_method.analyse(threshold=analyse_threshold)
     cp.cuda.Stream.null.synchronize()
-
+    xtda_ee = xtda_method.calculate_TDM(include_ground_dipole=True)
+    print(xtda_ee)
     print("converged:", getattr(xtda_method, "converged", None))
     print("energies / eV:")
     print(np.asarray(ee))
