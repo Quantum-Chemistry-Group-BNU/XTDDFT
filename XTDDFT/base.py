@@ -156,9 +156,10 @@ def _molecular_ground_dipole(mf):
     dm = _asnumpy(mf.make_rdm1())
     if dm.ndim == 3:
         dm = dm.sum(axis=0)
-    elec = -np.einsum("xpq,qp->x", dip_ao, dm)
-    nuc = np.einsum("z,zx->x", mol.atom_charges(), mol.atom_coords() - origin)
-    return elec + nuc
+    # elec = -np.einsum("xpq,qp->x", dip_ao, dm)
+    # nuc = np.einsum("z,zx->x", mol.atom_charges(), mol.atom_coords() - origin)
+    dip_elec = -mf.dip_moment(unit='au') # zhaohw@20260909 ground state dipole
+    return dip_elec
 
 
 def _safe_filename_part(value):

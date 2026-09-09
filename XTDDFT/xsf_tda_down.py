@@ -109,8 +109,6 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         """
         if method not in (0, 1, 2):
             raise ValueError("method must be 0 (ALDA0), 1 (multicollinear), or 2 (collinear)")
-        if method == 2 and not davidson:
-            raise NotImplementedError("method=2 collinear response is only implemented with Davidson")
         davidson_backend = davidson_backend.lower()
         if davidson_backend not in ("cpu", "gpu", "auto"):
             raise ValueError("davidson_backend must be 'cpu', 'gpu', or 'auto'")
@@ -158,7 +156,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
     def _result_method_label(self):
         return {0: "ALDA0", 1: "MCOL", 2: "COL"}.get(self.method, f"method{self.method}")
 
-    def get_Amat_ALDA0(self):
+    def _get_Amat_a2b(self, with_xc):
         mf = _as_cpu_mf(self.mf)
         ctx = _as_cpu_ctx(mf, self.ctx)
         ni = getattr(mf, "_numint", None)
@@ -175,11 +173,14 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
                     a_a2b, mf, ctx.orbo_a, ctx.orbv_b, ctx.nocc_a, ctx.nvir_b,
                     self.alpha - self.hyb, omega=self.omega
                 )
-            dm0 = _make_reference_dm(mf, ctx.mo_occ)
-            make_rho = ni._gen_rho_evaluator(_system(mf), dm0, hermi=0, with_lapl=False)[0]
-            max_memory = _response_max_memory(mf, None)
+            if with_xc:
+                dm0 = _make_reference_dm(mf, ctx.mo_occ)
+                make_rho = ni._gen_rho_evaluator(
+                    _system(mf), dm0, hermi=0, with_lapl=False
+                )[0]
+                max_memory = _response_max_memory(mf, None)
 
-            if self.xctype == 'LDA' and not getattr(self, "collinear", False):
+            if with_xc and self.xctype == 'LDA':
                 ao_deriv = 0
                 for ao, mask, weight, coords in _iter_block_data(mf, ni, ao_deriv, max_memory, force_cpu=True):
                     rho0a = make_rho(0, ao, mask, self.xctype)
@@ -188,7 +189,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
                     fxc_ab = AldA0(ni, mf, rho, weight, self.xctype, omega=self.omega)
                     a_a2b += construct_xc_a2b(ao, ctx.orbo_a, ctx.orbv_b, fxc_ab)   # transform to MO basis
 
-            elif self.xctype == 'GGA' and not getattr(self, "collinear", False):  # 进行简化
+            elif with_xc and self.xctype == 'GGA':  # 进行简化
                 ao_deriv = 0
                 for ao, mask, weight, coords in _iter_block_data(mf, ni, ao_deriv, max_memory, force_cpu=True):
                     # 这里只需要 density，不需要 gradient
@@ -221,6 +222,13 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         del a_a2b
         self.sf_tda_A = np.asarray(Amat)
         return self.sf_tda_A
+
+    def get_Amat_ALDA0(self):
+        return self._get_Amat_a2b(with_xc=True)
+
+    def get_Amat_COL(self):
+        """Build the method=2 collinear base matrix without a transverse XC kernel."""
+        return self._get_Amat_a2b(with_xc=False)
 
     def get_Amat_MCOL(self, collinear_samples=30):
         r'''A and B matrices for TDDFT response function.
@@ -325,7 +333,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         elif self.method == 1:
             self.get_Amat_MCOL(self.collinear_samples)
         elif self.method == 2:
-            raise NotImplementedError("method=2 collinear response is only implemented with Davidson")
+            self.get_Amat_COL()
         else:
             raise NotImplementedError(f"Unsupported method={self.method!r}.")
 
@@ -368,14 +376,18 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         fockS_CV = fockS[:nc, nc + no:]
 
         # Delta A blocks follow Table 3 for spin-down excitations.
+        # Matrix/block order: CV | CO | OV | OO.
+        # CV(1)-CV(1)
         Amat[:dim1, :dim1] += (
             contract('ij,ab->iajb', iden_C, fockS_V).reshape(nc * nv, nc * nv)
             + contract('ji,ab->iajb', fockS_C, iden_V).reshape(nc * nv, nc * nv)
         ) / si
+        # CO(1)-CO(1)
         Amat[dim1:dim2, dim1:dim2] += (
             2.0 * contract('ji,uv->iujv', fockS_C, iden_O)
             - contract('uijv->iujv', eri[nc:nc + no, :nc, :nc, nc:nc + no])
         ).reshape(nc * no, nc * no) / (2 * si - 1)
+        # OV(1)-OV(1)
         Amat[dim2:dim3, dim2:dim3] += (
             2.0 * contract('uv,ab->uavb', iden_O, fockS_V)
             - contract('auvb->uavb', eri[nc + no:, nc:nc + no, nc:nc + no, nc + no:])
@@ -383,6 +395,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
 
         if SA > 1:
             cv_scale = np.sqrt(1 + 1 / (2 * si)) - 1
+            # CV(1)-CO(1); the transpose fills CO(1)-CV(1).
             tmp_CV_CO = cv_scale * (
                 contract('ij,av->iajv', iden_C, fockB_hf[nc + no:, nc:nc + no])
                 - contract('avji->iajv', eri[nc + no:, nc:nc + no, :nc, :nc])
@@ -390,6 +403,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             Amat[:dim1, dim1:dim2] += tmp_CV_CO
             Amat[dim1:dim2, :dim1] += tmp_CV_CO.T
 
+            # CV(1)-OV(1); the transpose fills OV(1)-CV(1).
             tmp_CV_OV = cv_scale * (
                 -contract('vi,ab->iavb', fockA_hf[nc:nc + no, :nc], iden_V)
                 - contract('abvi->iavb', eri[nc + no:, nc + no:, nc:nc + no, :nc])
@@ -397,6 +411,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             Amat[:dim1, dim2:dim3] += tmp_CV_OV
             Amat[dim2:dim3, :dim1] += tmp_CV_OV.T
 
+            # CO(1)-OV(1); the transpose fills OV(1)-CO(1).
             tmp_CO_OV = (
                 contract('uivb->iuvb', eri[nc:nc + no, :nc, nc:nc + no, nc + no:])
                 - contract('ubvi->iuvb', eri[nc:nc + no, nc + no:, nc:nc + no, :nc])
@@ -406,6 +421,8 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
 
         if SA > 2:
             factor = np.sqrt((2 * si + 1) / (2 * si - 1))
+            # OO(1)-OO(1) is zero in Delta A and needs no assignment.
+            # CV(1)-OO(1); the transpose fills OO(1)-CV(1).
             tmp_CV_OO = (
                 -(factor - 1) * contract(
                     'avwi->iawv', eri[nc + no:, nc:nc + no, nc:nc + no, :nc]
@@ -415,6 +432,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             Amat[:dim1, dim3:] += foo * tmp_CV_OO
             Amat[dim3:, :dim1] += foo * tmp_CV_OO.T
 
+            # CO(1)-OO(1); the transpose fills OO(1)-CO(1).
             tmp_CO_OO = (
                 (np.sqrt(2 * si / (2 * si - 1)) - 1) * (
                     -contract('iw,uv->iuwv', fockA_hf[:nc, nc:nc + no], iden_O).reshape(nc * no, no * no)
@@ -426,6 +444,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             Amat[dim1:dim2, dim3:] += foo * tmp_CO_OO
             Amat[dim3:, dim1:dim2] += foo * tmp_CO_OO.T
 
+            # OV(1)-OO(1); the transpose fills OO(1)-OV(1).
             tmp_OV_OO = (
                 (np.sqrt(2 * si / (2 * si - 1)) - 1) * (
                     contract('wu,av->uawv', iden_O, fockB_hf[nc + no:, nc:nc + no]).reshape(no * nv, no * no)
@@ -521,6 +540,13 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         return new_hdiag
 
     def _response_j_batch_size(self, total):
+        """Choose the number of MO pairs per response-J diagonal batch.
+
+        CPU and CUDA-query failures use a conservative batch of 64.  On a
+        GPU, size the batch from 60% of the currently free memory and round
+        large batches down to a multiple of 32.  This changes memory use and
+        runtime only, not the resulting J diagonal.
+        """
         if total <= 0:
             return 1
         if not backend.is_gpu:
@@ -533,7 +559,9 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         nao = int(self.mo_coeff.shape[-2])
         itemsize = xp.dtype(self.mo_coeff.dtype).itemsize
         response_dim = max(1, int(self.nocc_a) * int(self.nvir_b))
+        # Per pair: trial/response AO matrices plus one response-space vector.
         bytes_per_trial = itemsize * (2 * nao * nao + response_dim)
+        # Keep space for the two response-space output vectors.
         fixed_bytes = itemsize * (2 * response_dim)
         budget = max(0, int(0.60 * free_mem) - fixed_bytes)
         raw = max(1, int(budget / max(bytes_per_trial, 1)))
@@ -953,9 +981,29 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         return arr.concatenate(blocks, axis=0)
 
     def gen_tda_operation_sf(self, foo=1.0, fglobal=1.0, hdiag_file=None):
+        """构造 spin-flip-down TDA 的 Davidson 算子和预条件器对角元。
+
+        Davidson 向量按 CV、CO、OV、OO 四个激发块排列。对于受限开壳层
+        参考态，OO 块会投影到去除冗余态后的子空间。`vind` 先计算基础
+        ALDA0/MCOL/COL 响应，再按 `SA` 加入 Table 3 的 Delta-A 修正。
+
+        Parameters
+        ----------
+        foo : float
+            缩放 SA=3 时与 OO 块耦合的 Delta-A 项。
+        fglobal : float
+            缩放全部 Delta-A 修正；不会缩放基础 TDA 响应。
+        hdiag_file : str or None
+            Davidson 预条件器对角元的可选缓存文件；存在时读取，否则计算并保存。
+
+        Returns
+        -------
+        vind : callable
+            对一条或一批 Davidson 试探向量执行 A @ x。
+        hdiag : ndarray
+            与 Davidson 向量采用相同块顺序的 A 矩阵近似对角元。
+        """
         nc, no, nv = self.nc, self.no, self.nv
-        nvir = no + nv
-        nocc = nc + no
         si = no / 2.0
         if self.SA > 0 and _asnumpy(self.mf.mo_coeff).ndim != 3 and abs(2 * si - 1) < 1e-12:
             raise ValueError(
@@ -969,6 +1017,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         orbvb = mo_coeff[1][:, self.viridx_b]
         fockA, fockB = self._get_fock_mo()
 
+        # 基础自旋翻转响应：method=0/1/2 分别对应 ALDA0/MCOL/COL。
         if self.method == 1:
             vresp = gen_response_sf_mc(
                 self.mf, hermi=0, collinear_samples=self.collinear_samples,
@@ -979,6 +1028,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
                 self.mf, hermi=0, ctx=self.ctx, with_xc=self.method == 0,
             )
 
+        # Delta-A 只用于受限开壳层参考态；UHF/UKS 路径使用基础响应。
         use_delta_a = self.SA > 0 and _asnumpy(self.mf.mo_coeff).ndim != 3
         if use_delta_a:
             vresp_hf = self.gen_response_sf_delta_A(hermi=0)
@@ -993,6 +1043,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             fs_vv = fockS_hf[nc + no:, nc + no:]
             fs_cv = fockS_hf[:nc, nc + no:]
 
+        # 受限参考态的 OO 块含一个冗余态，Davidson 空间中将其投影掉。
         if self.re:
             self.vects = xp.asarray(self.get_vect())
         expected_hdiag_size = (nc + no) * (no + nv) - (1 if self.re else 0)
@@ -1007,10 +1058,11 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
                 hdiag = self._compress_removed_hdiag(hdiag)
             self._save_hdiag_file(hdiag_file, hdiag)
 
-        orbca = orboa[:, :nc]
-        orboa_open = orboa[:, nc:nc + no]
-        orbbo = orbvb[:, :no]
-        orbvv = orbvb[:, no:]
+        # 将轨道与 Fock 矩阵切分为 C（闭壳层）、O（开壳层）和 V（虚轨道）块。
+        orbca = orboa[:, :nc]                    # C for alpha
+        orboa_open = orboa[:, nc:nc + no]        # O for alpha
+        orbbo = orbvb[:, :no]                    # O for beta
+        orbvv = orbvb[:, no:]                    # v for beta
         fa_cc = fockA[:nc, :nc]
         fa_co = fockA[:nc, nc:nc + no]
         fa_oc = fockA[nc:nc + no, :nc]
@@ -1032,15 +1084,17 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             zs0 = xp.asarray(zs0)
             cv, co, ov, oo = self._split_block_vectors(zs0, self.re)
 
+            # 试探向量从 MO 激发空间变换到 AO transition density。
             dmov = (
                 contract("xia,qa,pi->xpq", cv, orbvv.conj(), orbca)
                 + contract("xiu,qu,pi->xpq", co, orbbo.conj(), orbca)
                 + contract("xua,qa,pu->xpq", ov, orbvv.conj(), orboa_open)
                 + contract("xuv,qv,pu->xpq", oo, orbbo.conj(), orboa_open)
-            ) # 转成AO基的vector
-            v1ao = vresp(dmov)  # 获得ao基下的响应函数。也就是K矩阵（包括交换相关和精确HF部分）
-            vs_cv, vs_co, vs_ov, vs_oo = project_response_blocks(v1ao)  # 转成MO基下的结果
-            # 分别加上前面的fock矩阵
+            )
+            # 应用 Hartree-Fock/XC 响应势，并投影回四个 MO 激发块。
+            v1ao = vresp(dmov)
+            vs_cv, vs_co, vs_ov, vs_oo = project_response_blocks(v1ao)
+            # 加入左右作用的 Fock 项，完成基础 TDA 的 A @ x。
             vs_cv += (
                 contract("xiu,ua->xia", co, fb_ov)
                 + contract("xib,ba->xia", cv, fb_vv)
@@ -1066,13 +1120,14 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
                 - contract("uw,xwv->xuv", fa_oo, oo)
             )
 
+            # 根据 SA 逐级加入 Table 3 的 Delta-A 块。
             if use_delta_a:
                 dcv = xp.zeros_like(cv)
                 dco = xp.zeros_like(co)
                 dov = xp.zeros_like(ov)
                 doo = xp.zeros_like(oo)
 
-                cv1_mo = contract("xia,qa,pi->xpq", cv, orbvv.conj(), orbca)
+                cv1_mo = contract("xia,qa,pi->xpq", cv, orbvv.conj(), orbca)    # 投影到ao基上
                 co1_mo = contract("xiu,qu,pi->xpq", co, orbbo.conj(), orbca)
                 ov1_mo = contract("xua,qa,pu->xpq", ov, orbvv.conj(), orboa_open)
                 oo1_mo = contract("xuv,qv,pu->xpq", oo, orbbo.conj(), orboa_open)
@@ -1217,6 +1272,13 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         return x_cv, x_co, x_ov, x_oo
 
     def _deltaS2_U_overlaps(self):
+        r"""Build the cross-spin MO overlaps used by the UHF/UKS formula.
+
+        S_ab[ij] = <phi_i^alpha|phi_j^beta>
+                 = (C_occ^alpha)^dagger S_AO C_occ^beta
+        S_ba[ai] = <phi_a^beta|phi_i^alpha>
+                 = (C_vir^beta)^dagger S_AO C_occ^alpha
+        """
         mf = _as_cpu_mf(self.mf)
         ctx = _as_cpu_ctx(mf, self.ctx)
         mo_coeff = _asnumpy(ctx.mo_coeff)
@@ -1236,8 +1298,14 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
 
     def _deltaS2_U_from_overlaps(self, nstate, sba_oo, sba_vo):
         x_cv, x_co, x_ov, x_oo = self._split_analysis_vectors(_asnumpy(self.v[:, nstate]))
+        # X_ai is the full beta-virtual x alpha-occupied spin-flip amplitude:
+        # X_ia = [[X_CO, X_CV], [X_OO, X_OV]].
         x_ba = np.concatenate([np.hstack([x_co, x_cv]), np.hstack([x_oo, x_ov])], axis=0).T
+        # Q = sum_ai X_ai^* S_ba[ai].
         sba_vo_overlap = contract("ai,ai->", x_ba.conj(), sba_vo)
+        # T1 = sum_aijk X_ai^* X_aj S_ab[jk] S_ba[ki]
+        # T2 = sum_abik X_ai^* X_bi S_ab[kb] S_ba[ak]
+        # The public deltaS2() adds 1 - (N_alpha - N_beta) to T1 - T2 + |Q|^2.
         ds2 = (
             contract("ai,aj,jk,ki", x_ba.conj(), x_ba, sba_oo.T.conj(), sba_oo)
             - contract("ai,bi,kb,ak", x_ba.conj(), x_ba, sba_vo.T.conj(), sba_vo)
@@ -1249,10 +1317,15 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         return self._deltaS2_U_from_overlaps(nstate, *self._deltaS2_U_overlaps())
 
     def deltaS2(self):
+        """
+        # refer to 10.1063/1.3573374, Eq A12 & A13
+        """
         ds2 = []
         if self.type_u:
             sba_oo, sba_vo = self._deltaS2_U_overlaps()
             for nstate in range(self.nstates):
+                # Delta<S^2> = 1 - (N_alpha-N_beta) + T1 - T2 + |Q|^2,
+                # with self.no = N_alpha - N_beta.
                 ds2.append(self._deltaS2_U_from_overlaps(nstate, sba_oo, sba_vo) - self.no + 1.0)  # U
             return np.asarray(np.real_if_close(ds2), dtype=float)
 
@@ -1260,6 +1333,8 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             value = _asnumpy(self.v[:, nstate])
             x_cv, _, _, x_oo = self._split_analysis_vectors(value)
             if self.SA == 0 and not self.type_u:
+                # Delta<S^2> = 1 - 2*S_i + ||X_CV||^2 - ||X_OO||^2
+                #              + (Tr X_OO)^2 for the real RO amplitudes used here.
                 dp_ab = np.sum(x_cv * x_cv) - np.sum(x_oo * x_oo) + np.sum(np.diag(x_oo)) ** 2
                 ds2.append(-2.0 * self.ground_s + 1.0 + dp_ab)  # RO
             else:
@@ -1305,6 +1380,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         return amps
 
     def _transition_density_matrix_u(self, state_f, state_i):
+        # Already compared and verified against the NTO_XTDDFT.pdf  by Longfei Chang 26.09.09
         ctx = self.ctx
         occidx_a = _asnumpy(getattr(ctx, "occidx_a", np.arange(self.nc + self.no))).astype(int)
         viridx_b = _asnumpy(getattr(ctx, "viridx_b", np.arange(self.no + self.nv))).astype(int)
@@ -1320,12 +1396,13 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         amp_f = self._spinflip_amplitude_matrix_u(state_f)
         amp_i = self._spinflip_amplitude_matrix_u(state_i)
         gamma = np.zeros((nmo_a + nmo_b, nmo_a + nmo_b), dtype=np.result_type(amp_f, amp_i))
-        gamma[np.ix_(occidx_a, occidx_a)] -= contract("ia,ja->ij", amp_f.conj(), amp_i)
+        gamma[np.ix_(occidx_a, occidx_a)] -= contract("ia,ja->ji", amp_f.conj(), amp_i)
         beta = nmo_a
         gamma[np.ix_(beta + viridx_b, beta + viridx_b)] += contract("ia,ib->ab", amp_f.conj(), amp_i)
         return gamma
 
     def _transition_density_matrix_r(self, state_f, state_i):
+        # Already compared and verified against the NTO_XTDDFT.pdf & xtda+soc derivation.pdf  by Longfei Chang 26.09.09
         cv_f, co_f, ov_f, oo_f = self._state_analysis_blocks(state_f)
         cv_i, co_i, ov_i, oo_i = self._state_analysis_blocks(state_i)
         nmo = self.nc + self.no + self.nv
@@ -1351,23 +1428,24 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         tr_oo_f = np.trace(oo_f)
         tr_oo_i = np.trace(oo_i)
 
+        # PDF Eq. (19): amplitudes are hole-first; gamma[m,n] uses E_mn.
         gamma[v, v] += contract("ia,ib->ab", cv_f, cv_i)
-        gamma[c, c] -= contract("ia,ja->ij", cv_f, cv_i)
+        gamma[c, c] -= contract("ia,ja->ji", cv_f, cv_i)
         gamma[v, o] += factor1 * contract("ia,iv->av", cv_f, co_i)
-        gamma[v, o] += factor1 * contract("iu,ib->bu", co_f, cv_i)
-        gamma[c, o] -= factor1 * contract("ia,va->iv", cv_f, ov_i)
+        gamma[o, v] += factor1 * contract("iu,ib->ub", co_f, cv_i)
+        gamma[o, c] -= factor1 * contract("ia,va->vi", cv_f, ov_i)
         gamma[c, o] -= factor1 * contract("ua,ja->ju", ov_f, cv_i)
         gamma[o, o] += contract("iu,iv->uv", co_f, co_i)
-        gamma[c, c] -= contract("iu,ju->ij", co_f, co_i)
+        gamma[c, c] -= contract("iu,ju->ji", co_f, co_i)
         gamma[c, o] -= factor2 * contract("iu,vu->iv", co_f, oo_i)
         gamma[c, o] += factor3 * co_f * tr_oo_i
-        gamma[c, o] -= factor2 * contract("ut,jt->ju", oo_f, co_i)
-        gamma[c, o] += factor3 * tr_oo_f * co_i
+        gamma[o, c] -= factor2 * contract("ut,jt->uj", oo_f, co_i)
+        gamma[o, c] += factor3 * tr_oo_f * co_i.T
         gamma[v, v] += contract("ua,ub->ab", ov_f, ov_i)
-        gamma[o, o] -= contract("ua,va->uv", ov_f, ov_i)
+        gamma[o, o] -= contract("ua,va->vu", ov_f, ov_i)
         gamma[v, o] += factor2 * contract("ua,uw->aw", ov_f, oo_i)
-        gamma[o, v] -= factor3 * ov_f * tr_oo_i
-        gamma[v, o] += factor2 * contract("ut,ub->bt", oo_f, ov_i)
+        gamma[v, o] -= factor3 * ov_f.T * tr_oo_i
+        gamma[o, v] += factor2 * contract("ut,ub->tb", oo_f, ov_i)
         gamma[o, v] -= factor3 * tr_oo_f * ov_i
         gamma[o, o] += contract("ut,uv->tv", oo_f, oo_i)
         gamma[o, o] -= contract("ut,wt->uw", oo_f, oo_i)
@@ -1455,6 +1533,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         return result
 
     def _transition_dipole_matrix_u(self):
+        # Already compared and verified against the NTO_XTDDFT.pdf  by Longfei Chang 26.09.09
         ints_aa, ints_bb, ctx = self._dipole_mo_integrals()
         occ_a = _asnumpy(ctx.occidx_a)
         vir_b = _asnumpy(ctx.viridx_b)
@@ -1482,6 +1561,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         return tdm
 
     def _transition_dipole_matrix_r(self):
+        # Already compared and verified against the NTO_XTDDFT.pdf & xtda+soc derivation.pdf  by Longfei Chang 26.09.09
         ints_mo, _ctx = self._dipole_mo_integrals()
         nc, no, nv = self.nc, self.no, self.nv
         c = slice(0, nc)

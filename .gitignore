@@ -6,6 +6,7 @@ build/
 .pytest_cache/
 .vscode/
 /reference/
+tests_tmp/
 
 # macOS system files
 .DS_Store

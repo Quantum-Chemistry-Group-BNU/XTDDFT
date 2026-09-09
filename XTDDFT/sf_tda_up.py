@@ -437,7 +437,7 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
 
         gamma[np.ix_(vir_a, vir_a)] += contract("ia,ib->ab", amp_f.conj(), amp_i)
         beta = nmo_a
-        gamma[np.ix_(beta + occ_b, beta + occ_b)] -= contract("ia,ja->ij", amp_f.conj(), amp_i)
+        gamma[np.ix_(beta + occ_b, beta + occ_b)] -= contract("ia,ja->ji", amp_f.conj(), amp_i)
         return gamma
 
     def nto(self, state_f=0, state_i=0, nroots=None):

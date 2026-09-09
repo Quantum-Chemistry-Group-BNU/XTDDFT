@@ -399,7 +399,8 @@ class XTDA(XTDDFT_base):
         return self.e, self.v
 
     def _get_dense_integrals(self):
-        """Return Fock and Hxc integrals shared by the two dense builders."""
+        """Return Fock and Hxc integrals shared by the two dense builders.
+           Only use CPU"""
         from pyscf import ao2mo
         from .base import (
             _df_ao2mo_pbc, _is_pbc_mf, _iter_block_data, _response_max_memory,
@@ -419,7 +420,7 @@ class XTDA(XTDDFT_base):
             orbo = [mo_coeff[s][:, occ[s]] for s in range(2)]
             orbv = [mo_coeff[s][:, vir[s]] for s in range(2)]
 
-            def eri(coeffs, omega=None):
+            def eri(coeffs, omega=None):   # (uv|wx)
                 shape = tuple(c.shape[1] for c in coeffs)
                 if 0 in shape:
                     return np.zeros(shape)
@@ -455,6 +456,7 @@ class XTDA(XTDDFT_base):
                 return np.asarray(value).reshape(shape)
 
             # ao2mo omits the exchange G=0 correction included by get_k.
+            # exxdiv correction
             exx_shift = 0.0
             if _is_pbc_mf(mf) and getattr(mf, "exxdiv", None) is not None:
                 from pyscf.pbc.tools import pbc
@@ -469,7 +471,18 @@ class XTDA(XTDDFT_base):
                         mf.cell, kpt, omega=self.omega
                     )
 
-            # K^{aa,aa}, K^{aa,bb}, K^{bb,bb}; no one-electron terms.
+            # For spin-conserving transitions i_s -> a_s and j_t -> b_t,
+            # this builds the J + exact-exchange part of the response kernel:
+            #
+            #   K^{st}_{ia,jb} = (i_s a_s|j_t b_t)
+            #       - delta_st [hyb (i_s j_s|a_s b_s)
+            #       + (alpha-hyb) (i_s j_s|a_s b_s)_LR(omega)
+            #       + exx_shift <i_s|j_s><a_s|b_s>].
+            #
+            # (pq|rs) uses chemists' notation.  Exact exchange is same-spin
+            # only; transpose maps ao2mo order (i,j,a,b) to (i,a,j,b).
+            # The semilocal f_xc and one-electron Fock terms are added below.
+            # Blocks: (s,t) = (alpha,alpha), (alpha,beta), (beta,beta).
             kernels = []
             for s, t in ((0, 0), (0, 1), (1, 1)):
                 k = eri((orbo[s], orbv[s], orbo[t], orbv[t]))
@@ -540,18 +553,18 @@ class XTDA(XTDDFT_base):
 
     def get_Amat(self):
         """Build SO A; self.so2st optionally converts the completed RO matrix.
-
-        batch_size is retained for call compatibility; no matvec expansion is used.
         """
         ctx, focka, fockb, (aa, ab, bb), delta_f = self._get_dense_integrals()
         nc, no, nv = ctx.nc, ctx.no, ctx.nv
         na, nb = ctx.nocc_a * ctx.nvir_a, ctx.nocc_b * ctx.nvir_b
+        # Build the alpha-alpha excitation block A^{aa,aa}.
         aa += (
             np.einsum("ij,ab->iajb", np.eye(ctx.nocc_a),
                       focka[np.ix_(ctx.viridx_a, ctx.viridx_a)])
             - np.einsum("ab,ji->iajb", np.eye(ctx.nvir_a),
                         focka[np.ix_(ctx.occidx_a, ctx.occidx_a)])
         )
+        # Build the beta-beta excitation block A^{bb,bb}.
         bb += (
             np.einsum("ij,ab->iajb", np.eye(ctx.nocc_b),
                       fockb[np.ix_(ctx.viridx_b, ctx.viridx_b)])
@@ -559,6 +572,7 @@ class XTDA(XTDDFT_base):
                         fockb[np.ix_(ctx.occidx_b, ctx.occidx_b)])
         )
 
+        # Add Delta A to the CVa-CVa, CVb-CVb, and CVa-CVb subblocks.
         if delta_f is not None:
             si = 0.5 * _system(self.mf).spin
             q = np.sqrt((si + 1) / si)
@@ -571,6 +585,7 @@ class XTDA(XTDDFT_base):
             # Table II, including the 2013 erratum.
             ab[:nc, :, :, no:] -= (dv + dc) / (4 * si)
 
+        # Assemble the full alpha|beta spin-orbital response matrix.
         amat = np.block([
             [aa.reshape(na, na), ab.reshape(na, nb)],
             [ab.reshape(na, nb).T, bb.reshape(nb, nb)],
@@ -621,7 +636,7 @@ class XTDA(XTDDFT_base):
             aa[:nc, :, nc:, :] + ba[:, no:, nc:, :]
             - np.einsum("ab,vi->iavb", iv, fa[o, c])
         ).reshape(dim1, no * nv) / np.sqrt(2)
-        # CV(0)-CV(1), with CV(1)=(CVb-CVa)/sqrt(2).
+        # CV(0)-CV(1)
         amat[:dim1, dim3:] = (
             0.5 * (-aa[:nc, :, :nc, :] + bb[:, no:, :, no:]
                    + ab[:nc, :, :, no:] - ba[:, no:, :nc, :])
@@ -1125,6 +1140,30 @@ class XTDA(XTDDFT_base):
             for i in range(nstates):
                 tdm[i, i] += gs
         return tdm
+
+    def transition_dipole_array(self, nstates=7, include_ground_dipole=True):
+        """Return transition dipoles in the ground/excited-state array layout, just for debug."""
+        nstates = int(nstates)
+        if nstates < 1:
+            raise ValueError("nstates must be a positive integer")
+
+        tdm = np.asarray(
+            self.transition_dipole_matrix(
+                include_ground_dipole=include_ground_dipole
+            )
+        )
+        ground_tdm = np.asarray(self.transition_dipoles_ground())
+        n_excited = min(nstates - 1, tdm.shape[0], ground_tdm.shape[0])
+        result = np.zeros(
+            (nstates, nstates, 3),
+            dtype=np.result_type(tdm, ground_tdm),
+        )
+        result[0, 1:n_excited + 1, :] = ground_tdm[:n_excited]
+        upper = np.triu(np.ones((n_excited, n_excited), dtype=bool), k=1)
+        result[1:n_excited + 1, 1:n_excited + 1, :] = (
+            tdm[:n_excited, :n_excited, :] * upper[:, :, None]
+        )
+        return result
 
     def calculate_TDM(self, include_ground_dipole=True):
         gs_tdm = self.transition_dipoles_ground()
