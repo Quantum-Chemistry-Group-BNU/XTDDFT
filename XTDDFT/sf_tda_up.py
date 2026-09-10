@@ -79,6 +79,8 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
     def __init__(self, mf, method, davidson=True, davidson_backend="cpu",
                  collinear_samples=20, df_cache=None,
                  davidson_matvec_batch_size=None):
+        if method not in (0, 1, 2):
+            raise ValueError("method must be 0 (ALDA0), 1 (multicollinear), or 2 (collinear)")
         davidson_backend = davidson_backend.lower()
         if davidson_backend not in ("cpu", "gpu", "auto"):
             raise ValueError("davidson_backend must be 'cpu', 'gpu', or 'auto'")
@@ -89,7 +91,7 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
         ):
             raise ValueError("collinear_samples must be a positive integer for method=1")
         super().__init__(mf, method, davidson=davidson, df_cache=df_cache)
-        logger.info("SF_TDA_up method=0 ALDA0, method=1 multicollinear")
+        logger.info("SF_TDA_up method=0 ALDA0, method=1 multicollinear, method=2 collinear")
         self.isf = 1
         self.davidson_backend = "cpu" if davidson_backend == "auto" else davidson_backend
         if davidson_matvec_batch_size is not None and davidson_matvec_batch_size < 1:
@@ -99,9 +101,9 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
         self.collinear_samples = int(collinear_samples) if method == 1 else collinear_samples
 
     def _result_method_label(self):
-        return {0: "ALDA0", 1: "MCOL"}.get(self.method, f"method{self.method}")
+        return {0: "ALDA0", 1: "MCOL", 2: "COL"}.get(self.method, f"method{self.method}")
 
-    def get_Amat_ALDA0(self):
+    def _get_Amat_b2a(self, with_xc):
         # Dense Amat is always built with CPU PySCF/NumPy.
         mf = _as_cpu_mf(self.mf)
         ctx = _as_cpu_ctx(mf, self.ctx)
@@ -123,11 +125,14 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
                         self.alpha - self.hyb, omega=self.omega
                     )
 
-                dm0 = _make_reference_dm(mf, ctx.mo_occ)
-                make_rho = ni._gen_rho_evaluator(_system(mf), dm0, hermi=0, with_lapl=False)[0]
-                max_memory = _response_max_memory(mf, None)
+                if with_xc:
+                    dm0 = _make_reference_dm(mf, ctx.mo_occ)
+                    make_rho = ni._gen_rho_evaluator(
+                        _system(mf), dm0, hermi=0, with_lapl=False
+                    )[0]
+                    max_memory = _response_max_memory(mf, None)
 
-                if self.xctype == 'LDA' and not getattr(self, "collinear", False):
+                if with_xc and self.xctype == 'LDA' and not getattr(self, "collinear", False):
                     ao_deriv = 0
                     for ao, mask, weight, coords in _iter_block_data(mf, ni, ao_deriv, max_memory, force_cpu=True):
                         rho0a = make_rho(0, ao, mask, self.xctype)
@@ -136,7 +141,7 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
                         fxc_ab = AldA0(ni, mf, rho, weight, self.xctype, omega=self.omega)
                         a_b2a += construct_xc_b2a(ao, ctx.orbo_b, ctx.orbv_a, fxc_ab)
 
-                elif self.xctype == 'GGA' and not getattr(self, "collinear", False):  # 进行简化
+                elif with_xc and self.xctype == 'GGA' and not getattr(self, "collinear", False):  # 进行简化
                     ao_deriv = 0
                     for ao, mask, weight, coords in _iter_block_data(mf, ni, ao_deriv, max_memory, force_cpu=True):
                         # 这里只需要 density，不需要 gradient
@@ -164,6 +169,13 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
 
         self.A = np.asarray(amat)
         return self.A
+
+    def get_Amat_ALDA0(self):
+        return self._get_Amat_b2a(with_xc=True)
+
+    def get_Amat_COL(self):
+        """Build the method=2 collinear matrix without a transverse XC kernel."""
+        return self._get_Amat_b2a(with_xc=False)
     
     def get_Amat_MCOL(self, collinear_samples=30):
         # Dense Amat is always built with CPU PySCF/NumPy.
@@ -262,10 +274,14 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
         return self.A
     
     def get_Amat(self):
-        if self.method == 1:  # multicollinear
-            self.get_Amat_MCOL(self.collinear_samples)
-        else:
+        if self.method == 0:
             self.get_Amat_ALDA0()
+        elif self.method == 1:
+            self.get_Amat_MCOL(self.collinear_samples)
+        elif self.method == 2:
+            self.get_Amat_COL()
+        else:
+            raise NotImplementedError(f"Unsupported method={self.method!r}.")
         return self.A
 
     def _diagonalize_dense(self, amat, nstates):
@@ -288,7 +304,9 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
                 ctx=self.ctx
             )
         else:
-            vresp = gen_response_sf(self.mf,hermi=0,ctx=self.ctx)
+            vresp = gen_response_sf(
+                self.mf, hermi=0, ctx=self.ctx, with_xc=self.method == 0
+            )
         problem = _make_spinflip_problem(self.ctx, self._get_fock_mo(), self.isf)
         return _make_spinflip_vind(problem, vresp), problem.hdiag
     

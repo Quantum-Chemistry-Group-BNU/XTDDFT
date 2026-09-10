@@ -9,12 +9,13 @@ from pyscf import dft, gto, lib
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parent))
 
+from XTDDFT_dev.XTDDFT.sf_tda_up import SF_TDA_up
 from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
 from XTDDFT_dev.utils.backend import set_backend
 
 
-def test_o2_b3lyp_sto3g_dense_matches_davidson_first_20_roots():
-    """Check dense and Davidson spectra for ALDA0, MCOL, and COL kernels."""
+def test_o2_b3lyp_spin_flip_dense_matches_davidson():
+    """Check XSF-down methods and the SF-up COL dense/Davidson paths."""
     set_backend("cpu")
     lib.num_threads(2)
     mol = gto.M(
@@ -42,3 +43,24 @@ def test_o2_b3lyp_sto3g_dense_matches_davidson_first_20_roots():
         np.testing.assert_allclose(dense.e, davidson.e, rtol=0, atol=2e-7)
         residual = dense.A @ np.asarray(davidson.v) - np.asarray(davidson.v) * np.asarray(davidson.e)
         assert np.max(np.abs(residual)) < 2e-6, f"method={method}"
+
+    dense = SF_TDA_up(
+        mf, method=2, davidson=False, davidson_backend="cpu"
+    )
+    dense.kernel(nstates=5)
+    davidson = SF_TDA_up(
+        mf, method=2, davidson=True, davidson_backend="cpu"
+    )
+    davidson.kernel(nstates=5)
+
+    assert np.all(davidson.converged), "SF-up method=2"
+    vind, _ = davidson.gen_tda_operation_sf()
+    np.testing.assert_allclose(
+        dense.A,
+        np.asarray(vind(np.eye(dense.A.shape[0]))).T,
+        rtol=0,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(dense.e, davidson.e, rtol=0, atol=2e-7)
+    residual = dense.A @ np.asarray(davidson.v) - np.asarray(davidson.v) * np.asarray(davidson.e)
+    assert np.max(np.abs(residual)) < 2e-6, "SF-up method=2"

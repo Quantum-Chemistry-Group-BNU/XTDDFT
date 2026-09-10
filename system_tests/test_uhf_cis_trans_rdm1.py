@@ -54,6 +54,7 @@ def test_uhf_cis_matches_xtda_transition_data():
     cis = ci.UCISD(mf)
     ground = cis.amplitudes_to_cisdvec(1.0, zero_c1, zero_c2)
 
+    cis_vectors = []
     pyscf_vectors = []
     pyscf_tdm = []
     for (x_alpha, x_beta), _ in pyscf_cis.xy:
@@ -61,6 +62,7 @@ def test_uhf_cis_matches_xtda_transition_data():
         excited = cis.amplitudes_to_cisdvec(
             0.0, (x_alpha, x_beta), zero_c2
         )
+        cis_vectors.append(excited)
         dm_alpha, dm_beta = cis.trans_rdm1(ground, excited)
         pyscf_tdm.append(
             np.block([
@@ -89,6 +91,53 @@ def test_uhf_cis_matches_xtda_transition_data():
     np.testing.assert_allclose(
         xtda.transition_dipoles_ground(),
         signs[:, None] * pyscf_cis.transition_dipole(),
+        atol=1e-5,
+        rtol=0,
+    )
+
+    pairs = [(state_f, state_i) for state_f in range(nstates)
+             for state_i in range(state_f)]
+    pyscf_excited_tdm = []
+    for state_f, state_i in pairs:
+        dm_alpha, dm_beta = cis.trans_rdm1(
+            cis_vectors[state_i], cis_vectors[state_f]
+        )
+        pyscf_excited_tdm.append(
+            np.block([
+                [dm_alpha, np.zeros((nmo[0], nmo[1]))],
+                [np.zeros((nmo[1], nmo[0])), dm_beta],
+            ])
+        )
+
+    pair_signs = np.asarray([
+        signs[state_f] * signs[state_i] for state_f, state_i in pairs
+    ])
+    pyscf_excited_tdm = pair_signs[:, None, None] * np.asarray(pyscf_excited_tdm)
+    np.testing.assert_allclose(
+        np.asarray([
+            xtda.transition_density_matrix(state_f + 1, state_i + 1)
+            for state_f, state_i in pairs
+        ]),
+        pyscf_excited_tdm,
+        atol=1e-5,
+        rtol=0,
+    )
+
+    dipole_ao = mol.intor_symmetric("int1e_r", comp=3)
+    dipole_mo = np.zeros((3, sum(nmo), sum(nmo)))
+    dipole_mo[:, :nmo[0], :nmo[0]] = np.einsum(
+        "xpq,pi,qj->xij", dipole_ao, mf.mo_coeff[0], mf.mo_coeff[0]
+    )
+    dipole_mo[:, nmo[0]:, nmo[0]:] = np.einsum(
+        "xpq,pi,qj->xij", dipole_ao, mf.mo_coeff[1], mf.mo_coeff[1]
+    )
+    xtda_excited_dipoles = xtda.transition_dipole_matrix()
+    np.testing.assert_allclose(
+        np.asarray([
+            xtda_excited_dipoles[state_f, state_i]
+            for state_f, state_i in pairs
+        ]),
+        np.einsum("xpq,sqp->sx", dipole_mo, pyscf_excited_tdm),
         atol=1e-5,
         rtol=0,
     )
