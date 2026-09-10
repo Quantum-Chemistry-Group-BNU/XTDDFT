@@ -1,3 +1,5 @@
+"""Test XSF-TDA-down dense/Davidson roots and residuals for O2."""
+
 from pathlib import Path
 import sys
 
@@ -12,6 +14,7 @@ from XTDDFT_dev.utils.backend import set_backend
 
 
 def test_o2_b3lyp_sto3g_dense_matches_davidson_first_20_roots():
+    """Check dense and Davidson spectra for ALDA0, MCOL, and COL kernels."""
     set_backend("cpu")
     lib.num_threads(2)
     mol = gto.M(

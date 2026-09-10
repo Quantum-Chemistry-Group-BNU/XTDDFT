@@ -38,8 +38,8 @@ lib.num_threads(int(os.environ["OMP_NUM_THREADS"]))
 # ===== Manually edit these parameters on the server =====
 chk = "roks_smd_toluene_cc_pvdz.chk"
 results_file = "xsf_tda_down_roks_smd_toluene_cc_pvdz_mcol_sa3_nstates6.npz"
-outdir = "xsf_tda_down_roks_smd_toluene_cc_pvdz_mcol_sa3_nto_0_to_1"
-prefix = "xsf_tda_down_roks_smd_toluene_cc_pvdz_mcol_sa3_state0_to_state1"
+outdir = "xsf_tda_down_roks_smd_toluene_cc_pvdz_mcol_sa3_nto_1_to_2"
+prefix = "xsf_tda_down_roks_smd_toluene_cc_pvdz_mcol_sa3_state1_to_state2"
 
 xc = "b3lyp"
 auxbasis = "cc-pvdz-jkfit"
@@ -47,8 +47,8 @@ use_density_fit = True
 
 method = 1
 SA = 3
-state_i = 0
-state_f = 1
+state_i = 1
+state_f = 2
 nroots = 5
 resolution = 0.15
 # ========================================================

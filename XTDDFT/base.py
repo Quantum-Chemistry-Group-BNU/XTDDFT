@@ -825,6 +825,11 @@ class XTDDFT_base:
         from .grad import nuc_grad_method
         return nuc_grad_method(self, state=state)
 
+    def nac_method(self, pairs=(0, 1), step=1e-4, align_threshold=0.5):
+        """Finite-difference NAC driver; state 0 is the ground state."""
+        from .nac import NAC
+        return NAC(self, pairs, step, align_threshold)
+
     def get_Amat(self):  # 完整的A矩阵
         raise NotImplementedError
     

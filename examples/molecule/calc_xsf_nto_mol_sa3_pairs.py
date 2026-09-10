@@ -40,7 +40,7 @@ use_density_fit = True
 
 method = 1
 SA = 3
-pairs = [(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (1, 3), (1, 4)]
+pairs = [(1, 2), (1, 3), (1, 4), (1, 5), (2, 3), (2, 4), (2, 5)]
 nroots = 5
 resolution = 0.15
 # ========================================================
@@ -93,7 +93,7 @@ if vectors.shape[1] != energies_ha.size:
     )
 
 max_state = max(max(pair) for pair in pairs)
-if max_state >= energies_ha.size:
+if max_state > energies_ha.size:
     raise ValueError(
         f"requested pair includes state {max_state}, but only "
         f"{energies_ha.size} states were saved."

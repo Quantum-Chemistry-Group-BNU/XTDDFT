@@ -39,7 +39,7 @@ auxbasis = "cc-pvdz-jkfit"
 use_density_fit = True
 
 method = 0
-pairs = [(None, 0), (None, 1), (None, 2), (None, 3)]
+pairs = [(0, 1), (0, 2), (0, 3), (0, 4)]
 nroots = 5
 resolution = 0.15
 # ========================================================
@@ -92,7 +92,7 @@ if vectors.shape[1] != energies_ha.size:
     )
 
 max_state = max(state_f for state_i, state_f in pairs)
-if max_state >= energies_ha.size:
+if max_state > energies_ha.size:
     raise ValueError(
         f"requested pair includes state {max_state}, but only "
         f"{energies_ha.size} states were saved."
@@ -155,7 +155,7 @@ print("vectors shape:", vectors.shape)
 print("output root:", Path(outdir).resolve())
 
 for state_i, state_f in pairs:
-    pair_label = f"ground_to_state{state_f}" if state_i is None else f"state{state_i}_to_state{state_f}"
+    pair_label = f"ground_to_state{state_f}" if state_i == 0 else f"state{state_i}_to_state{state_f}"
     pair_outdir = Path(outdir) / pair_label
     pair_prefix = f"{prefix}_{pair_label}"
 

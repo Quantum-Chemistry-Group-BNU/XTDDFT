@@ -124,7 +124,7 @@ def _write_unrestricted_pair(
 
 def write_nto_cubes(
     method,
-    state_f=0,
+    state_f=1,
     state_i=0,
     nroots=1,
     outdir=".",
@@ -139,14 +139,14 @@ def write_nto_cubes(
     molecular objects, and the same helper is used here by default.  For
     unrestricted references, spin-MO NTOs are split into alpha and beta spatial
     components because the spin parts are orthogonal and should not be merged
-    into a single scalar orbital.  For XTDA ground-to-excited NTOs, pass
-    ``state_i=None`` to denote the reference determinant.
+    into a single scalar orbital. Physical state 0 denotes the XTDA reference
+    determinant; positive labels denote excited states.
     """
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     if prefix is None:
-        label_f = "ground" if state_f is None else state_f
-        label_i = "ground" if state_i is None else state_i
+        label_f = "ground" if state_f == 0 else state_f
+        label_i = "ground" if state_i == 0 else state_i
         prefix = f"stateF{label_f}_stateI{label_i}"
 
     system = _system_from_method(method)

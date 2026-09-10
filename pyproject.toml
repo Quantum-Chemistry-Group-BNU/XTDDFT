@@ -45,7 +45,7 @@ gpu-cuda12x = [
 
 [tool.setuptools]
 include-package-data = true
-packages = ["XTDDFT_dev", "XTDDFT_dev.XTDDFT", "XTDDFT_dev.XTDDFT.soc", "XTDDFT_dev.utils", "XTDDFT_dev.experiment", "XTDDFT_dev.XTDDFT.grad"]
+packages = ["XTDDFT_dev", "XTDDFT_dev.XTDDFT", "XTDDFT_dev.XTDDFT.soc", "XTDDFT_dev.utils", "XTDDFT_dev.experiment", "XTDDFT_dev.XTDDFT.grad", "XTDDFT_dev.XTDDFT.nac"]
 
 [tool.setuptools.package-dir]
 "XTDDFT_dev" = "."

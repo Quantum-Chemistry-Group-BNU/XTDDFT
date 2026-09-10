@@ -897,29 +897,44 @@ class XTDA(XTDDFT_base):
         gamma[np.ix_(beta + vir_b, beta + vir_b)] += contract("ia,ib->ab", amp_b_f.conj(), amp_b_i)
         return gamma
 
-    def transition_density_matrix(self, state_f=0, state_i=None):
-        """Spin-free transition density matrix for XTDA NTO analysis.
+    def _physical_excited_state_index(self, state):
+        state = int(state)
+        if state < 1:
+            raise ValueError("excited-state labels start at 1; state 0 is the ground state")
+        return self._checked_state_index(state - 1)
 
-        ``state_i=None`` denotes the ROHF/UKS reference determinant.  Restricted
-        references use C|O|V spatial-MO order and spin-tensor amplitudes.
-        Unrestricted references use block spin-MO order alpha|beta.
+    def transition_density_matrix(self, state_f=1, state_i=0):
+        """Spin-free transition density matrix for physical states.
+
+        State 0 is the ROHF/UKS reference determinant; labels 1, 2, ... are
+        XTDA excited states. Restricted references use C|O|V spatial-MO order;
+        unrestricted references use alpha|beta spin-MO order.
         """
-        if state_f is None and state_i is None:
-            raise ValueError("At least one of state_f/state_i must be an excited-state index")
-        if self.type_u: # have vertified against pyscf
-            if state_i is None:
-                return self._transition_density_matrix_unrestricted_ground(state_f)
-            if state_f is None:
-                return self._transition_density_matrix_unrestricted_ground(state_i).conj().T
-            return self._transition_density_matrix_unrestricted_excited(state_f, state_i)
-        if state_i is None:
-            return self._transition_density_matrix_restricted_ground(state_f)
-        if state_f is None:
-            return self._transition_density_matrix_restricted_ground(state_i).conj().T
-        return self._transition_density_matrix_restricted_excited(state_f, state_i)
+        if state_f is None or state_i is None:
+            raise ValueError("use physical state 0 for the ground state")
+        state_f = int(state_f)
+        state_i = int(state_i)
+        if state_f == 0 and state_i == 0:
+            raise ValueError("at least one state must be an excited state")
 
-    def nto(self, state_f=0, state_i=None, nroots=None):
-        """Natural transition orbitals from the XTDA transition density."""
+        if self.type_u:
+            ground = self._transition_density_matrix_unrestricted_ground
+            excited = self._transition_density_matrix_unrestricted_excited
+        else:
+            ground = self._transition_density_matrix_restricted_ground
+            excited = self._transition_density_matrix_restricted_excited
+
+        if state_f == 0:
+            return ground(self._physical_excited_state_index(state_i)).conj().T
+        if state_i == 0:
+            return ground(self._physical_excited_state_index(state_f))
+        return excited(
+            self._physical_excited_state_index(state_f),
+            self._physical_excited_state_index(state_i),
+        )
+
+    def nto(self, state_f=1, state_i=0, nroots=None):
+        """Natural transition orbitals using physical state labels."""
         gamma = self.transition_density_matrix(state_f=state_f, state_i=state_i)
         particles, singular_values, holes_h = np.linalg.svd(gamma, full_matrices=False)
         holes = holes_h.conj().T

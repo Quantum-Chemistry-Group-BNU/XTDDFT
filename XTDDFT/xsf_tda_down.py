@@ -1451,18 +1451,30 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         gamma[o, o] -= contract("ut,wt->uw", oo_f, oo_i)
         return gamma
 
-    def transition_density_matrix(self, state_f=1, state_i=0):
-        """Spin-free transition density matrix for state_f <- state_i.
+    def _physical_excited_state_index(self, state):
+        state = int(state)
+        if state < 1:
+            raise ValueError(
+                "XSF-TDA transition densities require excited-state labels starting at 1"
+            )
+        return self._checked_state_index(state - 1)
 
-        Restricted references return the MO order C|O|V.  Unrestricted
-        references return a block-diagonal spin-MO matrix in alpha|beta order.
+    def transition_density_matrix(self, state_f=2, state_i=1):
+        """Spin-free transition density matrix for physical excited states.
+
+        Labels 1, 2, ... denote XSF-TDA excited states. State 0 is the
+        reference ground state and is outside this spin-free transition-density
+        representation. Restricted references return C|O|V MO order;
+        unrestricted references return alpha|beta spin-MO order.
         """
+        state_f = self._physical_excited_state_index(state_f)
+        state_i = self._physical_excited_state_index(state_i)
         if self.type_u:
             return self._transition_density_matrix_u(state_f, state_i)
         return self._transition_density_matrix_r(state_f, state_i)
 
-    def nto(self, state_f=1, state_i=0, nroots=None):
-        """Natural transition orbitals from the spin-free transition density.
+    def nto(self, state_f=2, state_i=1, nroots=None):
+        """Natural transition orbitals using physical excited-state labels.
 
         Returns singular values, hole NTOs, and particle NTOs.  The columns of
         the NTO matrices are ordered by descending singular value.

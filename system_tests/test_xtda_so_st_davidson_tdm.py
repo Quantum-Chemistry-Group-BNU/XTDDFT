@@ -1,3 +1,5 @@
+"""Test XTDA SO/ST basis transformations, Davidson roots, and dipoles."""
+
 import os
 import sys
 from pathlib import Path
@@ -27,6 +29,7 @@ from XTDDFT_dev.utils.backend import set_backend
 
 @pytest.mark.slow
 def test_xtda_so_st_dense_davidson_and_transition_dipoles():
+    """Check SO/ST equivalence, eigenvectors, Davidson roots, and dipoles."""
     set_backend("cpu")
     mol = gto.M(
         atom="""
