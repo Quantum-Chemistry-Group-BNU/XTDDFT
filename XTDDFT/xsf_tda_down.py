@@ -1448,7 +1448,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         gamma[o, v] += factor2 * contract("ut,ub->tb", oo_f, ov_i)
         gamma[o, v] -= factor3 * tr_oo_f * ov_i
         gamma[o, o] += contract("ut,uv->tv", oo_f, oo_i)
-        gamma[o, o] -= contract("ut,wt->uw", oo_f, oo_i)
+        gamma[o, o] -= contract("ut,wt->wu", oo_f, oo_i)
         return gamma
 
     def _physical_excited_state_index(self, state):
@@ -1615,7 +1615,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
                 rij += factor2 * contract("ut,xbt,ub->x", oo0, ints_mo[:, v, o], ov1)
                 rij -= factor3 * contract("uu,xvb,vb->x", oo0, ints_mo[:, o, v], ov1)
                 rij += contract("ut,xtv,uv->x", oo0, ints_mo[:, o, o], oo1)
-                rij -= contract("ut,xuw,wt->x", oo0, ints_mo[:, o, o], oo1)
+                rij -= contract("ut,xwu,wt->x", oo0, ints_mo[:, o, o], oo1)
                 tdm[i, j] = rij
         return tdm
 

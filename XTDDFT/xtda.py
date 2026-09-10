@@ -83,7 +83,7 @@ class XTDA(XTDDFT_base):
     """
 
     def __init__(self, mf, method=0, davidson=True, davidson_backend="cpu",
-                 so2st=False, dense_batch_size=64, jk_batch_size=None,
+                 so2st=True, dense_batch_size=64, jk_batch_size=None,
                  jk_block_split=False, use_delta_a=True, df_cache=None,
                  davidson_matvec_batch_size=None):
         if method != 0:

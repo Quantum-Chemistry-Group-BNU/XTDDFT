@@ -64,6 +64,62 @@ def test_xsf_transition_density_uses_physical_excited_state_labels():
         method.transition_density_matrix(0, 1)
 
 
+def test_xsf_oo_transition_density_uses_hole_index_order():
+    """Check the OO hole term against direct one-electron determinant action."""
+    from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
+
+    method = object.__new__(XSF_TDA_down)
+    method.nc = method.nv = 0
+    method.no = 3
+    method.type_u = False
+    method.re = False
+    method.SA = 3
+    method.ground_s = 1.5
+    method.nstates = 2
+    method.v = np.zeros((9, 2))
+    method.v[3, 0] = 1.0  # final OO amplitude: particle 0, hole 1
+    method.v[6, 1] = 1.0  # initial OO amplitude: particle 0, hole 2
+
+    expected = np.zeros((3, 3))
+    expected[2, 1] = -1.0
+    np.testing.assert_array_equal(method.transition_density_matrix(1, 2), expected)
+
+    operator = np.arange(27.0).reshape(3, 3, 3)
+    method._dipole_mo_integrals = lambda: (operator, None)
+    expected_dipole = np.einsum("xpq,pq->x", operator, expected)
+    np.testing.assert_array_equal(method.transition_dipole_matrix()[0, 1], expected_dipole)
+
+
+def test_sf_up_hole_transition_uses_bra_ket_index_order(monkeypatch):
+    """Check the beta-hole term in the SF-TDA-UP transition properties."""
+    from types import SimpleNamespace
+
+    from XTDDFT_dev.XTDDFT import sf_tda_up
+
+    method = object.__new__(sf_tda_up.SF_TDA_up)
+    method.nc = 2
+    method.nv = 1
+    method.nstates = 2
+    method.v = np.eye(2)
+    method.mf = object()
+    method.ctx = SimpleNamespace(
+        mo_coeff=np.stack([np.eye(3), np.eye(3)]),
+        viridx_a=np.array([2]),
+        occidx_b=np.array([0, 1]),
+    )
+
+    expected = np.zeros((6, 6))
+    expected[4, 3] = -1.0
+    np.testing.assert_array_equal(method.transition_density_matrix(0, 1), expected)
+
+    operator = np.arange(27.0).reshape(3, 3, 3)
+    monkeypatch.setattr(sf_tda_up, "_as_cpu_mf", lambda mf: mf)
+    monkeypatch.setattr(sf_tda_up, "_as_cpu_ctx", lambda mf, ctx: ctx)
+    monkeypatch.setattr(sf_tda_up, "_molecular_dipole_integrals", lambda mf: operator)
+    expected_dipole = np.einsum("xpq,pq->x", operator, expected[3:, 3:])
+    np.testing.assert_array_equal(method.transition_dipole_matrix()[0, 1], expected_dipole)
+
+
 # BDF reference: CH2NH_XTDA_itrans0_resp.out, HF/def2-SVP, raw NACMEs.
 # Both BDF and the Python API use physical labels: S0 is the ground state.
 REFERENCE_DATA = Path(__file__).with_name('CH2NH_XTDA_reference.npz')

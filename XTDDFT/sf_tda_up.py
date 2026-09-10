@@ -391,7 +391,7 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
             for j, c1 in enumerate(amps):
                 tdm[i, j] = (
                     np.einsum("ia,xab,ib->x", c0, r_vv_a, c1, optimize=True)
-                    - np.einsum("ia,xij,ja->x", c0, r_oo_b, c1, optimize=True)
+                    - np.einsum("ia,xji,ja->x", c0, r_oo_b, c1, optimize=True)
                 )
         return tdm
 
