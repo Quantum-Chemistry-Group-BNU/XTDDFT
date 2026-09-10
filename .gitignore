@@ -7,6 +7,7 @@ build/
 .vscode/
 /reference/
 tests_tmp/
+.github/
 
 # macOS system files
 .DS_Store
