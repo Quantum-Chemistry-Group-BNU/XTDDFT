@@ -717,7 +717,6 @@ def gen_response_tda(mf, mo_coeff=None, mo_occ=None, hermi=0,
     return vind
 
 def _gen_response_sf_mc_gpu_mol(mf, mo_coeff, mo_occ, hermi=0, collinear_samples=60, max_memory=None):
-    from gpu4pyscf.tdscf._uhf_resp_sf import nr_uks_fxc_sf
 
     ni = mf._numint
     max_memory = _response_max_memory(mf, max_memory)
@@ -726,11 +725,20 @@ def _gen_response_sf_mc_gpu_mol(mf, mo_coeff, mo_occ, hermi=0, collinear_samples
         mf, mo_coeff, mo_occ, collinear_samples, max_memory
     )
 
-    def apply_xc(dm1):
-        return nr_uks_fxc_sf(
-            ni, mf.mol, mf.grids, mf.xc, None, dm1,
-            0, hermi, None, None, fxc,
-        )
+    # TODO(WHB): Unified version
+    if hasattr(gpu4pyscf.tdscf._uhf_resp_sf, "nr_uks_fxc_sf"):
+        from gpu4pyscf.tdscf._uhf_resp_sf import nr_uks_fxc_sf
+        def apply_xc(dm1):
+            return nr_uks_fxc_sf(
+                ni, mf.mol, mf.grids, mf.xc, None, dm1,
+                0, hermi, None, None, fxc,
+            )
+    else:
+        def apply_xc(dm1):
+            return ni.nr_rks_fxc(
+                mf.mol, mf.grids, mf.xc, None, dm1, 
+                0, hermi, None, None, 2.0 * fxc,
+            )
 
     return _make_gpu_response_vind(mf, xctype, hybrid, omega, alpha, hyb, hermi, apply_xc)
 

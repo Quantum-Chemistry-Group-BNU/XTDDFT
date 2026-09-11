@@ -1,7 +1,5 @@
 #!/usr/bin/env python
-"""
-this example only support cpu backend now.
-"""
+"""Calculate analytic gradients with a CPU or GPU backend."""
 import os
 os.environ["OMP_NUM_THREADS"] = "4"
 os.environ["OMP_DYNAMIC"] = "False"
@@ -14,6 +12,7 @@ from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
 from XTDDFT_dev.XTDDFT.sf_tda_up import SF_TDA_up
 from XTDDFT_dev.XTDDFT.xtda import XTDA
 from XTDDFT_dev.XTDDFT.grad.finite_difference import fd_gradient, fd_gradient_forth
+from XTDDFT_dev.utils.backend import set_backend
 
 
 def parse_xyz_string(xyz: str):
@@ -34,6 +33,7 @@ def parse_xyz_string(xyz: str):
 
 # ===== Manually edit these parameters on the server =====
 method_kind = "xsc"  # "usf_up", "usf_down", "usc", "xsf_up", "xsf_down", "xsc"
+use_gpu = False
 
 xc = "b3lyp"
 basis = '6-31g'
@@ -55,6 +55,7 @@ atom = parse_xyz_string(atom)
 
 
 def main():
+    set_backend("gpu" if use_gpu else "cpu")
     kind = method_kind.lower()
     if kind not in ("usf_up", "usf_down", "usc", "xsf_up", "xsf_down", "xsc"):
         raise ValueError("method_kind must be 'usf_up', 'usf_down'," \
@@ -75,6 +76,8 @@ def main():
     mf.conv_tol = 1e-12
     mf.max_cycle = 200
     mf.grids.level = 5
+    if use_gpu:
+        mf = mf.to_gpu()
     mf.kernel()
 
     if "sf_down" in kind:
@@ -88,8 +91,9 @@ def main():
     td.kernel(nstates=max(max(states), 1) + 2)
 
     for state in states:
-        g_analy = td.nuc_grad_method(state=state)
-        g_analy.kernel()
+        gradient = td.nuc_grad_method(state=state).kernel()
+        print('analytic:\n')
+        print(gradient)
 
         # second order finite difference
         g_fd = fd_gradient(

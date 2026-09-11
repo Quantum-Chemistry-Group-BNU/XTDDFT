@@ -15,7 +15,7 @@ def _reference_family(mf):
 
 
 def nuc_grad_method(td, state=1):
-    from ..base import _is_gpu_mf, _is_pbc_mf
+    from ._backend import validate_gradient_backend
     from ..sf_tda_up import SF_TDA_up
     from ..xsf_tda_down import XSF_TDA_down
     from ..xtda import XTDA
@@ -25,14 +25,7 @@ def nuc_grad_method(td, state=1):
 
     state = int(state)
 
-    if _is_pbc_mf(td.mf):
-        raise NotImplementedError(
-            "Analytic nuclear gradients currently support molecular calculations only"
-        )
-    if _is_gpu_mf(td.mf):
-        raise NotImplementedError(
-            "Analytic nuclear gradients currently support the CPU backend only"
-        )
+    validate_gradient_backend(td.mf)
 
     if getattr(td, "e", None) is None or getattr(td, "v", None) is None:
         raise RuntimeError(

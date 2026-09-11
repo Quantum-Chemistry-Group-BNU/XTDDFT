@@ -18,6 +18,7 @@ from pyscf.geomopt import as_pyscf_method, geometric_solver
 from XTDDFT_dev.XTDDFT.sf_tda_up import SF_TDA_up
 from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
 from XTDDFT_dev.XTDDFT.xtda import XTDA
+from XTDDFT_dev.utils.backend import asnumpy, get_array_module, set_backend
 from XTDDFT_dev.utils.unit import ha2eV
 
 
@@ -32,12 +33,13 @@ SUPPORTED_METHODS = (
 
 # ===== Manually edit these parameters on the server =====
 method_kind = "xsf_down"
+use_gpu = False
 xc = "b3lyp"
 basis = "cc-pvdz"
 spin = 2
 charge = 0
 state = 1
-sf_method = 1
+sf_method = 1  # 1 for multicollinear, 2 for collinear
 collinear_samples = 20
 verbose = 4
 conv_tol = 1e-10
@@ -68,7 +70,7 @@ def _check_method_kind(kind):
     return kind
 
 
-def build_reference(mol, kind=None):
+def build_reference(mol, kind=None, use_gpu=False):
     """Build the ROKS/UKS reference selected by method_kind."""
     kind = method_kind if kind is None else kind
     kind = _check_method_kind(kind)
@@ -77,7 +79,7 @@ def build_reference(mol, kind=None):
     mf.conv_tol = conv_tol
     mf.max_cycle = max_cycle
     mf.grids.level = grids_level
-    return mf
+    return mf.to_gpu() if use_gpu else mf
 
 
 def build_response(mf, kind=None):
@@ -96,9 +98,9 @@ def build_response(mf, kind=None):
     return XSF_TDA_down(mf, **kwargs)
 
 
-def solve_excited(mol, with_gradient=True):
+def solve_excited(mol, with_gradient=True, use_gpu=False):
     """Return the selected excited-state energy and optional gradient."""
-    mf = build_reference(mol)
+    mf = build_reference(mol, use_gpu=use_gpu)
     mf.kernel()
     if not mf.converged:
         raise RuntimeError("SCF did not converge")
@@ -126,6 +128,7 @@ def write_xyz(mol, filename):
 
 def main():
     _check_method_kind(method_kind)
+    set_backend("gpu" if use_gpu else "cpu")
     mol = gto.M(
         atom=atom,
         spin=spin,
@@ -134,7 +137,9 @@ def main():
         verbose=verbose,
     )
 
-    reference = build_reference(mol)
+    reference = build_reference(
+        mol, use_gpu=use_gpu and method_kind.lower().startswith("u")
+    )
     reference.kernel()
     if not reference.converged:
         raise RuntimeError("Reference-state SCF did not converge")
@@ -147,7 +152,7 @@ def main():
 
     def energy_gradient(current_mol):
         start = time.perf_counter()
-        mf = build_reference(current_mol)
+        mf = build_reference(current_mol, use_gpu=use_gpu)
         mf.kernel()
         if not mf.converged:
             raise RuntimeError("SCF did not converge")
@@ -165,12 +170,13 @@ def main():
         gradient = td.nuc_grad_method(state=state).kernel()
         timings["gradient"].append(time.perf_counter() - start)
 
+        gradient_norm = get_array_module(gradient).linalg.norm(gradient)
         print(
             f"E(SCF)={mf.e_tot:.12f}  omega[{state}]={td.e[state - 1]:.12f}  "
-            f"E(total)={energy:.12f}  |g|={np.linalg.norm(gradient):.6e}"
+            f"E(total)={energy:.12f}  |g|={float(gradient_norm):.6e}"
         )
         write_xyz(current_mol, trajectory_file)
-        return energy, gradient
+        return float(energy), asnumpy(gradient)
 
     start = time.perf_counter()
     method = as_pyscf_method(mol_reference, energy_gradient)
@@ -188,12 +194,12 @@ def main():
     print("Excited-state geometry (Bohr)")
     print(mol_excited.atom_coords())
 
-    final_reference = build_reference(mol_reference)
+    final_reference = build_reference(mol_reference, use_gpu=use_gpu)
     final_reference.kernel()
     if not final_reference.converged:
         raise RuntimeError("Final reference-state SCF did not converge")
     _, final_td, excited_energy, _ = solve_excited(
-        mol_excited, with_gradient=False
+        mol_excited, with_gradient=False, use_gpu=use_gpu
     )
     final_td.analyse()
 

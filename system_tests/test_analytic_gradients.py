@@ -78,6 +78,17 @@ def test_analytic_gradient_smoke(reference, channel, method):
     np.testing.assert_allclose(td.mf.mo_occ, mo_occ)
 
 
+def test_uks_sc_analytic_gradient_honors_nontrivial_atmlst():
+    td = solve_td("uks", "sc", 0)
+    gradient_method = td.nuc_grad_method(state=1)
+
+    full = gradient_method.kernel()
+    selected = gradient_method.kernel(atmlst=[1, 3])
+
+    assert selected.shape == (2, 3)
+    np.testing.assert_allclose(selected, full[[1, 3]], atol=1e-12, rtol=1e-12)
+
+
 def displaced_atom(atom_index, axis, displacement):
     atom = [(symbol, np.array(coord, dtype=float)) for symbol, coord in ATOM]
     atom[atom_index][1][axis] += displacement

@@ -8,6 +8,231 @@ from ...utils.backend import asnumpy
 from ._backend import array_module, is_gpu_mf, nuclear_gradient, ucphf_module
 
 
+def jk_energies_per_atom(
+        mf, dm_list, j_factor=None, k_factor=None,
+        omega=None, lr_factor=None, sr_factor=None,
+        hermi=0, sum_results=False, verbose=None
+    ):
+    """
+    Computes a set of first-order derivatives of J/K contributions for each
+    element (density matrix or a pair of density matrices) in dm_pairs.
+
+    This function supports evaluating multiple sets of energy derivatives in a
+    single call. Additionally, for each set, the two density matrices for the
+    four-index Coulomb integrals can be different.
+
+    Args:
+        dm_list :
+            A list of density-matrix-pairs [[dm, dm], [dm, dm], ...].
+            Each element corresponds to one set of energy derivative.
+        j_factor :
+            A list of factors for Coulomb (J) term
+        k_factor :
+            A list of factors for Coulomb (K) term
+        hermi :
+            No effects
+        sum_results : bool
+            If True, aggregate all sets of derivatives into a single result.
+
+    Returns:
+        An array of shape (*, Natm, 3) if sum_results is False; otherwise,
+        an array of shape (Natm, 3).
+    """
+    from gpu4pyscf.grad.tdrhf import _jk_energies_per_atom
+    xp = array_module(mf)
+    vhfopt = mf._opt_gpu.get(omega)
+    if vhfopt is None:
+        from gpu4pyscf.scf.jk import _VHFOpt
+        # For LDA and GGA, only mf._opt_jengine is initialized
+        mol = mf.mol
+        with mol.with_range_coulomb(omega):
+            vhfopt = mf._opt_gpu[omega] = _VHFOpt(mol, mf.direct_scf_tol).build()
+    if isinstance(dm_list, xp.ndarray) and dm_list.ndim == 2:
+        dm_list = dm_list[None]
+    ejk = _jk_energies_per_atom(vhfopt, dm_list, j_factor, k_factor,
+                                omega=omega, lr_factor=lr_factor, sr_factor=sr_factor,
+                                sum_results=sum_results, verbose=verbose)
+    return ejk
+
+
+# dmov, dmoo in AO-representation
+# Note spin-trace is applied for fxc, kxc
+#TODO: to include the response of grids
+def _contract_xc_kernel(td_grad, xc_code, dmvo, dmoo=None, with_vxc=True,
+                        with_kxc=True, max_memory=2000):
+    mol = td_grad.mol
+    mf = td_grad.base._scf
+    grids = mf.grids
+    ni = mf._numint
+    xctype = ni._xc_type(xc_code)
+    gpu = is_gpu_mf(mf)
+    xp = array_module(mf)
+    mo_coeff = xp.asarray(mf.mo_coeff)
+    mo_occ = xp.asarray(mf.mo_occ)
+    nao = mo_coeff[0].shape[0]
+    shls_slice = (0, mol.nbas)
+    ao_loc = mol.ao_loc_nr()
+
+    dmvo = xp.asarray(((dmvo[0] + dmvo[0].T) * .5,
+                       (dmvo[1] + dmvo[1].T) * .5))
+    if dmoo is not None:
+        dmoo = xp.asarray(dmoo)
+
+    eval_mol = mol
+    if gpu:
+        if not all(xcfun.on_gpu
+                   for xcfun, _ in ni._init_xcfuns(xc_code, spin=1)):
+            raise NotImplementedError(
+                f"GPU analytic gradients require GPU-native LibXC components; "
+                f"{xc_code!r} would use a CPU fallback"
+            )
+        from gpu4pyscf.grad import tdrks as gpu_tdrks_grad
+        from gpu4pyscf.lib.cupy_helper import contract as gpu_contract
+
+        opt = getattr(ni, "gdftopt", None)
+        if opt is None:
+            ni.build(mol, grids.coords)
+            opt = ni.gdftopt
+        eval_mol = opt._sorted_mol
+        mo_coeff = opt.sort_orbitals(mo_coeff, axis=[1])
+        dmvo = opt.sort_orbitals(dmvo, axis=[1, 2])
+        if dmoo is not None:
+            dmoo = opt.sort_orbitals(dmoo, axis=[1, 2])
+
+    f1vo = xp.zeros((2,4,nao,nao))
+    deriv = 2
+    if dmoo is not None:
+        f1oo = xp.zeros((2,4,nao,nao))
+    else:
+        f1oo = None
+    if with_vxc:
+        v1ao = xp.zeros((2,4,nao,nao))
+    else:
+        v1ao = None
+    if with_kxc:
+        k1ao = xp.zeros((2,4,nao,nao))
+        deriv = 3
+    else:
+        k1ao = None
+
+    if xctype == 'HF':
+        return f1vo, f1oo, v1ao, k1ao
+    elif xctype == 'LDA':
+        fmat_, ao_deriv = (
+            (gpu_tdrks_grad._lda_eval_mat_ if gpu else tdrks_grad._lda_eval_mat_), 1
+        )
+    elif xctype == 'GGA':
+        fmat_, ao_deriv = (
+            (gpu_tdrks_grad._gga_eval_mat_ if gpu else tdrks_grad._gga_eval_mat_), 2
+        )
+    elif xctype == 'MGGA':
+        fmat_, ao_deriv = (
+            (gpu_tdrks_grad._mgga_eval_mat_ if gpu else tdrks_grad._mgga_eval_mat_), 2
+        )
+        logger.warn(td_grad, 'TDUKS-MGGA Gradients may be inaccurate due to grids response')
+    else:
+        raise NotImplementedError(f'td-uks for functional {xc_code}')
+
+    if mf.do_nlc():
+        raise NotImplementedError("TDDFT gradient with NLC contribution is not supported yet. "
+                                  "Please set exclude_nlc field of tdscf object to True, "
+                                  "which will turn off NLC contribution in the whole TDDFT calculation.")
+
+    if gpu:
+        block_loop = ni.block_loop(eval_mol, grids, nao, ao_deriv)
+    else:
+        block_loop = ni.block_loop(mol, grids, nao, ao_deriv, max_memory)
+
+    for ao, mask, weight, coords in block_loop:
+        if xctype == 'LDA':
+            ao0 = ao[0]
+        else:
+            ao0 = ao
+        if gpu:
+            coeff_a = mo_coeff[0, mask]
+            coeff_b = mo_coeff[1, mask]
+            dmvo_a = dmvo[0, mask[:, None], mask]
+            dmvo_b = dmvo[1, mask[:, None], mask]
+        else:
+            coeff_a, coeff_b = mo_coeff
+            dmvo_a, dmvo_b = dmvo
+
+        rho = xp.asarray((
+            ni.eval_rho2(eval_mol, ao0, coeff_a, mo_occ[0], mask, xctype, with_lapl=False),
+            ni.eval_rho2(eval_mol, ao0, coeff_b, mo_occ[1], mask, xctype, with_lapl=False),
+        ))
+        #TODO(WHB): libxc gpu version used in gpu4pyscf may have problem
+        vxc, fxc, kxc = ni.eval_xc_eff(
+            xc_code, rho, deriv, xctype=xctype
+        )[1:]
+
+        rho1 = xp.asarray((
+            ni.eval_rho(eval_mol, ao0, dmvo_a, mask, xctype, hermi=1, with_lapl=False),
+            ni.eval_rho(eval_mol, ao0, dmvo_b, mask, xctype, hermi=1, with_lapl=False),
+        ))
+        if xctype == 'LDA':
+            rho1 = rho1[:,xp.newaxis].copy()
+        if gpu:
+            tmp = gpu_contract('axg,axbyg->byg', rho1, fxc)
+            wv = gpu_contract('byg,g->byg', tmp, weight)
+        else:
+            wv = xp.einsum('axg,axbyg,g->byg', rho1, fxc, weight)
+        fmat_(eval_mol, f1vo[0], ao, wv[0], mask, shls_slice, ao_loc)
+        fmat_(eval_mol, f1vo[1], ao, wv[1], mask, shls_slice, ao_loc)
+
+        if dmoo is not None:
+            if gpu:
+                dmoo_a = dmoo[0, mask[:, None], mask]
+                dmoo_b = dmoo[1, mask[:, None], mask]
+            else:
+                dmoo_a, dmoo_b = dmoo
+            rho2 = xp.asarray((
+                ni.eval_rho(eval_mol, ao0, dmoo_a, mask, xctype, hermi=1, with_lapl=False),
+                ni.eval_rho(eval_mol, ao0, dmoo_b, mask, xctype, hermi=1, with_lapl=False),
+            ))
+            if xctype == 'LDA':
+                rho2 = rho2[:,xp.newaxis].copy()
+            if gpu:
+                tmp = gpu_contract('axg,axbyg->byg', rho2, fxc)
+                wv = gpu_contract('byg,g->byg', tmp, weight)
+            else:
+                wv = xp.einsum('axg,axbyg,g->byg', rho2, fxc, weight)
+            fmat_(eval_mol, f1oo[0], ao, wv[0], mask, shls_slice, ao_loc)
+            fmat_(eval_mol, f1oo[1], ao, wv[1], mask, shls_slice, ao_loc)
+        if with_vxc:
+            wv = vxc * weight
+            fmat_(eval_mol, v1ao[0], ao, wv[0], mask, shls_slice, ao_loc)
+            fmat_(eval_mol, v1ao[1], ao, wv[1], mask, shls_slice, ao_loc)
+        if with_kxc:
+            if gpu:
+                tmp = gpu_contract('axg,axbyczg->byczg', rho1, kxc)
+                tmp = gpu_contract('byg,byczg->czg', rho1, tmp)
+                wv = gpu_contract('czg,g->czg', tmp, weight)
+            else:
+                wv = xp.einsum(
+                    'axg,byg,axbyczg,g->czg', rho1, rho1, kxc, weight
+                )
+            fmat_(eval_mol, k1ao[0], ao, wv[0], mask, shls_slice, ao_loc)
+            fmat_(eval_mol, k1ao[1], ao, wv[1], mask, shls_slice, ao_loc)
+
+    f1vo[:,1:] *= -1
+    if gpu:
+        f1vo = opt.unsort_orbitals(f1vo, axis=[2, 3])
+    if f1oo is not None:
+        f1oo[:,1:] *= -1
+        if gpu:
+            f1oo = opt.unsort_orbitals(f1oo, axis=[2, 3])
+    if v1ao is not None:
+        v1ao[:,1:] *= -1
+        if gpu:
+            v1ao = opt.unsort_orbitals(v1ao, axis=[2, 3])
+    if k1ao is not None:
+        k1ao[:,1:] *= -1
+        if gpu:
+            k1ao = opt.unsort_orbitals(k1ao, axis=[2, 3])
+    return f1vo, f1oo, v1ao, k1ao
+
+
 #
 # Given Y = 0, TDHF gradients (XAX+XBY+YBX+YAY)^1 turn to TDA gradients (XAX)^1
 #
@@ -28,6 +253,7 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
     mf = td.base._scf
     mol = td.mol
     xp = array_module(mf)
+    gpu = is_gpu_mf(mf)
     mo_energy = xp.asarray(mf.mo_energy)
     mo_coeff = xp.asarray(mf.mo_coeff)
     mo_occ = xp.asarray(mf.mo_occ)
@@ -164,88 +390,60 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
     dmz1doob = z1ao[1] + dmzb
     oo0a = orbo_a @ orbo_a.T
     oo0b = orbo_b @ orbo_b.T
+    as_dm1 = oo0a + oo0b + dmz1dooa + dmz1doob  # follow CPU version naming convention
+    as_dm1 = (as_dm1 + as_dm1.T) * 0.5
+    mf_grad = mf.nuc_grad_method()
 
     fxcz1 = _contract_xc_kernel(
         td, mf.xc, z1ao, None, False, False, max_memory
     )[0]
 
-    if is_gpu_mf(mf):
-        from gpu4pyscf.grad import tduks as gpu_tduks_grad, uhf as gpu_uhf_grad
+    if gpu:
+        # gpu4pyscf-v1.8.1 not refactor grad/tduhf.py
+        from gpu4pyscf.grad import tduks as gpu_tduks_grad
+        from gpu4pyscf.grad import rhf as gpu_rhf_grad
 
-        gpu_rhf_grad = gpu_uhf_grad.rhf_grad
-        mf_grad = mf.nuc_grad_method()
         h1 = xp.asarray(mf_grad.get_hcore(mol))
         s1 = xp.asarray(mf_grad.get_ovlp(mol))
-        dh_ground = xp.asarray(
-            gpu_rhf_grad.contract_h1e_dm(mol, h1, oo0a + oo0b, hermi=1)
-        )
-        dh_td = xp.asarray(
-            gpu_rhf_grad.contract_h1e_dm(
-                mol, h1, dmz1dooa + dmz1doob, hermi=0
-            )
-        )
-        ds = xp.asarray(gpu_rhf_grad.contract_h1e_dm(mol, s1, im0, hermi=0))
-
-        dh1e_ground = gpu_uhf_grad.int3c2e.get_dh1e(mol, oo0a + oo0b)
-        dmz1doo = dmz1dooa + dmz1doob
-        dmz1doo = (dmz1doo + dmz1doo.T) * .5
-        dh1e_td = gpu_uhf_grad.int3c2e.get_dh1e(mol, dmz1doo)
-        if len(mol._ecpbas) > 0:
-            dh1e_ground += gpu_rhf_grad.get_dh1e_ecp(mol, oo0a + oo0b)
-            dh1e_td += gpu_rhf_grad.get_dh1e_ecp(mol, dmz1doo)
-        if mol._pseudo:
-            raise NotImplementedError(
-                "Pseudopotential gradient not supported for molecular system yet"
-            )
+        dh_ground_and_td = gpu_rhf_grad.contract_h1e_dm(mol, h1, as_dm1, hermi=1)
+        ds = gpu_rhf_grad.contract_h1e_dm(mol, s1, im0, hermi=0)
+        dh1e_ground_and_td = gpu_rhf_grad.int3c2e.get_dh1e(mol, as_dm1)  # 1/r like terms
 
         get_veff = gpu_tduks_grad.Gradients.get_veff
         k_factor = hyb if with_k else 0.0
-        dvhf = xp.asarray(get_veff(
+        dvhf = get_veff(
             td, mol,
             xp.stack(((dmz1dooa + dmz1dooa.T) * .5 + oo0a,
                       (dmz1doob + dmz1doob.T) * .5 + oo0b)),
             1.0, k_factor, hermi=1,
-        ))
-        dvhf -= xp.asarray(get_veff(
+        )
+        dvhf -= get_veff(
             td, mol,
             xp.stack(((dmz1dooa + dmz1dooa.T) * .5,
                       (dmz1doob + dmz1doob.T) * .5)),
             1.0, k_factor, hermi=1,
-        ))
-        dvhf += 2 * xp.asarray(get_veff(
+        )
+        dvhf += 2 * get_veff(
             td, mol,
             xp.stack(((dmxa + dmxa.T) * .5, (dmxb + dmxb.T) * .5)),
             1.0, k_factor, hermi=1,
-        ))
-        dvhf -= 2 * xp.asarray(get_veff(
+        )
+        dvhf -= 2 * get_veff(
             td, mol,
             xp.stack(((dmxa - dmxa.T) * .5, (dmxb - dmxb.T) * .5)),
             0.0, k_factor, hermi=2,
-        ))
-
-        dveff1_0 = xp.asarray(gpu_rhf_grad.contract_h1e_dm(
-            mol, vxc1[0, 1:], oo0a + dmz1dooa, hermi=0
-        ))
-        dveff1_0 += xp.asarray(gpu_rhf_grad.contract_h1e_dm(
-            mol, vxc1[1, 1:], oo0b + dmz1doob, hermi=0
-        ))
-        veff1_1 = f1oo[:, 1:] + fxcz1[:, 1:] + k1ao[:, 1:]
-        dveff1_1 = xp.asarray(gpu_rhf_grad.contract_h1e_dm(
-            mol, veff1_1[0], oo0a, hermi=1
-        ))
-        dveff1_1 += xp.asarray(gpu_rhf_grad.contract_h1e_dm(
-            mol, veff1_1[1], oo0b, hermi=1
-        ))
-        dveff1_2 = xp.asarray(gpu_rhf_grad.contract_h1e_dm(
-            mol, f1vo[0, 1:] * 2, dmxa, hermi=0
-        ))
-        dveff1_2 += xp.asarray(gpu_rhf_grad.contract_h1e_dm(
-            mol, f1vo[1, 1:] * 2, dmxb, hermi=0
-        ))
-        de = (
-            dh_ground + dh_td - ds + dh1e_ground + dh1e_td + 2 * dvhf
-            + dveff1_0 + dveff1_1 + dveff1_2
         )
+
+        de = dh_ground_and_td + xp.asnumpy(dh1e_ground_and_td) - ds + 2 * dvhf
+        dveff1_0 = gpu_rhf_grad.contract_h1e_dm(mol, vxc1[0, 1:], oo0a + dmz1dooa, hermi=0)
+        dveff1_0 += gpu_rhf_grad.contract_h1e_dm(mol, vxc1[1, 1:], oo0b + dmz1doob, hermi=0)
+        veff1_1 = f1oo[:, 1:] + fxcz1[:, 1:] + k1ao[:, 1:]
+        dveff1_1 = gpu_rhf_grad.contract_h1e_dm(mol, veff1_1[0], oo0a, hermi=1)
+        dveff1_1 += gpu_rhf_grad.contract_h1e_dm(mol, veff1_1[1], oo0b, hermi=1)
+        dveff1_2 = gpu_rhf_grad.contract_h1e_dm(mol, f1vo[0, 1:] * 2, dmxa, hermi=0)
+        dveff1_2 += gpu_rhf_grad.contract_h1e_dm(mol, f1vo[1, 1:] * 2, dmxb, hermi=0)
+        de += dveff1_0 + dveff1_1 + dveff1_2
+        de = xp.asarray(de)
         if atmlst is not None:
             de = de[xp.asarray(tuple(atmlst), dtype=int)]
     else:
@@ -310,183 +508,6 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
 
     log.timer('TDUKS nuclear gradients', *time0)
     return de
-
-
-# dmov, dmoo in AO-representation
-# Note spin-trace is applied for fxc, kxc
-#TODO: to include the response of grids
-def _contract_xc_kernel(td_grad, xc_code, dmvo, dmoo=None, with_vxc=True,
-                        with_kxc=True, max_memory=2000):
-    mol = td_grad.mol
-    mf = td_grad.base._scf
-    grids = mf.grids
-    ni = mf._numint
-    xctype = ni._xc_type(xc_code)
-    gpu = is_gpu_mf(mf)
-    xp = array_module(mf)
-    mo_coeff = xp.asarray(mf.mo_coeff)
-    mo_occ = xp.asarray(mf.mo_occ)
-    nao = mo_coeff[0].shape[0]
-    shls_slice = (0, mol.nbas)
-    ao_loc = mol.ao_loc_nr()
-
-    dmvo = xp.asarray(((dmvo[0] + dmvo[0].T) * .5,
-                       (dmvo[1] + dmvo[1].T) * .5))
-    if dmoo is not None:
-        dmoo = xp.asarray(dmoo)
-
-    eval_mol = mol
-    if gpu:
-        if not all(xcfun.on_gpu
-                   for xcfun, _ in ni._init_xcfuns(xc_code, spin=1)):
-            raise NotImplementedError(
-                f"GPU analytic gradients require GPU-native LibXC components; "
-                f"{xc_code!r} would use a CPU fallback"
-            )
-        from gpu4pyscf.grad import tdrks as gpu_tdrks_grad
-        from gpu4pyscf.lib.cupy_helper import contract as gpu_contract
-
-        opt = getattr(ni, "gdftopt", None)
-        if opt is None:
-            ni.build(mol, grids.coords)
-            opt = ni.gdftopt
-        eval_mol = opt._sorted_mol
-        mo_coeff = opt.sort_orbitals(mo_coeff, axis=[1])
-        dmvo = opt.sort_orbitals(dmvo, axis=[1, 2])
-        if dmoo is not None:
-            dmoo = opt.sort_orbitals(dmoo, axis=[1, 2])
-
-    f1vo = xp.zeros((2,4,nao,nao))
-    deriv = 2
-    if dmoo is not None:
-        f1oo = xp.zeros((2,4,nao,nao))
-    else:
-        f1oo = None
-    if with_vxc:
-        v1ao = xp.zeros((2,4,nao,nao))
-    else:
-        v1ao = None
-    if with_kxc:
-        k1ao = xp.zeros((2,4,nao,nao))
-        deriv = 3
-    else:
-        k1ao = None
-
-    if xctype == 'HF':
-        return f1vo, f1oo, v1ao, k1ao
-    elif xctype == 'LDA':
-        fmat_, ao_deriv = (
-            (gpu_tdrks_grad._lda_eval_mat_ if gpu else tdrks_grad._lda_eval_mat_), 1
-        )
-    elif xctype == 'GGA':
-        fmat_, ao_deriv = (
-            (gpu_tdrks_grad._gga_eval_mat_ if gpu else tdrks_grad._gga_eval_mat_), 2
-        )
-    elif xctype == 'MGGA':
-        fmat_, ao_deriv = (
-            (gpu_tdrks_grad._mgga_eval_mat_ if gpu else tdrks_grad._mgga_eval_mat_), 2
-        )
-        logger.warn(td_grad, 'TDUKS-MGGA Gradients may be inaccurate due to grids response')
-    else:
-        raise NotImplementedError(f'td-uks for functional {xc_code}')
-
-    if mf.do_nlc():
-        raise NotImplementedError("TDDFT gradient with NLC contribution is not supported yet. "
-                                  "Please set exclude_nlc field of tdscf object to True, "
-                                  "which will turn off NLC contribution in the whole TDDFT calculation.")
-
-    if gpu:
-        block_loop = ni.block_loop(eval_mol, grids, nao, ao_deriv)
-    else:
-        block_loop = ni.block_loop(mol, grids, nao, ao_deriv, max_memory)
-
-    for ao, mask, weight, coords in block_loop:
-        if xctype == 'LDA':
-            ao0 = ao[0]
-        else:
-            ao0 = ao
-        if gpu:
-            coeff_a = mo_coeff[0, mask]
-            coeff_b = mo_coeff[1, mask]
-            dmvo_a = dmvo[0, mask[:, None], mask]
-            dmvo_b = dmvo[1, mask[:, None], mask]
-        else:
-            coeff_a, coeff_b = mo_coeff
-            dmvo_a, dmvo_b = dmvo
-
-        rho = xp.asarray((
-            ni.eval_rho2(eval_mol, ao0, coeff_a, mo_occ[0], mask, xctype, with_lapl=False),
-            ni.eval_rho2(eval_mol, ao0, coeff_b, mo_occ[1], mask, xctype, with_lapl=False),
-        ))
-        vxc, fxc, kxc = ni.eval_xc_eff(
-            xc_code, rho, deriv, xctype=xctype
-        )[1:]
-
-        rho1 = xp.asarray((
-            ni.eval_rho(eval_mol, ao0, dmvo_a, mask, xctype, hermi=1, with_lapl=False),
-            ni.eval_rho(eval_mol, ao0, dmvo_b, mask, xctype, hermi=1, with_lapl=False),
-        ))
-        if xctype == 'LDA':
-            rho1 = rho1[:,xp.newaxis].copy()
-        if gpu:
-            tmp = gpu_contract('axg,axbyg->byg', rho1, fxc)
-            wv = gpu_contract('byg,g->byg', tmp, weight)
-        else:
-            wv = xp.einsum('axg,axbyg,g->byg', rho1, fxc, weight)
-        fmat_(eval_mol, f1vo[0], ao, wv[0], mask, shls_slice, ao_loc)
-        fmat_(eval_mol, f1vo[1], ao, wv[1], mask, shls_slice, ao_loc)
-
-        if dmoo is not None:
-            if gpu:
-                dmoo_a = dmoo[0, mask[:, None], mask]
-                dmoo_b = dmoo[1, mask[:, None], mask]
-            else:
-                dmoo_a, dmoo_b = dmoo
-            rho2 = xp.asarray((
-                ni.eval_rho(eval_mol, ao0, dmoo_a, mask, xctype, hermi=1, with_lapl=False),
-                ni.eval_rho(eval_mol, ao0, dmoo_b, mask, xctype, hermi=1, with_lapl=False),
-            ))
-            if xctype == 'LDA':
-                rho2 = rho2[:,xp.newaxis].copy()
-            if gpu:
-                tmp = gpu_contract('axg,axbyg->byg', rho2, fxc)
-                wv = gpu_contract('byg,g->byg', tmp, weight)
-            else:
-                wv = xp.einsum('axg,axbyg,g->byg', rho2, fxc, weight)
-            fmat_(eval_mol, f1oo[0], ao, wv[0], mask, shls_slice, ao_loc)
-            fmat_(eval_mol, f1oo[1], ao, wv[1], mask, shls_slice, ao_loc)
-        if with_vxc:
-            wv = vxc * weight
-            fmat_(eval_mol, v1ao[0], ao, wv[0], mask, shls_slice, ao_loc)
-            fmat_(eval_mol, v1ao[1], ao, wv[1], mask, shls_slice, ao_loc)
-        if with_kxc:
-            if gpu:
-                tmp = gpu_contract('axg,axbyczg->byczg', rho1, kxc)
-                tmp = gpu_contract('byg,byczg->czg', rho1, tmp)
-                wv = gpu_contract('czg,g->czg', tmp, weight)
-            else:
-                wv = xp.einsum(
-                    'axg,byg,axbyczg,g->czg', rho1, rho1, kxc, weight
-                )
-            fmat_(eval_mol, k1ao[0], ao, wv[0], mask, shls_slice, ao_loc)
-            fmat_(eval_mol, k1ao[1], ao, wv[1], mask, shls_slice, ao_loc)
-
-    f1vo[:,1:] *= -1
-    if gpu:
-        f1vo = opt.unsort_orbitals(f1vo, axis=[2, 3])
-    if f1oo is not None:
-        f1oo[:,1:] *= -1
-        if gpu:
-            f1oo = opt.unsort_orbitals(f1oo, axis=[2, 3])
-    if v1ao is not None:
-        v1ao[:,1:] *= -1
-        if gpu:
-            v1ao = opt.unsort_orbitals(v1ao, axis=[2, 3])
-    if k1ao is not None:
-        k1ao[:,1:] *= -1
-        if gpu:
-            k1ao = opt.unsort_orbitals(k1ao, axis=[2, 3])
-    return f1vo, f1oo, v1ao, k1ao
 
 
 class SC_gradient(uhf_grad.Gradients):

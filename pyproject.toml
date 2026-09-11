@@ -56,4 +56,5 @@ packages = ["XTDDFT_dev", "XTDDFT_dev.XTDDFT", "XTDDFT_dev.XTDDFT.soc", "XTDDFT_
 [tool.pytest.ini_options]
 markers = [
   "slow: numerical finite-difference tests",
+  "gpu: requires CuPy, GPU4PySCF, and a working CUDA device",
 ]

@@ -1,5 +1,5 @@
 <div align="left">
-  <img src="./docs/logo-xtddft.jpg" height="80px"/>
+  <img src="./docs/logo/logo-xtddft.jpg" height="80px"/>
 </div>
 
 # XTDDFT_dev
