@@ -6,7 +6,7 @@ PROJECT_PARENT = Path(__file__).resolve().parent.parent
 if str(PROJECT_PARENT) not in sys.path:
     sys.path.insert(0, str(PROJECT_PARENT))
 
-from XTDDFT_dev.utils.backend import set_backend
+from XTDDFT.utils.backend import set_backend
 
 set_backend("cpu")
 
