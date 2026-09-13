@@ -11,3 +11,6 @@ tests_tmp/
 
 # macOS system files
 .DS_Store
+
+# pip install -e . will create this folder
+*.egg-info/

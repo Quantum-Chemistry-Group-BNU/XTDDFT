@@ -22,7 +22,8 @@ dependencies = [
   "opt_einsum",
   "psutil",
   "spglib",
-  "libmsym",
+  # libmsym-dependent symmetry features are available on Linux only.
+  "libmsym; platform_system == 'Linux' or platform_system == 'Windows'",
   "sympy",
 ]
 

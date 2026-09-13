@@ -2,7 +2,7 @@
   <img src="./docs/logo/logo-xtddft.jpg" height="80px"/>
 </div>
 
-# XTDDFT_dev
+# XTDDFT
 
 Spin-adapted time-dependent density functional theory for open-shell systems.
 The current development code is on the `main` branch. Response classes are

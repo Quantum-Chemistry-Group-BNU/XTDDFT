@@ -7,4 +7,4 @@ joblib
 opt_einsum
 psutil
 spglib
-libmsym
+libmsym; platform_system == "Linux" or platform_system == "Windows"
