@@ -17,7 +17,7 @@ PROJECT_PARENT = ROOT.parent
 if str(PROJECT_PARENT) not in sys.path:
     sys.path.insert(0, str(PROJECT_PARENT))
 
-from XTDDFT_dev.XTDDFT.nac.nac import (
+from XTDDFT.XTDDFT.nac.nac import (
     _state_pairs,
     align_amplitudes,
     signed_permutation,
@@ -47,7 +47,7 @@ def test_one_pair_is_normalized_to_a_matrix():
 
 
 def test_xsf_transition_density_uses_physical_excited_state_labels():
-    from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
+    from XTDDFT.XTDDFT.xsf_tda_down import XSF_TDA_down
 
     method = object.__new__(XSF_TDA_down)
     method.type_u = False
@@ -66,7 +66,7 @@ def test_xsf_transition_density_uses_physical_excited_state_labels():
 
 def test_xsf_oo_transition_density_uses_hole_index_order():
     """Check the OO hole term against direct one-electron determinant action."""
-    from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
+    from XTDDFT.XTDDFT.xsf_tda_down import XSF_TDA_down
 
     method = object.__new__(XSF_TDA_down)
     method.nc = method.nv = 0
@@ -94,7 +94,7 @@ def test_sf_up_hole_transition_uses_bra_ket_index_order(monkeypatch):
     """Check the beta-hole term in the SF-TDA-UP transition properties."""
     from types import SimpleNamespace
 
-    from XTDDFT_dev.XTDDFT import sf_tda_up
+    from XTDDFT.XTDDFT import sf_tda_up
 
     method = object.__new__(sf_tda_up.SF_TDA_up)
     method.nc = 2
@@ -152,8 +152,8 @@ def test_ch2nh_hf_def2svp_nac_matches_bdf():
     """Compare XTDA energies/TDMs and all S0-S6 NAC pairs with BDF."""
     from pyscf import dft, gto, lib
 
-    from XTDDFT_dev.XTDDFT.xtda import XTDA
-    from XTDDFT_dev.utils.backend import set_backend
+    from XTDDFT.XTDDFT.xtda import XTDA
+    from XTDDFT.utils.backend import set_backend
 
     set_backend('cpu')
     lib.num_threads(2)

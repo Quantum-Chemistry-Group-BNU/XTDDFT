@@ -11,7 +11,7 @@ from pyscf import dft, gto, tdscf
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parent))
 
-from XTDDFT_dev.XTDDFT.xtda import XTDA
+from XTDDFT.XTDDFT.xtda import XTDA
 
 
 def _compare_utda_transition_dipoles():

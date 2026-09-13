@@ -15,11 +15,11 @@ import numpy as np
 from pyscf import gto, scf
 from pyscf.geomopt import as_pyscf_method, geometric_solver
 
-from XTDDFT_dev.XTDDFT.sf_tda_up import SF_TDA_up
-from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
-from XTDDFT_dev.XTDDFT.xtda import XTDA
-from XTDDFT_dev.utils.backend import asnumpy, get_array_module, set_backend
-from XTDDFT_dev.utils.unit import ha2eV
+from XTDDFT.XTDDFT.sf_tda_up import SF_TDA_up
+from XTDDFT.XTDDFT.xsf_tda_down import XSF_TDA_down
+from XTDDFT.XTDDFT.xtda import XTDA
+from XTDDFT.utils.backend import asnumpy, get_array_module, set_backend
+from XTDDFT.utils.unit import ha2eV
 
 
 SUPPORTED_METHODS = (

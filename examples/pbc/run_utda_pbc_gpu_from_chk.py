@@ -15,8 +15,8 @@ import numpy as np
 from pyscf.pbc.scf import chkfile as pbc_chkfile
 from pyscf.pbc import dft as pbcdft
 
-from XTDDFT_dev.utils.backend import backend_info, set_backend
-from XTDDFT_dev.XTDDFT.xtda import XTDA
+from XTDDFT.utils.backend import backend_info, set_backend
+from XTDDFT.XTDDFT.xtda import XTDA
 
 
 def load_becke_grids(mf, cell, filename, level=4):

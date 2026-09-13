@@ -7,12 +7,13 @@ os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 import numpy as np
+from time import perf_counter
 from pyscf import gto, scf
-from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
-from XTDDFT_dev.XTDDFT.sf_tda_up import SF_TDA_up
-from XTDDFT_dev.XTDDFT.xtda import XTDA
-from XTDDFT_dev.XTDDFT.grad.finite_difference import fd_gradient, fd_gradient_forth
-from XTDDFT_dev.utils.backend import set_backend
+from XTDDFT.XTDDFT.xsf_tda_down import XSF_TDA_down
+from XTDDFT.XTDDFT.sf_tda_up import SF_TDA_up
+from XTDDFT.XTDDFT.xtda import XTDA
+from XTDDFT.XTDDFT.grad.finite_difference import fd_gradient, fd_gradient_forth
+from XTDDFT.utils.backend import set_backend
 
 
 def parse_xyz_string(xyz: str):
@@ -55,12 +56,16 @@ atom = parse_xyz_string(atom)
 
 
 def main():
+    if use_gpu:
+        import cupy as cp
     set_backend("gpu" if use_gpu else "cpu")
     kind = method_kind.lower()
     if kind not in ("usf_up", "usf_down", "usc", "xsf_up", "xsf_down", "xsc"):
         raise ValueError("method_kind must be 'usf_up', 'usf_down'," \
         " 'usc', 'xsf_up', 'xsf_down', 'xsc'")
 
+    cp.cuda.runtime.deviceSynchronize()
+    time0 = perf_counter()
     mol = gto.M(
         atom = atom,
         spin = spin,
@@ -79,6 +84,9 @@ def main():
     if use_gpu:
         mf = mf.to_gpu()
     mf.kernel()
+    cp.cuda.runtime.deviceSynchronize()
+    time1 = perf_counter()
+    print(f"SCF: {time1 - time0:.3f} s")
 
     if "sf_down" in kind:
         td = XSF_TDA_down(mf, method=sf_method, davidson=True, collinear_samples=cs)
@@ -89,6 +97,9 @@ def main():
     else:
         raise ValueError
     td.kernel(nstates=max(max(states), 1) + 2)
+    cp.cuda.runtime.deviceSynchronize()
+    time2 = perf_counter()
+    print(f"excited states: {time2 - time1:.3f} s")
 
     for state in states:
         gradient = td.nuc_grad_method(state=state).kernel()
@@ -108,6 +119,10 @@ def main():
         # )
         print('finite-diff:\n')
         print(np.array2string(g_fd, formatter={'float_kind': lambda x: f'{x: .10f}'}))
+    cp.cuda.runtime.deviceSynchronize()
+    time3 = perf_counter()
+    print(f"Gradient: {time3 - time2:.3f} s")
+    print(f"Total: {time3 - time0:.3f} s")
 
 
 if __name__ == "__main__":

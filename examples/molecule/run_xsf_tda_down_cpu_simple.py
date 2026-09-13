@@ -26,14 +26,14 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "8")
 import numpy as np
 from pyscf import dft, gto, lib
 
-from XTDDFT_dev.utils.backend import backend_info, set_backend
+from XTDDFT.utils.backend import backend_info, set_backend
 
-# 关键设置：强制 XTDDFT_dev 使用 CPU/NumPy 后端。
+# 关键设置：强制 XTDDFT 使用 CPU/NumPy 后端。
 # 如果不写这一句，utils.backend 的默认模式是 auto；
 # 在有 CuPy/CUDA 的服务器上，auto 会自动切到 GPU。
 set_backend("cpu")
 
-from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
+from XTDDFT.XTDDFT.xsf_tda_down import XSF_TDA_down
 
 
 # 同步 PySCF 的线程数。这里读取上面设置的 OMP_NUM_THREADS。

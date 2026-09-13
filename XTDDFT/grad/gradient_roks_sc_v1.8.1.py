@@ -247,6 +247,14 @@ def grad_elec(td, atmlst=None, max_memory=2000,
     mol = td.mol
     xp = array_module(mf)
     gpu = is_gpu_mf(mf)
+    if gpu:
+        from gpu4pyscf.lib import logger
+    else:
+        from pyscf.lib import logger
+    log = logger.new_logger(td, verbose=5)
+    time0 = log.init_timer()
+    time1 = time0
+
     restricted_energy = xp.asarray(mf.mo_energy)
     restricted_coeff = xp.asarray(mf.mo_coeff)
     restricted_occ = xp.asarray(mf.mo_occ)
@@ -322,6 +330,7 @@ def grad_elec(td, atmlst=None, max_memory=2000,
     fockbvv = (fockbmo[ni:, ni:] + fockbmo[ni:, ni:].T) / 2
     fockbvo = (fockbmo[ni:, nc:ni] + fockbmo[nc:ni, ni:].T) / 2
     fockboo = (fockbmo[nc:ni, nc:ni] + fockbmo[nc:ni, nc:ni].T) / 2
+    time1 = log.timer("prepare stage", *time1)
 
     # 2. functional derivative, include derivative respect to mo_coeff and coordinate
     tdro = _RO2U(td, mf)
@@ -333,6 +342,7 @@ def grad_elec(td, atmlst=None, max_memory=2000,
     f1vo, f1oo, vxc1, k1ao = _contract_xc_kernel(
         tdro, mf.xc, (dmxa, dmxb), (dmza, dmzb), True, True, max_memory
     )
+    time1 = log.timer("construct xc kernel", *time1)
 
     # 3.1 construct Q matrix
     with_k = ni_.libxc.is_hybrid_xc(mf.xc)
@@ -400,6 +410,7 @@ def grad_elec(td, atmlst=None, max_memory=2000,
     woc += xp.einsum('ij,tj->ti', dmcc, FSmo[0, nc:ni, :nc]) * 2
     woc -= FSmo[1, nc:ni, :nc]
     w = xp.hstack((wvc.ravel(), wvo.ravel(), woc.ravel()))
+    time1 = log.timer("calculate Q", *time1)
 
     # 4. constuct G[Z^S] and solve Z-vector equation
     vresp = mf.gen_response(mo_coeff, mo_occ, hermi=1)  # invoke UKS function, same with upper
@@ -513,6 +524,7 @@ def grad_elec(td, atmlst=None, max_memory=2000,
     im0[nc:ni, :] += FSmo[1, nc:ni, :] / 2
 
     im0 = mo_coeff[0] @ im0 @ mo_coeff[0].T
+    time1 = log.timer("calculate W", *time1)
 
     # 6. derivative of coordinate
     dmz1dvva = (z1ao[0] + z1ao[0].T) / 2 + dmza  # T_{\mu\nu}^{\alpha} + Z^{S,\alpha}
@@ -642,7 +654,8 @@ def grad_elec(td, atmlst=None, max_memory=2000,
             de[k] += xp.einsum('xpq,qp->x', vkc[1, :, p0:p1], scorrao[:, p0:p1])
 
             # de[k] += td.extra_force(ia, locals())  # extension, here always zero
-    log.timer('SF-up-TDA(ROKS) nuclear gradients', *time0)
+    log.timer("Integral derivatives and assembly", *time1)
+    log.timer("Total electronic gradient", *time0)
     return de
 
 

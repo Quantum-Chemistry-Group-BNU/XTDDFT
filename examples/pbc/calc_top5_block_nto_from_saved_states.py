@@ -21,11 +21,11 @@ PROJECT_PARENT = ROOT.parent
 if str(PROJECT_PARENT) not in sys.path:
     sys.path.insert(0, str(PROJECT_PARENT))
 
-from XTDDFT_dev.XTDDFT.sf_tda_up import SF_TDA_up
-from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
-from XTDDFT_dev.XTDDFT.xtda import XTDA
-from XTDDFT_dev.utils.backend import set_backend
-from XTDDFT_dev.utils.unit import ha2eV
+from XTDDFT.XTDDFT.sf_tda_up import SF_TDA_up
+from XTDDFT.XTDDFT.xsf_tda_down import XSF_TDA_down
+from XTDDFT.XTDDFT.xtda import XTDA
+from XTDDFT.utils.backend import set_backend
+from XTDDFT.utils.unit import ha2eV
 
 
 # ===== Manually edit these parameters on the server =====

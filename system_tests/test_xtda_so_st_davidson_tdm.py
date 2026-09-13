@@ -18,13 +18,13 @@ from scipy.linalg import eigh
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parent))
 
-from XTDDFT_dev.XTDDFT.xtda import (
+from XTDDFT.XTDDFT.xtda import (
     XTDA,
     _so2st,
     _so2st_matrix,
     _st2so_matrix,
 )
-from XTDDFT_dev.utils.backend import set_backend
+from XTDDFT.utils.backend import set_backend
 
 
 @pytest.mark.slow

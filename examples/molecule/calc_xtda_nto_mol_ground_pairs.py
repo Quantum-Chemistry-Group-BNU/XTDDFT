@@ -19,10 +19,10 @@ import numpy as np
 from pyscf import dft, lib
 from pyscf.scf import chkfile as mol_chkfile
 
-from XTDDFT_dev.utils.backend import backend_info, set_backend
-from XTDDFT_dev.utils.unit import ha2eV
-from XTDDFT_dev.utils.visualize import write_nto_cubes
-from XTDDFT_dev.XTDDFT.xtda import XTDA
+from XTDDFT.utils.backend import backend_info, set_backend
+from XTDDFT.utils.unit import ha2eV
+from XTDDFT.utils.visualize import write_nto_cubes
+from XTDDFT.XTDDFT.xtda import XTDA
 
 
 lib.num_threads(int(os.environ["OMP_NUM_THREADS"]))

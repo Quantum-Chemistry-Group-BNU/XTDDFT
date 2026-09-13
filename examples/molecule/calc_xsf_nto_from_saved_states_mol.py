@@ -25,10 +25,10 @@ from pyscf import lib
 from pyscf.scf import chkfile as mol_chkfile
 from gpu4pyscf import dft as gpubasedft
 
-from XTDDFT_dev.utils.backend import backend_info, set_backend
-from XTDDFT_dev.utils.unit import ha2eV
-from XTDDFT_dev.utils.visualize import write_nto_cubes
-from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
+from XTDDFT.utils.backend import backend_info, set_backend
+from XTDDFT.utils.unit import ha2eV
+from XTDDFT.utils.visualize import write_nto_cubes
+from XTDDFT.XTDDFT.xsf_tda_down import XSF_TDA_down
 
 
 cp.cuda.set_allocator(None)

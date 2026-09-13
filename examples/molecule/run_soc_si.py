@@ -18,11 +18,11 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "8")
 import numpy as np
 from pyscf import dft, gto, lib, scf
 
-from XTDDFT_dev.utils.backend import set_backend
+from XTDDFT.utils.backend import set_backend
 
 set_backend("cpu")
 
-from XTDDFT_dev.XTDDFT.soc import SOCSI
+from XTDDFT.XTDDFT.soc import SOCSI
 
 lib.num_threads(int(os.environ["OMP_NUM_THREADS"]))
 

@@ -16,8 +16,8 @@ import numpy as np
 from pyscf.pbc import dft as pbcdft
 from pyscf.pbc.scf import chkfile as pbc_chkfile
 
-from XTDDFT_dev.utils.backend import backend_info, set_backend
-from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
+from XTDDFT.utils.backend import backend_info, set_backend
+from XTDDFT.XTDDFT.xsf_tda_down import XSF_TDA_down
 
 
 

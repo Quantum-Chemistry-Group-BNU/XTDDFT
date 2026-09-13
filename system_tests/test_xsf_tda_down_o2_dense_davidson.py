@@ -9,9 +9,9 @@ from pyscf import dft, gto, lib
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parent))
 
-from XTDDFT_dev.XTDDFT.sf_tda_up import SF_TDA_up
-from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
-from XTDDFT_dev.utils.backend import set_backend
+from XTDDFT.XTDDFT.sf_tda_up import SF_TDA_up
+from XTDDFT.XTDDFT.xsf_tda_down import XSF_TDA_down
+from XTDDFT.utils.backend import set_backend
 
 
 def test_o2_b3lyp_spin_flip_dense_matches_davidson():

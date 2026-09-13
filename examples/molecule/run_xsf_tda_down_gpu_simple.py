@@ -29,7 +29,7 @@ os.environ.setdefault("GPU4PYSCF_NUMINT_BLOCK_SIZE", "32768")
 os.environ.setdefault("GPU4PYSCF_NUMINT_BLOCK_MEM_FRACTION", "0.4")
 
 
-# 让脚本无论从哪个工作目录运行，都能 import 到本仓库的 XTDDFT_dev 包。
+# 让脚本无论从哪个工作目录运行，都能 import 到本仓库的 XTDDFT 包。
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parents[1]
 PROJECT_PARENT = ROOT.parent
@@ -42,13 +42,13 @@ import numpy as np
 from gpu4pyscf import dft as gpubasedft
 from pyscf import gto, lib
 
-from XTDDFT_dev.utils.backend import asnumpy, backend_info, set_backend
+from XTDDFT.utils.backend import asnumpy, backend_info, set_backend
 
-# 关键设置：强制 XTDDFT_dev 使用 GPU/CuPy 后端。
+# 关键设置：强制 XTDDFT 使用 GPU/CuPy 后端。
 # 这句必须在导入 XSF_TDA_down 之前执行，否则模块级 backend 可能已经按默认值初始化。
 set_backend("gpu")
 
-from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
+from XTDDFT.XTDDFT.xsf_tda_down import XSF_TDA_down
 
 
 # 禁用 CuPy memory pool 可以让初学者更容易从 nvidia-smi 观察真实显存变化。

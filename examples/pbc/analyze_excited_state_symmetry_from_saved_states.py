@@ -24,7 +24,7 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "16")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "16")
 
 
-# 当前脚本在 experiment/pbc 下，ROOT 是仓库根目录 XTDDFT_dev。
+# 当前脚本在 experiment/pbc 下，ROOT 是仓库根目录 XTDDFT。
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parents[1]
 PROJECT_PARENT = ROOT.parent
@@ -37,11 +37,11 @@ from pyscf import lib
 from pyscf.pbc import dft as pbcdft
 from pyscf.pbc.scf import chkfile as pbc_chkfile
 
-from XTDDFT_dev.utils.backend import backend_info, set_backend
-from XTDDFT_dev.utils.unit import ha2eV
-from XTDDFT_dev.utils.symmetry import analyze_excited_state_symmetry
-from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
-from XTDDFT_dev.XTDDFT.xtda import XTDA
+from XTDDFT.utils.backend import backend_info, set_backend
+from XTDDFT.utils.unit import ha2eV
+from XTDDFT.utils.symmetry import analyze_excited_state_symmetry
+from XTDDFT.XTDDFT.xsf_tda_down import XSF_TDA_down
+from XTDDFT.XTDDFT.xtda import XTDA
 
 
 lib.num_threads(int(os.environ["OMP_NUM_THREADS"]))

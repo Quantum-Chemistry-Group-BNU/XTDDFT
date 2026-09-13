@@ -1,6 +1,6 @@
 # General SOC state interaction: |GS> |So> |S+> |S-> blocks.
 # Original implementation: Bohan Zhang @BNU 2025.11.07.
-# Refactored for XTDDFT_dev: transition dipole blocks are computed by the
+# Refactored for XTDDFT: transition dipole blocks are computed by the
 # local method classes (XTDA/XSF_TDA_down/SF_TDA_up) and passed as tdm_blocks.
 import time
 

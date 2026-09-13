@@ -4,8 +4,8 @@
 import numpy as np
 from pyscf import gto, scf
 
-from XTDDFT_dev.XTDDFT.soc import get_zeeman
-from XTDDFT_dev.utils.unit import BDF_c
+from XTDDFT.XTDDFT.soc import get_zeeman
+from XTDDFT.utils.unit import BDF_c
 
 
 def main():

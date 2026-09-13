@@ -13,8 +13,8 @@ PROJECT_PARENT = ROOT.parent
 if str(PROJECT_PARENT) not in sys.path:
     sys.path.insert(0, str(PROJECT_PARENT))
 
-from XTDDFT_dev.XTDDFT import sf_tda_up, xtda
-from XTDDFT_dev.XTDDFT.base import XTDDFT_base
+from XTDDFT.XTDDFT import sf_tda_up, xtda
+from XTDDFT.XTDDFT.base import XTDDFT_base
 
 
 def test_gradient_module_imports_preserve_thread_environment():
@@ -36,7 +36,7 @@ def test_gradient_module_imports_preserve_thread_environment():
     code = (
         "import importlib, os; "
         f"keys={keys!r}; modules={modules!r}; "
-        "[importlib.import_module('XTDDFT_dev.XTDDFT.grad.' + name) for name in modules]; "
+        "[importlib.import_module('XTDDFT.XTDDFT.grad.' + name) for name in modules]; "
         "assert all(os.environ[key] == 'sentinel' for key in keys)"
     )
     env = os.environ.copy()

@@ -18,9 +18,9 @@ import numpy as np
 from pyscf import dft, lib
 from pyscf.scf import chkfile as mol_chkfile
 
-from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
-from XTDDFT_dev.utils.backend import backend_info, set_backend
-from XTDDFT_dev.utils.unit import ha2eV
+from XTDDFT.XTDDFT.xsf_tda_down import XSF_TDA_down
+from XTDDFT.utils.backend import backend_info, set_backend
+from XTDDFT.utils.unit import ha2eV
 
 lib.num_threads(int(os.environ["OMP_NUM_THREADS"]))
 set_backend("cpu")

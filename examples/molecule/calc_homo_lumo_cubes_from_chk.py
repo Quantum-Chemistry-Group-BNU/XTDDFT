@@ -13,7 +13,7 @@ import numpy as np
 from pyscf.scf import chkfile as mol_chkfile
 from pyscf.tools import cubegen
 
-from XTDDFT_dev.utils.unit import ha2eV
+from XTDDFT.utils.unit import ha2eV
 
 
 # ===== Manually edit these parameters on the server =====
