@@ -76,7 +76,9 @@ def mcfun_eval_xc_adapter_sf(ni, xc_code):
 
     xctype = ni._xc_type(xc_code)
     fn_eval_xc = functools.partial(__mcfun_fn_eval_xc, ni, xc_code, xctype)
-    nproc = lib.num_threads()
+    # 20260913 whb: set nporc > 1 will create square of setting threads
+    # nproc = lib.num_threads()
+    nproc = 1
 
     def eval_xc_eff(xc_code, rho, deriv=1, omega=None, xctype=None, verbose=None):
         del xc_code, omega, xctype, verbose
@@ -717,6 +719,7 @@ def gen_response_tda(mf, mo_coeff=None, mo_occ=None, hermi=0,
     return vind
 
 def _gen_response_sf_mc_gpu_mol(mf, mo_coeff, mo_occ, hermi=0, collinear_samples=60, max_memory=None):
+    from gpu4pyscf.tdscf import _uhf_resp_sf
 
     ni = mf._numint
     max_memory = _response_max_memory(mf, max_memory)
@@ -726,10 +729,9 @@ def _gen_response_sf_mc_gpu_mol(mf, mo_coeff, mo_occ, hermi=0, collinear_samples
     )
 
     # TODO(WHB): Unified version
-    if hasattr(gpu4pyscf.tdscf._uhf_resp_sf, "nr_uks_fxc_sf"):
-        from gpu4pyscf.tdscf._uhf_resp_sf import nr_uks_fxc_sf
+    if hasattr(_uhf_resp_sf, "nr_uks_fxc_sf"):
         def apply_xc(dm1):
-            return nr_uks_fxc_sf(
+            return _uhf_resp_sf.nr_uks_fxc_sf(
                 ni, mf.mol, mf.grids, mf.xc, None, dm1,
                 0, hermi, None, None, fxc,
             )

@@ -3,10 +3,10 @@ import numpy as np
 from typing import List
 from pyscf import gto, dft, __config__
 
-from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
-from XTDDFT_dev.XTDDFT.sf_tda_up import SF_TDA_up
-from XTDDFT_dev.XTDDFT.xtda import XTDA
-from XTDDFT_dev.utils import unit
+from XTDDFT.XTDDFT.xsf_tda_down import XSF_TDA_down
+from XTDDFT.XTDDFT.sf_tda_up import SF_TDA_up
+from XTDDFT.XTDDFT.xtda import XTDA
+from XTDDFT.utils import unit
 
 
 def excited_energy(atom, spec, state, mk, xc='b3lyp', method=1, cs=20):

@@ -1,14 +1,61 @@
 #!/usr/bin/env python
 import sys
-from math import sqrt
-
 from pyscf import lib, __config__
 from pyscf.lib import logger
+from pyscf.grad import uhf as uhf_grad
 from pyscf.grad import rohf as rohf_grad
 from pyscf.grad import tdrks as tdrks_grad
+
 from ..xtda import _st2so
 from ...utils.backend import asnumpy
-from ._backend import array_module, is_gpu_mf, nuclear_gradient
+from ._backend import array_module, is_gpu_mf, nuclear_gradient, ucphf_module
+
+
+def jk_energies_per_atom(
+        mf, dm_list, j_factor=None, k_factor=None,
+        omega=None, lr_factor=None, sr_factor=None,
+        hermi=0, sum_results=False, verbose=None
+    ):
+    """
+    Computes a set of first-order derivatives of J/K contributions for each
+    element (density matrix or a pair of density matrices) in dm_pairs.
+
+    This function supports evaluating multiple sets of energy derivatives in a
+    single call. Additionally, for each set, the two density matrices for the
+    four-index Coulomb integrals can be different.
+
+    Args:
+        dm_list :
+            A list of density-matrix-pairs [[dm, dm], [dm, dm], ...].
+            Each element corresponds to one set of energy derivative.
+        j_factor :
+            A list of factors for Coulomb (J) term
+        k_factor :
+            A list of factors for Coulomb (K) term
+        hermi :
+            No effects
+        sum_results : bool
+            If True, aggregate all sets of derivatives into a single result.
+
+    Returns:
+        An array of shape (*, Natm, 3) if sum_results is False; otherwise,
+        an array of shape (Natm, 3).
+    """
+    from gpu4pyscf.grad.tdrhf import _jk_energies_per_atom
+    xp = array_module(mf)
+    vhfopt = mf._opt_gpu.get(omega)
+    if vhfopt is None:
+        from gpu4pyscf.scf.jk import _VHFOpt
+        # For LDA and GGA, only mf._opt_jengine is initialized
+        mol = mf.mol
+        with mol.with_range_coulomb(omega):
+            vhfopt = mf._opt_gpu[omega] = _VHFOpt(mol, mf.direct_scf_tol).build()
+    if isinstance(dm_list, xp.ndarray) and dm_list.ndim == 2:
+        dm_list = dm_list[None]
+    ejk = _jk_energies_per_atom(vhfopt, dm_list, j_factor, k_factor,
+                                omega=omega, lr_factor=lr_factor, sr_factor=sr_factor,
+                                sum_results=sum_results, verbose=verbose)
+    return ejk
 
 
 # dmov, dmoo in AO-representation
@@ -23,8 +70,8 @@ def _contract_xc_kernel(td_grad, xc_code, dmvo, dmoo=None, with_vxc=True,
     xctype = ni._xc_type(xc_code)
     gpu = is_gpu_mf(mf)
     xp = array_module(mf)
-    mo_coeff = xp.asarray(getattr(td_grad.base, 'mo_coeff', mf.mo_coeff))
-    mo_occ = xp.asarray(getattr(td_grad.base, 'mo_occ', mf.mo_occ))
+    mo_coeff = xp.asarray(mf.mo_coeff)
+    mo_occ = xp.asarray(mf.mo_occ)
     nao = mo_coeff[0].shape[0]
     shls_slice = (0, mol.nbas)
     ao_loc = mol.ao_loc_nr()
@@ -117,6 +164,7 @@ def _contract_xc_kernel(td_grad, xc_code, dmvo, dmoo=None, with_vxc=True,
             ni.eval_rho2(eval_mol, ao0, coeff_a, mo_occ[0], mask, xctype, with_lapl=False),
             ni.eval_rho2(eval_mol, ao0, coeff_b, mo_occ[1], mask, xctype, with_lapl=False),
         ))
+        #TODO(WHB): libxc gpu version used in gpu4pyscf may have problem
         vxc, fxc, kxc = ni.eval_xc_eff(
             xc_code, rho, deriv, xctype=xctype
         )[1:]
@@ -188,16 +236,25 @@ def _contract_xc_kernel(td_grad, xc_code, dmvo, dmoo=None, with_vxc=True,
     return f1vo, f1oo, v1ao, k1ao
 
 
+
 def grad_elec(td, atmlst=None, max_memory=2000,
               verbose=logger.INFO):
     """ROKS spin-conserving XTDA excitation-energy nuclear derivative."""
-    log = logger.new_logger(td, verbose)
-    time0 = logger.process_clock(), logger.perf_counter()
+    # log = logger.new_logger(td, verbose)
+    # time0 = logger.process_clock(), logger.perf_counter()
 
     mf = td.base._scf
     mol = td.mol
     xp = array_module(mf)
     gpu = is_gpu_mf(mf)
+    if gpu:
+        from gpu4pyscf.lib import logger
+    else:
+        from pyscf.lib import logger
+    log = logger.new_logger(td, verbose=5)
+    time0 = log.init_timer()
+    time1 = time0
+
     restricted_energy = xp.asarray(mf.mo_energy)
     restricted_coeff = xp.asarray(mf.mo_coeff)
     restricted_occ = xp.asarray(mf.mo_occ)
@@ -238,8 +295,8 @@ def grad_elec(td, atmlst=None, max_memory=2000,
     dmxb = orbv_b @ vb @ orbo_b.T  # X_{\mu\nu}^{\beta}
     # correct coefficient
     s = mol.spin / 2
-    c1 = 1 - sqrt((s + 1) / s) + 1 / (2 * s)
-    c2 = -1 + sqrt((s + 1) / s) + 1 / (2 * s)
+    c1 = 1 - xp.sqrt((s + 1) / s) + 1 / (2 * s)
+    c2 = -1 + xp.sqrt((s + 1) / s) + 1 / (2 * s)
     c3 = -1 / (2 * s)
     # correct dmz
     va_cc = va[:, :nc]
@@ -273,6 +330,7 @@ def grad_elec(td, atmlst=None, max_memory=2000,
     fockbvv = (fockbmo[ni:, ni:] + fockbmo[ni:, ni:].T) / 2
     fockbvo = (fockbmo[ni:, nc:ni] + fockbmo[nc:ni, ni:].T) / 2
     fockboo = (fockbmo[nc:ni, nc:ni] + fockbmo[nc:ni, nc:ni].T) / 2
+    time1 = log.timer("prepare stage", *time1)
 
     # 2. functional derivative, include derivative respect to mo_coeff and coordinate
     tdro = _RO2U(td, mf)
@@ -284,6 +342,7 @@ def grad_elec(td, atmlst=None, max_memory=2000,
     f1vo, f1oo, vxc1, k1ao = _contract_xc_kernel(
         tdro, mf.xc, (dmxa, dmxb), (dmza, dmzb), True, True, max_memory
     )
+    time1 = log.timer("construct xc kernel", *time1)
 
     # 3.1 construct Q matrix
     with_k = ni_.libxc.is_hybrid_xc(mf.xc)
@@ -351,6 +410,7 @@ def grad_elec(td, atmlst=None, max_memory=2000,
     woc += xp.einsum('ij,tj->ti', dmcc, FSmo[0, nc:ni, :nc]) * 2
     woc -= FSmo[1, nc:ni, :nc]
     w = xp.hstack((wvc.ravel(), wvo.ravel(), woc.ravel()))
+    time1 = log.timer("calculate Q", *time1)
 
     # 4. constuct G[Z^S] and solve Z-vector equation
     vresp = mf.gen_response(mo_coeff, mo_occ, hermi=1)  # invoke UKS function, same with upper
@@ -395,13 +455,11 @@ def grad_elec(td, atmlst=None, max_memory=2000,
 
     # Z, instead of 1/2 Z
     if gpu:
-        from gpu4pyscf.lib.cupy_helper import krylov
-
-        z = krylov(
-            lambda rows: xp.stack(tuple(matvec(row) - row for row in rows)),
-            w, tol=1e-12, max_cycle=td.cphf_max_cycle,
-            lindep=td.dsolve_lindep,
-        )
+        from cupyx.scipy.sparse.linalg import LinearOperator, gmres
+        
+        operator = LinearOperator((w.size, w.size), matvec=matvec, dtype=w.dtype)
+        z, _ = gmres(operator, w, tol=1e-12,
+            maxiter=td.cphf_max_cycle)
     else:
         z = lib.solve(
             matvec, w, tol=1e-12, max_cycle=td.cphf_max_cycle,
@@ -412,7 +470,7 @@ def grad_elec(td, atmlst=None, max_memory=2000,
     zoc = z[nv*nc+nv*no:].reshape(no, nc)
     z1a = xp.hstack((zvc, zvo))
     z1b = xp.vstack((zoc, zvc))
-    time1 = log.timer('Z-vector equation solver', *time0)
+    time1 = log.timer('Z-vector equation solver', *time1)
 
     # 5.1 construct complete W matrix
     # correct term make Za not equal Zb need construct full W matrix
@@ -466,6 +524,7 @@ def grad_elec(td, atmlst=None, max_memory=2000,
     im0[nc:ni, :] += FSmo[1, nc:ni, :] / 2
 
     im0 = mo_coeff[0] @ im0 @ mo_coeff[0].T
+    time1 = log.timer("calculate W", *time1)
 
     # 6. derivative of coordinate
     dmz1dvva = (z1ao[0] + z1ao[0].T) / 2 + dmza  # T_{\mu\nu}^{\alpha} + Z^{S,\alpha}
@@ -473,99 +532,63 @@ def grad_elec(td, atmlst=None, max_memory=2000,
 
     oo0a = orbo_a @ orbo_a.T
     oo0b = orbo_b @ orbo_b.T
+    as_dm1 = oo0a + oo0b + dmz1dvva + dmz1doob  # follow CPU version naming convention
+    as_dm1 = (as_dm1 + as_dm1.T) * 0.5
     fxcz1 = _contract_xc_kernel(
         tdro, mf.xc, z1ao, None, False, False, max_memory
     )[0]
 
     if gpu:
-        from gpu4pyscf.grad import tduks as gpu_tduks_grad, uhf as gpu_uhf_grad
+        from gpu4pyscf.grad import tduks as gpu_tduks_grad
+        from gpu4pyscf.grad import rhf as gpu_rhf_grad
 
-        gpu_rhf_grad = gpu_uhf_grad.rhf_grad
-        mf_grad = gpu_uhf_grad.Gradients(mf)
+        mf_grad = gpu_rhf_grad.Gradients(mf)
         h1 = xp.asarray(mf_grad.get_hcore(mol))
         s1 = xp.asarray(mf_grad.get_ovlp(mol))
-        dh_ground = xp.asarray(
-            gpu_rhf_grad.contract_h1e_dm(mol, h1, oo0a + oo0b, hermi=1)
-        )
-        dh_td = xp.asarray(
-            gpu_rhf_grad.contract_h1e_dm(
-                mol, h1, dmz1dvva + dmz1doob, hermi=0
-            )
-        )
-        ds = xp.asarray(gpu_rhf_grad.contract_h1e_dm(mol, s1, im0, hermi=0))
-
-        dh1e_ground = gpu_uhf_grad.int3c2e.get_dh1e(mol, oo0a + oo0b)
-        dmz1doo = dmz1dvva + dmz1doob
-        dh1e_td = gpu_uhf_grad.int3c2e.get_dh1e(mol, dmz1doo)
-        if len(mol._ecpbas) > 0:
-            dh1e_ground += gpu_rhf_grad.get_dh1e_ecp(mol, oo0a + oo0b)
-            dh1e_td += gpu_rhf_grad.get_dh1e_ecp(mol, dmz1doo)
-        if mol._pseudo:
-            raise NotImplementedError(
-                "Pseudopotential gradient not supported for molecular system yet"
-            )
+        dh_ground_and_td = gpu_rhf_grad.contract_h1e_dm(mol, h1, as_dm1, hermi=1)
+        ds = gpu_rhf_grad.contract_h1e_dm(mol, s1, im0, hermi=0)
+        dh1e_ground_and_td = gpu_rhf_grad.int3c2e.get_dh1e(mol, as_dm1)  # 1/r like terms
 
         get_veff = gpu_tduks_grad.Gradients.get_veff
         k_factor = hyb if with_k else 0.0
-        dvhf = xp.asarray(get_veff(
+        dvhf = get_veff(
             td, mol,
             xp.stack(((dmz1dvva + dmz1dvva.T) * .5 + oo0a,
                       (dmz1doob + dmz1doob.T) * .5 + oo0b)),
             1.0, k_factor, hermi=1,
-        ))
-        dvhf -= xp.asarray(get_veff(
+        )
+        dvhf -= get_veff(
             td, mol,
             xp.stack(((dmz1dvva + dmz1dvva.T) * .5,
                       (dmz1doob + dmz1doob.T) * .5)),
             1.0, k_factor, hermi=1,
-        ))
-        dvhf += 2 * xp.asarray(get_veff(
+        )
+        dvhf += 2 * get_veff(
             td, mol,
             xp.stack(((dmxa + dmxa.T) * .5, (dmxb + dmxb.T) * .5)),
             1.0, k_factor, hermi=1,
-        ))
-        dvhf -= 2 * xp.asarray(get_veff(
+        )
+        dvhf -= 2 * get_veff(
             td, mol,
             xp.stack(((dmxa - dmxa.T) * .5, (dmxb - dmxb.T) * .5)),
             0.0, k_factor, hermi=2,
-        ))
-
-        dveff1_0 = xp.asarray(gpu_rhf_grad.contract_h1e_dm(
-            mol, vxc1[0, 1:], oo0a + dmz1dvva, hermi=0
-        ))
-        dveff1_0 += xp.asarray(gpu_rhf_grad.contract_h1e_dm(
-            mol, vxc1[1, 1:], oo0b + dmz1doob, hermi=0
-        ))
-        veff1_1 = f1oo[:, 1:] + fxcz1[:, 1:] + k1ao[:, 1:]
-        dveff1_1 = xp.asarray(gpu_rhf_grad.contract_h1e_dm(
-            mol, veff1_1[0], oo0a, hermi=1
-        ))
-        dveff1_1 += xp.asarray(gpu_rhf_grad.contract_h1e_dm(
-            mol, veff1_1[1], oo0b, hermi=1
-        ))
-        dveff1_2 = xp.asarray(gpu_rhf_grad.contract_h1e_dm(
-            mol, f1vo[0, 1:] * 2, dmxa, hermi=0
-        ))
-        dveff1_2 += xp.asarray(gpu_rhf_grad.contract_h1e_dm(
-            mol, f1vo[1, 1:] * 2, dmxb, hermi=0
-        ))
-
-        dcorr = xp.asarray(get_veff(
-            td, mol, scorrao + dmcorrao,
-            j_factor=0.0, k_factor=-1.0, hermi=1,
-        ))
-        dcorr -= xp.asarray(get_veff(
-            td, mol, scorrao,
-            j_factor=0.0, k_factor=-1.0, hermi=1,
-        ))
-        dcorr -= xp.asarray(get_veff(
-            td, mol, dmcorrao,
-            j_factor=0.0, k_factor=-1.0, hermi=1,
-        ))
-        de = (
-            dh_ground + dh_td - ds + dh1e_ground + dh1e_td + 2 * dvhf
-            + dveff1_0 + dveff1_1 + dveff1_2 + 2 * dcorr
         )
+        de = dh_ground_and_td + xp.asnumpy(dh1e_ground_and_td) - ds + 2 * dvhf
+
+        dveff1_0 = gpu_rhf_grad.contract_h1e_dm(mol, vxc1[0, 1:], oo0a + dmz1dvva, hermi=0)
+        dveff1_0 += gpu_rhf_grad.contract_h1e_dm(mol, vxc1[1, 1:], oo0b + dmz1doob, hermi=0)
+        veff1_1 = f1oo[:, 1:] + fxcz1[:, 1:] + k1ao[:, 1:]
+        dveff1_1 = gpu_rhf_grad.contract_h1e_dm(mol, veff1_1[0], oo0a, hermi=1)
+        dveff1_1 += gpu_rhf_grad.contract_h1e_dm(mol, veff1_1[1], oo0b, hermi=1)
+        dveff1_2 = gpu_rhf_grad.contract_h1e_dm(mol, f1vo[0, 1:] * 2, dmxa, hermi=0)
+        dveff1_2 += gpu_rhf_grad.contract_h1e_dm(mol, f1vo[1, 1:] * 2, dmxb, hermi=0)
+
+        # correct term
+        dcorr = get_veff(td, mol, scorrao + dmcorrao, j_factor=0.0, k_factor=-1.0, hermi=1)
+        dcorr -= get_veff(td, mol, scorrao, j_factor=0.0, k_factor=-1.0, hermi=1)
+        dcorr -= get_veff(td, mol, dmcorrao, j_factor=0.0, k_factor=-1.0, hermi=1)
+        de += dveff1_0 + dveff1_1 + dveff1_2 + 2 * dcorr
+        de = xp.asarray(de)
         if atmlst is not None:
             de = de[xp.asarray(tuple(atmlst), dtype=int)]
     else:
@@ -594,7 +617,6 @@ def grad_elec(td, atmlst=None, max_memory=2000,
         veff1[:,2] += f1vo[:,1:]
         veff1[:,3] += f1vo[:,1:]
         veff1a, veff1b = veff1
-        time1 = log.timer('2e AO integral derivatives', *time1)
 
         if atmlst is None:
             atmlst = range(mol.natm)
@@ -631,7 +653,8 @@ def grad_elec(td, atmlst=None, max_memory=2000,
             de[k] += xp.einsum('xpq,qp->x', vkc[1, :, p0:p1], scorrao[:, p0:p1])
 
             # de[k] += td.extra_force(ia, locals())  # extension, here always zero
-    log.timer('SF-up-TDA(ROKS) nuclear gradients', *time0)
+    log.timer("Integral derivatives and assembly", *time1)
+    log.timer("Total electronic gradient", *time0)
     return de
 
 

@@ -6,14 +6,30 @@ os.environ["OMP_DYNAMIC"] = "False"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
+# PySCF/OpenMP
+os.environ["OMP_NUM_THREADS"] = 4
+os.environ["OMP_DYNAMIC"] = "FALSE"
+os.environ["OMP_MAX_ACTIVE_LEVELS"] = "1"
+
+# 禁止 BLAS 在每个 OpenMP/mcfun worker 中再次并行
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["BLIS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 import numpy as np
 from time import perf_counter
-from pyscf import gto, scf
+from pyscf import gto, scf, lib
 from XTDDFT.XTDDFT.xsf_tda_down import XSF_TDA_down
 from XTDDFT.XTDDFT.sf_tda_up import SF_TDA_up
 from XTDDFT.XTDDFT.xtda import XTDA
 from XTDDFT.XTDDFT.grad.finite_difference import fd_gradient, fd_gradient_forth
 from XTDDFT.utils.backend import set_backend
+
+
+lib.num_threads(int(4))
 
 
 def parse_xyz_string(xyz: str):
@@ -55,16 +71,23 @@ atom = parse_xyz_string(atom)
 # ========================================================
 
 
-def main():
+if use_gpu:
+    import cupy as cp
+
+
+def sync_gpu():
     if use_gpu:
-        import cupy as cp
+        cp.cuda.runtime.deviceSynchronize()
+
+
+def main():
     set_backend("gpu" if use_gpu else "cpu")
     kind = method_kind.lower()
     if kind not in ("usf_up", "usf_down", "usc", "xsf_up", "xsf_down", "xsc"):
         raise ValueError("method_kind must be 'usf_up', 'usf_down'," \
         " 'usc', 'xsf_up', 'xsf_down', 'xsc'")
 
-    cp.cuda.runtime.deviceSynchronize()
+    sync_gpu()
     time0 = perf_counter()
     mol = gto.M(
         atom = atom,
@@ -84,7 +107,7 @@ def main():
     if use_gpu:
         mf = mf.to_gpu()
     mf.kernel()
-    cp.cuda.runtime.deviceSynchronize()
+    sync_gpu()
     time1 = perf_counter()
     print(f"SCF: {time1 - time0:.3f} s")
 
@@ -97,7 +120,7 @@ def main():
     else:
         raise ValueError
     td.kernel(nstates=max(max(states), 1) + 2)
-    cp.cuda.runtime.deviceSynchronize()
+    sync_gpu()
     time2 = perf_counter()
     print(f"excited states: {time2 - time1:.3f} s")
 
@@ -119,7 +142,7 @@ def main():
         # )
         print('finite-diff:\n')
         print(np.array2string(g_fd, formatter={'float_kind': lambda x: f'{x: .10f}'}))
-    cp.cuda.runtime.deviceSynchronize()
+    sync_gpu()
     time3 = perf_counter()
     print(f"Gradient: {time3 - time2:.3f} s")
     print(f"Total: {time3 - time0:.3f} s")
