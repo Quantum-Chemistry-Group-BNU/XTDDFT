@@ -7,7 +7,9 @@ build/
 .vscode/
 /reference/
 tests_tmp/
-.github/
+
+# 20260914 whb: github action use
+# .github/
 
 # macOS system files
 .DS_Store
