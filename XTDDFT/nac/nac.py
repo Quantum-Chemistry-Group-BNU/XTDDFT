@@ -315,7 +315,8 @@ def finite_difference_nac(mol, pairs, xc, step=1e-4, save=True):
         raise RuntimeError("ROKS did not converge")
 
     td = XTDA(mf, davidson=True, davidson_backend="cpu")
-    energies, _ = td.kernel(nstates=int(pairs.max()))
+    td.kernel(nstates=int(pairs.max()))
+    energies = _asnumpy(td.e[:int(pairs.max())]).copy()
     nac_driver = NAC(td, pairs, step)
     result = nac_driver.kernel()
     if save:

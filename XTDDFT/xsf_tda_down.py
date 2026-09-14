@@ -1245,7 +1245,6 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         converged, e, x1 = _run_davidson(
             self.mf, self.davidson_backend,
             vind, hdiag, x0, nroots,
-            positive_eig_threshold=1.0e-3 if _is_pbc_mf(self.mf) else None,
         )
         self.converged = converged
         self.e = xp.asarray(e)

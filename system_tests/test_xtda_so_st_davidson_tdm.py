@@ -71,7 +71,7 @@ def test_xtda_so_st_dense_davidson_and_transition_dipoles():
     davidson_overlap = np.diag(davidson_vectors.T @ vector_st[:, :nroots])
 
     reference_dipoles = np.load(
-        ROOT / "tests_tmp" / "transition_dipoles_itrans0_resp.npy"
+        Path(__file__).with_name("transition_dipoles_itrans0_resp.npy")
     )
     calculated_dipoles = td.transition_dipole_array()
 

@@ -389,7 +389,7 @@ class XTDA(XTDDFT_base):
         raw_v = xp.asarray(_asnumpy(x1)).T
         self._raw_v = raw_v
         # 先重排为 CVa|OVa|COb|CVb；RO 再转张量基，U 参考保留轨道基。
-        # 当前实现由 type_u 决定是否转换，并不由构造参数 so2st 控制。
+        # Public RO vectors are always ST; so2st only selects the dense matrix basis.
         ordered_v = raw_v[self.order]
         if self.type_u:
             self.v = ordered_v
@@ -706,6 +706,11 @@ class XTDA(XTDDFT_base):
             e, v = np.linalg.eigh(amat)
             self.e = e[:nstates]
             self.v = v[:, :nstates]
+        if not self.type_u and not self.so2st:
+            # ponytail: normalize once so all RO post-processing receives ST.
+            self.v = get_array_module(self.v).asarray(
+                _so2st(_asnumpy(self.v), self.nc, self.no, self.nv)
+            )
         return self.e, self.v
 
     def _split_analysis_vectors(self, data=None):

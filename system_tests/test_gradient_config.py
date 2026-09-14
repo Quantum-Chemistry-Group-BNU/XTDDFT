@@ -34,7 +34,11 @@ def test_gradient_module_imports_preserve_thread_environment():
         "gradient_uks_sfd",
     )
     code = (
-        "import importlib, os; "
+        "import importlib, importlib.util, os, sys; "
+        f"spec=importlib.util.spec_from_file_location('XTDDFT', {str(ROOT / '__init__.py')!r}, "
+        f"submodule_search_locations=[{str(ROOT)!r}]); "
+        "package=importlib.util.module_from_spec(spec); "
+        "sys.modules['XTDDFT']=package; spec.loader.exec_module(package); "
         f"keys={keys!r}; modules={modules!r}; "
         "[importlib.import_module('XTDDFT.XTDDFT.grad.' + name) for name in modules]; "
         "assert all(os.environ[key] == 'sentinel' for key in keys)"

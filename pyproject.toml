@@ -17,6 +17,8 @@ dependencies = [
   "scipy",
   "pandas",
   "pyscf",
+  "pyscf-forge",
+  "mcfun",
   "h5py",
   "joblib",
   "opt_einsum",
@@ -55,6 +57,7 @@ packages = ["XTDDFT", "XTDDFT.XTDDFT", "XTDDFT.XTDDFT.soc", "XTDDFT.utils", "XTD
 "XTDDFT.experiment" = "experiment"
 
 [tool.pytest.ini_options]
+testpaths = ["system_tests"]
 markers = [
   "slow: numerical finite-difference tests",
   "gpu: requires CuPy, GPU4PySCF, and a working CUDA device",
