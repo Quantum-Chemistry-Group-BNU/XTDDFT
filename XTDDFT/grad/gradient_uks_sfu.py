@@ -497,9 +497,9 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
         dveff1_1 += gpu_rhf_grad.contract_h1e_dm(mol, veff1_1_b, oo0b, hermi=1) * 0.25
         dveff1_2 = gpu_rhf_grad.contract_h1e_dm(mol, f1vo[1:], dmt, hermi=0) * 2
         de += dveff1_0 + dveff1_1 + dveff1_2
+        de = xp.asarray(de)
         if atmlst is not None:
             de = de[atmlst]
-        de = xp.asarray(de)
     else:
         # mf_grad = mf.nuc_grad_method()
         hcore_deriv = mf_grad.hcore_generator(mol)

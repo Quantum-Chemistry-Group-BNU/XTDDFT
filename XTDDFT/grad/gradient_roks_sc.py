@@ -458,11 +458,12 @@ def grad_elec(td, atmlst=None, max_memory=2000,
         from cupyx.scipy.sparse.linalg import LinearOperator, gmres
         
         operator = LinearOperator((w.size, w.size), matvec=matvec, dtype=w.dtype)
-        z, _ = gmres(operator, w, tol=1e-12,
-            maxiter=td.cphf_max_cycle)
+        z, info = gmres(operator, w, tol=td.cphf_conv_tol, maxiter=td.cphf_max_cycle)
+        if info != 0:
+            raise RuntimeError(f'cupyx.scipy.sparse fails to solve linear equation info={info}')
     else:
         z = lib.solve(
-            matvec, w, tol=1e-12, max_cycle=td.cphf_max_cycle,
+            matvec, w, tol=td.cphf_conv_tol, max_cycle=td.cphf_max_cycle,
             lindep=td.dsolve_lindep,
         )
     zvc = z[:nv*nc].reshape(nv, nc)
@@ -587,7 +588,7 @@ def grad_elec(td, atmlst=None, max_memory=2000,
         dcorr = get_veff(td, mol, scorrao + dmcorrao, j_factor=0.0, k_factor=-1.0, hermi=1)
         dcorr -= get_veff(td, mol, scorrao, j_factor=0.0, k_factor=-1.0, hermi=1)
         dcorr -= get_veff(td, mol, dmcorrao, j_factor=0.0, k_factor=-1.0, hermi=1)
-        de += dveff1_0 + dveff1_1 + dveff1_2 + 2 * dcorr
+        de += dveff1_0 + dveff1_1 + dveff1_2 + 4 * dcorr
         de = xp.asarray(de)
         if atmlst is not None:
             de = de[xp.asarray(tuple(atmlst), dtype=int)]
@@ -678,7 +679,7 @@ class _RO2U:
 
 
 class SC_gradient(rohf_grad.Gradients):
-    cphf_max_cycle = getattr(__config__, 'grad_tdrhf_Gradients_cphf_max_cycle', 20) + 20
+    cphf_max_cycle = getattr(__config__, 'grad_tdrhf_Gradients_cphf_max_cycle', 20) + 1000
     cphf_conv_tol = getattr(__config__, 'grad_tdrhf_Gradients_cphf_conv_tol', 1e-8)
     dsolve_lindep = getattr(__config__, 'lib_linalg_helper_dsolve_lindep', 1e-13)
 

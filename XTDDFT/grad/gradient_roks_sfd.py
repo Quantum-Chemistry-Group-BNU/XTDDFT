@@ -587,18 +587,12 @@ def grad_elec(td, fglobal=None, fit=True,d_lda=0.3, atmlst=None, max_memory=2000
         from cupyx.scipy.sparse.linalg import LinearOperator, gmres
 
         operator = LinearOperator((w.size, w.size), matvec=matvec, dtype=w.dtype)
-        z, _ = gmres(operator, w, tol=1e-12,
-            maxiter=td.cphf_max_cycle)
-        # residual = float(xp.linalg.norm(matvec(z) - w)) / max(
-        #     float(xp.linalg.norm(w)), 1e-30
-        # )
-        # if info != 0 or residual > td.cphf_conv_tol:
-        #     raise RuntimeError(
-        #         f"Z-vector GMRES failed: info={info}, residual={residual:.3e}"
-        #     )
+        z, info = gmres(operator, w, tol=td.cphf_conv_tol, maxiter=td.cphf_max_cycle)
+        if info != 0:
+            raise RuntimeError(f'cupyx.scipy.sparse fails to solve linear equation info={info}')
     else:
         z = lib.solve(
-            matvec, w, tol=1e-12, max_cycle=td.cphf_max_cycle,
+            matvec, w, tol=td.cphf_conv_tol, max_cycle=td.cphf_max_cycle,
             dot=xp.dot, lindep=td.dsolve_lindep, verbose=0,
             tol_residual=None,
         )
@@ -881,7 +875,7 @@ class _RO2U:
 
 
 class SFD_gradient(rohf_grad.Gradients):
-    cphf_max_cycle = getattr(__config__, 'grad_tdrhf_Gradients_cphf_max_cycle', 20) + 20
+    cphf_max_cycle = getattr(__config__, 'grad_tdrhf_Gradients_cphf_max_cycle', 20) + 1000
     cphf_conv_tol = getattr(__config__, 'grad_tdrhf_Gradients_cphf_conv_tol', 1e-8)
     dsolve_lindep = getattr(__config__, 'lib_linalg_helper_dsolve_lindep', 1e-13)
 

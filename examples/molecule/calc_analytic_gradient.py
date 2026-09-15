@@ -6,19 +6,6 @@ os.environ["OMP_DYNAMIC"] = "False"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
-
-# PySCF/OpenMP
-os.environ["OMP_NUM_THREADS"] = 4
-os.environ["OMP_DYNAMIC"] = "FALSE"
-os.environ["OMP_MAX_ACTIVE_LEVELS"] = "1"
-
-# 禁止 BLAS 在每个 OpenMP/mcfun worker 中再次并行
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["BLIS_NUM_THREADS"] = "1"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
-
 import numpy as np
 from time import perf_counter
 from pyscf import gto, scf, lib

@@ -460,11 +460,12 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
         from cupyx.scipy.sparse.linalg import LinearOperator, gmres
 
         operator = LinearOperator((w.size, w.size), matvec=matvec, dtype=w.dtype)
-        z, _ = gmres(operator, w, tol=td.cphf_conv_tol,
-            maxiter=td.cphf_max_cycle)
+        z, info = gmres(operator, w, tol=td.cphf_conv_tol, maxiter=td.cphf_max_cycle)
+        if info != 0:
+            raise RuntimeError(f'cupyx.scipy.sparse fails to solve linear equation info={info}')
     else:
         z = lib.solve(
-            matvec, w, tol=1e-12, max_cycle=td.cphf_max_cycle,
+            matvec, w, tol=td.cphf_conv_tol, max_cycle=td.cphf_max_cycle,
             lindep=td.dsolve_lindep,
         )
     zvc = z[:nv*nc].reshape(nv, nc)
@@ -570,9 +571,9 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
         dveff1_1 += gpu_rhf_grad.contract_h1e_dm(mol, veff1_1_b, oo0b, hermi=1)
         dveff1_2 = gpu_rhf_grad.contract_h1e_dm(mol, f1vo[1:], dmt, hermi=0) * 2
         de += dveff1_0 + dveff1_1 + dveff1_2
+        de = xp.asarray(de)
         if atmlst is not None:
             de = de[atmlst]
-        de = xp.asarray(de)
     else:
         mf_grad = td.base._scf.nuc_grad_method()
         hcore_deriv = mf_grad.hcore_generator(mol)
@@ -643,7 +644,7 @@ class _RO2U:
 
 
 class SFU_gradient(rohf_grad.Gradients):
-    cphf_max_cycle = getattr(__config__, 'grad_tdrhf_Gradients_cphf_max_cycle', 20) + 20
+    cphf_max_cycle = getattr(__config__, 'grad_tdrhf_Gradients_cphf_max_cycle', 20) + 1000
     cphf_conv_tol = getattr(__config__, 'grad_tdrhf_Gradients_cphf_conv_tol', 1e-8)
     dsolve_lindep = getattr(__config__, 'lib_linalg_helper_dsolve_lindep', 1e-13)
 
