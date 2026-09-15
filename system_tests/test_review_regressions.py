@@ -36,6 +36,7 @@ def test_pbc_davidson_keeps_negative_and_small_roots():
     td = XSF_TDA_down.__new__(XSF_TDA_down)
     td.mf = SimpleNamespace(cell=pbcgto.Cell())
     td.davidson_backend = "cpu"
+    td.davidson_method = "davidson"
     td.davidson_matvec_batch_size = None
     hdiag = np.array([-.2, .0005, .1, .3])
     td.gen_tda_operation_sf = lambda **kwargs: (lambda xs: xs * hdiag, hdiag)
