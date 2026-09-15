@@ -29,6 +29,7 @@ from .base import (
     _iter_block_data,
     _make_rohf_reference_mf,
     _molecular_dipole_integrals,
+    _normalize_davidson_method,
     _prepare_davidson_init_space,
     _run_davidson,
     _spinflip_gaps,
@@ -98,6 +99,7 @@ def _convert_a2b_to_cv_co_ov_oo(amat, nc, no, nv):
 
 class XSF_TDA_down(XTDDFT_base): # just for ROKS
     def __init__(self, mf, method, davidson=True, SA = None, davidson_backend="cpu",
+                 davidson_method="davidson",
                  collinear_samples=60, delta_a_jk_batch_size=None,
                  delta_a_diag_j_batch_size=None, df_cache=None,
                  delta_a_diag_method="response", delta_a_diag_df_aux_batch_size=256,
@@ -112,6 +114,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         davidson_backend = davidson_backend.lower()
         if davidson_backend not in ("cpu", "gpu", "auto"):
             raise ValueError("davidson_backend must be 'cpu', 'gpu', or 'auto'")
+        davidson_method = _normalize_davidson_method(davidson_method)
         super().__init__(mf, method, davidson=davidson, df_cache=df_cache)
         logger.info("XSF_TDA_down method=0 ALDA0, method=1 multicollinear, method=2 collinear")
         self.isf = -1
@@ -120,6 +123,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         self.re = not self.type_u
         # whether to project OO and remove redundant states
         self.davidson_backend = "cpu" if davidson_backend == "auto" else davidson_backend
+        self.davidson_method = davidson_method
         self.collinear_samples = collinear_samples
         if delta_a_jk_batch_size is not None and delta_a_jk_batch_size < 1:
             # construct the jk matrix according to the batch sizes
@@ -1245,11 +1249,12 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         converged, e, x1 = _run_davidson(
             self.mf, self.davidson_backend,
             vind, hdiag, x0, nroots,
+            davidson_method=self.davidson_method,
         )
         self.converged = converged
         self.e = xp.asarray(e)
         self.v = xp.asarray(_asnumpy(x1)).T
-        logger.info('XSF_TDA_down Davidson converged: {}', converged)
+        logger.info('XSF_TDA_down {} converged: {}', self.davidson_method, converged)
         return self.e, self.v
 
     def _split_analysis_vectors(self, value):

@@ -8,7 +8,7 @@ SF-TDA-up 给出 |S+>），用 sf-X2C + SOMF 构造自旋轨道耦合哈密顿�
 
 import numpy as np
 
-from ..base import _is_pbc_mf, _reject_k_method
+from ..base import _is_pbc_mf, _normalize_davidson_method, _reject_k_method
 from ..sf_tda_up import SF_TDA_up
 from ...utils.backend import _asnumpy, require_cupy, resolve_backend
 from ...utils.unit import BDF_c
@@ -34,6 +34,7 @@ class SOCSI:
         xsf_method / sf_method: 传给 XSF_TDA_down / SF_TDA_up 的 method。
         davidson: 三个方法是否用 Davidson 求解。
         davidson_backend: "cpu" 或 "gpu"。
+        davidson_method: "davidson" 或 "krylov"。
         ngs: 是否包含基态（1）或不包含（0）。
         cal_osc: 是否计算跃迁偶极矩和振子强度。
         iop: "x2c" 或 "bp"，传给 get_soDKH1_somf。
@@ -44,7 +45,8 @@ class SOCSI:
     """
 
     def __init__(self, mf, nstates=(20, 20, 20), xsf_method=0, sf_method=0,
-                 davidson=True, davidson_backend="cpu", ngs=1, cal_osc=True,
+                 davidson=True, davidson_backend="cpu", davidson_method="davidson",
+                 ngs=1, cal_osc=True,
                  iop="x2c", include_mf2e=True, mf2e_impl="auto", nproc=1,
                  use_1c=True, c=None, xsf_kwargs=None, xtda_kwargs=None,
                  sf_kwargs=None, backend="auto"):
@@ -63,6 +65,7 @@ class SOCSI:
         self.sf_method = sf_method
         self.davidson = davidson
         self.davidson_backend = davidson_backend
+        self.davidson_method = _normalize_davidson_method(davidson_method)
         self.ngs = ngs
         self.cal_osc = bool(cal_osc)
         self.iop = iop
@@ -123,21 +126,24 @@ class SOCSI:
         if n_sm:
             self.xsf = XSF_TDA_down(
                 self.mf, self.xsf_method, davidson=self.davidson,
-                davidson_backend=self.davidson_backend, **self.xsf_kwargs,
+                davidson_backend=self.davidson_backend,
+                davidson_method=self.davidson_method, **self.xsf_kwargs,
             )
             self.xsf.kernel(nstates=n_sm, remove=1)
             n_sm = self.xsf.v.shape[1]
 
         self.xtda = XTDA(
             self.mf, davidson=self.davidson,
-            davidson_backend=self.davidson_backend, **self.xtda_kwargs,
+            davidson_backend=self.davidson_backend,
+            davidson_method=self.davidson_method, **self.xtda_kwargs,
         )
         self.xtda.kernel(nstates=n_so)
         n_so = self.xtda.v.shape[1]
 
         self.sf = SF_TDA_up(
             self.mf, self.sf_method, davidson=self.davidson,
-            davidson_backend=self.davidson_backend, **self.sf_kwargs,
+            davidson_backend=self.davidson_backend,
+            davidson_method=self.davidson_method, **self.sf_kwargs,
         )
         self.sf.kernel(nstates=n_sp)
         n_sp = self.sf.v.shape[1]

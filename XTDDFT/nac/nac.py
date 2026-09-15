@@ -188,6 +188,7 @@ class NAC(lib.StreamObject):
                 "method",
                 "davidson",
                 "davidson_backend",
+                "davidson_method",
                 "so2st",
                 "dense_batch_size",
                 "jk_batch_size",

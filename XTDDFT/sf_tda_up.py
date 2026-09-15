@@ -21,6 +21,7 @@ from .base import (
     _make_spinflip_problem,
     _make_spinflip_vind,
     _molecular_dipole_integrals,
+    _normalize_davidson_method,
     _prepare_davidson_init_space,
     _run_davidson,
     _spinflip_gaps,
@@ -77,6 +78,7 @@ def _pair_hessian_block_b2a(occ_fock_b, vir_fock_a, tensor_block):
 
 class SF_TDA_up(XTDDFT_base): # just for ROKS
     def __init__(self, mf, method, davidson=True, davidson_backend="cpu",
+                 davidson_method="davidson",
                  collinear_samples=20, df_cache=None,
                  davidson_matvec_batch_size=None):
         if method not in (0, 1, 2):
@@ -84,6 +86,7 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
         davidson_backend = davidson_backend.lower()
         if davidson_backend not in ("cpu", "gpu", "auto"):
             raise ValueError("davidson_backend must be 'cpu', 'gpu', or 'auto'")
+        davidson_method = _normalize_davidson_method(davidson_method)
         if method == 1 and (
             isinstance(collinear_samples, bool)
             or not isinstance(collinear_samples, Integral)
@@ -94,6 +97,7 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
         logger.info("SF_TDA_up method=0 ALDA0, method=1 multicollinear, method=2 collinear")
         self.isf = 1
         self.davidson_backend = "cpu" if davidson_backend == "auto" else davidson_backend
+        self.davidson_method = davidson_method
         if davidson_matvec_batch_size is not None and davidson_matvec_batch_size < 1:
             raise ValueError("davidson_matvec_batch_size must be a positive integer or None")
         self.davidson_matvec_batch_size = davidson_matvec_batch_size
@@ -338,11 +342,12 @@ class SF_TDA_up(XTDDFT_base): # just for ROKS
         converged, e, x1 = _run_davidson(
             self.mf, self.davidson_backend,
             vind, hdiag, x0, nroots,
+            davidson_method=self.davidson_method,
         )
         self.converged = converged
         self.e = xp.asarray(e)
         self.v = xp.asarray(_asnumpy(x1)).T
-        logger.info('SF_TDA_up Davidson converged: {}', converged)
+        logger.info('SF_TDA_up {} converged: {}', self.davidson_method, converged)
         return self.e, self.v
 
     def analyse(

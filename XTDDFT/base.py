@@ -174,7 +174,10 @@ def _default_results_filename(obj):
     else:
         method = f"method{getattr(obj, 'method', 'unknown')}"
     parts = [cls_name, _safe_filename_part(method).lower()]
-    parts.append("davidson" if getattr(obj, "davidson", False) else "dense")
+    if getattr(obj, "davidson", False):
+        parts.append(getattr(obj, "davidson_method", "davidson"))
+    else:
+        parts.append("dense")
     if hasattr(obj, "SA"):
         parts.append(f"sa{getattr(obj, 'SA')}")
     nstates = getattr(obj, "nstates", None)
@@ -734,6 +737,55 @@ def _cpu_davidson(vind, hdiag, x0, nroots, positive_eig_threshold=None):
         nroots=nroots, max_cycle=3000, max_space=max_space, pick=pick,
         verbose=5
     )
+def _krylov(vind, hdiag, x0, nroots):
+    try:
+        from pyscf.tdscf._krylov_tools import krylov_solver
+    except ImportError as err:
+        raise RuntimeError(
+            "davidson_method='krylov' requires pyscf-forge's "
+            "pyscf.tdscf._krylov_tools.krylov_solver."
+        ) from err
+
+    hdiag = np.asarray(_asnumpy(hdiag))
+    x0 = np.asarray(_asnumpy(x0))
+    if np.iscomplexobj(hdiag) or np.iscomplexobj(x0):
+        raise NotImplementedError("davidson_method='krylov' requires real trial vectors and diagonals.")
+
+    max_space = max(12, min(80, max(4 * nroots, x0.shape[0] + 2 * nroots)))
+    restart_iter = max(1, int(np.ceil(max(max_space, x0.shape[0]) / max(nroots, 1))))
+
+    def aop(xs):
+        return np.asarray(_asnumpy(vind(xp.asarray(xs))))
+
+    def initguess_fn(n_states, hdiag):
+        del n_states, hdiag
+        return True, None, x0
+
+    def precond_fn(rhs, omega_shift):
+        denom = hdiag[None, :] - np.asarray(omega_shift)[:, None]
+        threshold = 1.0e-8
+        denom = np.where(
+            np.abs(denom) < threshold,
+            np.where(denom >= 0, threshold, -threshold),
+            denom,
+        )
+        return True, np.asarray(rhs) / denom
+
+    return krylov_solver(
+        matrix_vector_product=aop,
+        hdiag=hdiag,
+        problem_type="eigenvalue",
+        initguess_fn=initguess_fn,
+        precond_fn=precond_fn,
+        n_states=nroots,
+        conv_tol=1e-7,
+        max_iter=3000,
+        extra_init=0,
+        restart_iter=restart_iter,
+        gram_schmidt=True,
+        verbose=5,
+    )
+
 
 def _gpu_davidson(vind, hdiag, x0, nroots, positive_eig_threshold=None):
     cp = require_cupy()
@@ -764,8 +816,20 @@ def _gpu_davidson(vind, hdiag, x0, nroots, positive_eig_threshold=None):
         nroots=nroots, pick=pick, max_cycle=3000, verbose=5
     )[:3]
 
+def _normalize_davidson_method(method):
+    method = method.lower()
+    if method not in ("davidson", "krylov"):
+        raise ValueError("davidson_method must be 'davidson' or 'krylov'")
+    return method
+
+
 def _run_davidson(mf, davidson_backend, vind, hdiag, x0, nroots,
-                  positive_eig_threshold=None):
+                  positive_eig_threshold=None, davidson_method="davidson"):
+    davidson_method = _normalize_davidson_method(davidson_method)
+    if davidson_method == "krylov":
+        if davidson_backend == "gpu" and not _is_gpu_mf(mf):
+            raise RuntimeError("davidson_backend='gpu' requires the gpu backend/gpu4pyscf path.")
+        return _krylov(vind, hdiag, x0, nroots)
     if davidson_backend == "gpu":
         if not _is_gpu_mf(mf):
             raise RuntimeError("davidson_backend='gpu' requires the gpu backend/gpu4pyscf path.")

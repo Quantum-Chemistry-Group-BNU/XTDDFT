@@ -45,7 +45,9 @@ set_backend("cpu")       # NumPy/PySCF
 ```
 
 Response constructors also accept `davidson_backend="cpu"` or
-`davidson_backend="gpu"`. The GPU option requires a GPU4PySCF reference
+`davidson_backend="gpu"`. Set `davidson_method="krylov"` to use the
+`pyscf-forge` Krylov eigensolver instead of the default Davidson solver. The
+GPU option requires a GPU4PySCF reference
 object and a working CUDA runtime. The repository pytest configuration forces
 tests to use the CPU backend for reproducible local and GitHub Actions runs.
 
@@ -60,7 +62,8 @@ corresponding eigenvectors.
 ```python
 from XTDDFT_dev.XTDDFT.xtda import XTDA
 
-td = XTDA(mf, method=0, davidson=True, davidson_backend="cpu")
+td = XTDA(mf, method=0, davidson=True, davidson_backend="cpu",
+          davidson_method="krylov")
 energies_ev, vectors = td.kernel(nstates=3)
 td.analyse()
 ```

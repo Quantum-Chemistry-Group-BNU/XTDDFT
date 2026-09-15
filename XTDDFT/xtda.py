@@ -10,6 +10,7 @@ from .base import (
     _get_ovlp,
     _molecular_dipole_integrals,
     _molecular_ground_dipole,
+    _normalize_davidson_method,
     _prepare_davidson_init_space,
     _run_davidson,
     _system,
@@ -83,6 +84,7 @@ class XTDA(XTDDFT_base):
     """
 
     def __init__(self, mf, method=0, davidson=True, davidson_backend="cpu",
+                 davidson_method="davidson",
                  so2st=True, dense_batch_size=64, jk_batch_size=None,
                  jk_block_split=False, use_delta_a=True, df_cache=None,
                  davidson_matvec_batch_size=None):
@@ -91,9 +93,11 @@ class XTDA(XTDDFT_base):
         davidson_backend = davidson_backend.lower()
         if davidson_backend not in ("cpu", "gpu", "auto"):
             raise ValueError("davidson_backend must be 'cpu', 'gpu', or 'auto'")
+        davidson_method = _normalize_davidson_method(davidson_method)
         super().__init__(mf, method, davidson=davidson, df_cache=df_cache)
         logger.info("XTDA spin-conserving TDA response")
         self.davidson_backend = "cpu" if davidson_backend == "auto" else davidson_backend
+        self.davidson_method = davidson_method
         self.so2st = so2st
         self.dense_batch_size = dense_batch_size
         if jk_batch_size is not None and jk_batch_size < 1:
@@ -383,6 +387,7 @@ class XTDA(XTDDFT_base):
         converged, e, x1 = _run_davidson(
             self.mf, self.davidson_backend,
             vind, hdiag, x0, nroots,
+            davidson_method=self.davidson_method,
         )
         self.converged = converged
         self.e = xp.asarray(e)
@@ -395,7 +400,7 @@ class XTDA(XTDDFT_base):
             self.v = ordered_v
         else:
             self.v = xp.asarray(_so2st(_asnumpy(ordered_v), self.nc, self.no, self.nv))
-        logger.info("XTDA Davidson converged: {}", converged)
+        logger.info("XTDA {} converged: {}", self.davidson_method, converged)
         return self.e, self.v
 
     def _get_dense_integrals(self):
