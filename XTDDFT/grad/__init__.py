@@ -39,7 +39,7 @@ def nuc_grad_method(td, state=1):
 
     supported = (
         isinstance(td, XTDA) and td.method == 0
-        or isinstance(td, SF_TDA_up) and td.method == (1, 2)
+        or isinstance(td, SF_TDA_up) and td.method in (1, 2)
         or isinstance(td, XSF_TDA_down) and td.method in (1, 2)
     )
     if not supported:

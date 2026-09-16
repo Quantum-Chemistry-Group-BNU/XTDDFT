@@ -279,6 +279,8 @@ def grad_elec(td, atmlst=None, max_memory=2000,
     # XTDA return spin tensor basis vector, gradient use spin orbital basis
     if td.base.davidson and td.base.so2st:
         v = xp.asarray(_st2so(xp.asarray(td.v), nc, no, nv))
+    else:
+        v = xp.asarray(td.v)
     v = v[:, td.state-1]
     v_cva = v[:nc*nv].reshape(nc, nv)
     v_ova = v[nc*nv:(nc+no)*nv].reshape(no, nv)
