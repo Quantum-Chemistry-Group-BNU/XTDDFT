@@ -29,11 +29,6 @@ def validate_gradient_backend(mf) -> None:
     if is_gpu_mf(mf):
         if mf._numint._xc_type(mf.xc).upper() == "MGGA":
             raise NotImplementedError("GPU analytic gradients do not support MGGA")
-        omega = mf._numint.rsh_and_hybrid_coeff(mf.xc, mf.mol.spin)[0]
-        if omega != 0:
-            raise NotImplementedError(
-                "GPU analytic gradients do not support range-separated hybrids"
-            )
 
 
 def ucphf_module(mf):

@@ -379,6 +379,9 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
         vj = xp.asarray(vj)
         vk = xp.asarray(vk) * hyb
         vk1 = xp.asarray(mf.get_k(mol, dmt, hermi=0)) * hyb  # c_x(\mu\lambda|\kappa\nu)
+        if omega != 0:
+            vk += xp.asarray(mf.get_k(mol, (dmzvva, dmzoob), hermi=1, omega=omega) * (alpha - hyb))
+            vk1 += xp.asarray(mf.get_k(mol, dmt, hermi=0, omega=omega) * (alpha - hyb))
         # G_{\mu\nu}^{\sigma}[T] + g^{xc}[X,X]
         veff0doo = vj[0] + vj[1] - vk + f1oo[:, 0] + k1ao[:, 0]
         wvoa = orbv_a.T @ veff0doo[0] @ orbo_a  # 1/2 Q_{ia}^{\alpha}
@@ -549,11 +552,10 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
             k_factors = [0]
             dvhf = jk_energies_per_atom(mf, dms, j_factors, k_factors, sum_results=True)
 
-        # if with_k and omega != 0:
-        #     j_factors = [0, 0, 0]
-        #     k_factors = [alpha - hyb, alpha - hyb, 2 * (alpha - hyb)]
-        #     dvhf += td.jk_energies_per_atom(dms[1:], j_factors, k_factors, omega=omega, sum_results=True)
-        # time1 = log.timer('2e AO integral derivatives', *time1)
+        if with_k and omega != 0:
+            j_factors = [0, 0, 0]
+            k_factors = [alpha - hyb, alpha - hyb, 2 * (alpha - hyb)]
+            dvhf += jk_energies_per_atom(mf, dms[1:], j_factors, k_factors, omega=omega, sum_results=True)
 
         z1ao = z1ao.view(xp.ndarray)
         fxcz1 = gpu_tduks_grad._contract_xc_kernel(
@@ -585,8 +587,11 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
             vj, vk = td.get_jk(mol, dm)
             vj = vj.reshape(2, 2, 3, nao, nao)
             vk = vk.reshape(2, 2, 3, nao, nao) * hyb
-            veff1 = vj[0] + vj[1] - vk
             vk1 = -td.get_k(mol, xp.stack((dmt, dmt.T))) * hyb
+            if omega != 0:
+                vk += td.get_k(mol, dm, omega=omega).reshape(2, 2, 3, nao, nao) * (alpha - hyb)
+                vk1 += -td.get_k(mol, (dmt, dmt.T), omega=omega) * (alpha - hyb)
+            veff1 = vj[0] + vj[1] - vk
         else:
             vj = td.get_j(mol, dm).reshape(2, 2, 3, nao, nao)
             veff1 = xp.stack((vj[0] + vj[1], vj[0] + vj[1]))
@@ -645,7 +650,7 @@ class _RO2U:
 
 class SFU_gradient(rohf_grad.Gradients):
     cphf_max_cycle = getattr(__config__, 'grad_tdrhf_Gradients_cphf_max_cycle', 20) + 1000
-    cphf_conv_tol = getattr(__config__, 'grad_tdrhf_Gradients_cphf_conv_tol', 1e-8)
+    cphf_conv_tol = getattr(__config__, 'grad_tdrhf_Gradients_cphf_conv_tol', 1e-12)
     dsolve_lindep = getattr(__config__, 'lib_linalg_helper_dsolve_lindep', 1e-13)
 
     def __init__(self, td, method=1, state=1):
@@ -659,9 +664,9 @@ class SFU_gradient(rohf_grad.Gradients):
         self.de = None  # gradient of molecule
         self.atmlst = None  # which atom will be calculate gradient
         if method == 1:
-            self.collinear_samples = 20
+            self.base.collinear_samples = 20
         elif method == 2:
-            self.collinear_samples = -1
+            self.base.collinear_samples = -1
         else:
             raise NotImplementedError("ALDA0 and Noncollinear kernel do not implement")
         

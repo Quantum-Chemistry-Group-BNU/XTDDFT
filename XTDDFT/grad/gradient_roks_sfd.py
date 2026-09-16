@@ -311,6 +311,8 @@ def grad_elec(td, fglobal=None, fit=True,d_lda=0.3, atmlst=None, max_memory=2000
     re = sftda.re
     xp = array_module(mf)
     gpu = is_gpu_mf(mf)
+    uda = td.base.SA > 0
+    assert td.base.SA != 1 and td.base.SA != 2, "gradient not consider SA=1 and SA=2"
     if gpu:
         from gpu4pyscf.lib import logger
     else:
@@ -425,13 +427,7 @@ def grad_elec(td, fglobal=None, fit=True,d_lda=0.3, atmlst=None, max_memory=2000
     ni_.libxc.test_deriv_order(mf.xc, 3, raise_error=True)
     omega, alpha, hyb = ni_.rsh_and_hybrid_coeff(mf.xc, mol.spin)
     if fglobal is None:
-        if omega == 0:
-            cx = hyb
-        else:
-            cx = hyb + (alpha - hyb) * math.erf(omega)
-        fglobal = (1 - d_lda) * cx + d_lda
-        if sftda.method == 1 and fit:
-            fglobal = fglobal * 4 * (cx - 0.5) ** 2
+        fglobal = td.base.fglobal
     # f1vo: f^{xc}[X], f1oo: f^{xc}[T], vxc1: v^{xc}[\rho], k1ao: g^{xc}[X,X]
     # and their derivative respect to coordinate
     f1vo, f1oo, vxc1, k1ao = _contract_xc_kernel(
@@ -447,6 +443,9 @@ def grad_elec(td, fglobal=None, fit=True,d_lda=0.3, atmlst=None, max_memory=2000
         vj = xp.asarray(vj)
         vk = xp.asarray(vk) * hyb
         vk1 = xp.asarray(mf.get_k(mol, dmt, hermi=0)) * hyb
+        if omega != 0:
+            vk += xp.asarray(mf.get_k(mol, (dmzooa, dmzvvb), hermi=1, omega=omega) * (alpha - hyb))
+            vk1 += xp.asarray(mf.get_k(mol, dmt, hermi=0, omega=omega) * (alpha - hyb))
         # G_{\mu\nu}^{\sigma}[T] + g^{xc}[X,X]
         veff0doo = vj[0] + vj[1] - vk + f1oo[:, 0] + k1ao[:, 0]
         wvoa = orbv_a.T @ veff0doo[0] @ orbo_a  # part of 1/2 Q_{ia}^{\alpha}
@@ -469,68 +468,72 @@ def grad_elec(td, fglobal=None, fit=True,d_lda=0.3, atmlst=None, max_memory=2000
         wvob -= xp.einsum('ij,aj->ai', veff0mo[:nc, :ni], v)
         wvob -= xp.einsum('ab,ib->ai', dvvb, fockbmo[:nc, nc:])
 
-    wcca = orbo_a.T @ veff0doo[0] @ orbo_a
-    wcca += xp.einsum('ik,jk->ij', dooa, fockamo[:ni, :ni])
-    wcca += xp.einsum('aj,ai->ij', veff0mo[nc:, :ni], v)
-    wvvb = xp.einsum('ac,bc->ab', dvvb, fockbmo[nc:, nc:])
-    wvvb += xp.einsum('bi,ai->ab', veff0mo[nc:, :ni], v)
     wvc = wvoa[:, :nc] + wvob[no:, :]  # 1/2 (Q_{ia} - Q_{ai})
-    wvo = wvoa[:, nc:] - (wvvb - wvvb.T)[no:, :no]  # 1/2 (Q_{ta} - Q_{at})
-    woc = wvob[:no, :] - (wcca - wcca.T)[nc:, :nc]  # 1/2 (Q_{it} - Q_{ti})
+    wvo = wvoa[:, nc:]  # 1/2 (Q_{ta} - Q_{at})
+    woc = wvob[:no, :]  # 1/2 (Q_{it} - Q_{ti})
+    if uda:
+        wcca = orbo_a.T @ veff0doo[0] @ orbo_a
+        wcca += xp.einsum('ik,jk->ij', dooa, fockamo[:ni, :ni])
+        wcca += xp.einsum('aj,ai->ij', veff0mo[nc:, :ni], v)
+        wvvb = xp.einsum('ac,bc->ab', dvvb, fockbmo[nc:, nc:])
+        wvvb += xp.einsum('bi,ai->ab', veff0mo[nc:, :ni], v)
+        wvo -= (wvvb - wvvb.T)[no:, :no]  # 1/2 (Q_{ta} - Q_{at})
+        woc -= (wcca - wcca.T)[nc:, :nc]  # 1/2 (Q_{it} - Q_{ti})
 
     # 3.2 add correct term
-    if gpu:
-        from gpu4pyscf.scf import rohf as gpu_rohf
+    if uda:
+        if gpu:
+            from gpu4pyscf.scf import rohf as gpu_rohf
 
-        hfc = gpu_rohf.ROHF(mol)
-    else:
-        hfc = scf.ROHF(mol)
-    vhfc = xp.asarray(hfc.get_veff(mol, dm))
-    h1ec = xp.asarray(hfc.get_hcore())
-    fockac = h1ec + vhfc[0]
-    fockbc = h1ec + vhfc[1]
-    fockacmo = mo_coeff[0].T @ fockac @ mo_coeff[0]
-    fockbcmo = mo_coeff[1].T @ fockbc @ mo_coeff[1]
-    dm = xp.stack((scorrao, dmSao, dmHFaao, dmHFbao,
-                   dmtcv, dmtco, dmtov, dmtoo))
-    vjcao, vkcao = hfc.get_jk(mol, dm, hermi=0)
-    vjcao = xp.asarray(vjcao)
-    vkcao = xp.asarray(vkcao)
-    vjc = mo_coeff[0].T @ vjcao @ mo_coeff[0]
-    vkc = mo_coeff[0].T @ vkcao @ mo_coeff[0]
-    # T_{pq}^{X}F_{pq}^{S} + T_{pq}^{Y,\sigma}F_{pq}^{HF,\sigma}, X\in {CC,VV,CV}, Y\in {CO,OV}
-    dq = dmS @ vkc[0] + dmHFa @ fockacmo + dmHFb @ fockbcmo
-    # next 2 lines use double count dmHFa, dmHFb
-    dq[:ni, :] += orbo_a.T @ (vjcao[2] + vjcao[3] - vkcao[2]) @ mo_coeff[0]
-    dq[:nc, :] += orbo_b.T @ (vjcao[2] + vjcao[3] - vkcao[3]) @ mo_coeff[0]
-    dq[nc:ni, :] += orbo_a[:, nc:ni].T @ vkcao[1] @ mo_coeff[0] / 2  # K[T]
+            hfc = gpu_rohf.ROHF(mol)
+        else:
+            hfc = scf.ROHF(mol)
+        vhfc = xp.asarray(hfc.get_veff(mol, dm))
+        h1ec = xp.asarray(hfc.get_hcore())
+        fockac = h1ec + vhfc[0]
+        fockbc = h1ec + vhfc[1]
+        fockacmo = mo_coeff[0].T @ fockac @ mo_coeff[0]
+        fockbcmo = mo_coeff[1].T @ fockbc @ mo_coeff[1]
+        dm = xp.stack((scorrao, dmSao, dmHFaao, dmHFbao,
+                    dmtcv, dmtco, dmtov, dmtoo))
+        vjcao, vkcao = hfc.get_jk(mol, dm, hermi=0)
+        vjcao = xp.asarray(vjcao)
+        vkcao = xp.asarray(vkcao)
+        vjc = mo_coeff[0].T @ vjcao @ mo_coeff[0]
+        vkc = mo_coeff[0].T @ vkcao @ mo_coeff[0]
+        # T_{pq}^{X}F_{pq}^{S} + T_{pq}^{Y,\sigma}F_{pq}^{HF,\sigma}, X\in {CC,VV,CV}, Y\in {CO,OV}
+        dq = dmS @ vkc[0] + dmHFa @ fockacmo + dmHFb @ fockbcmo
+        # next 2 lines use double count dmHFa, dmHFb
+        dq[:ni, :] += orbo_a.T @ (vjcao[2] + vjcao[3] - vkcao[2]) @ mo_coeff[0]
+        dq[:nc, :] += orbo_b.T @ (vjcao[2] + vjcao[3] - vkcao[3]) @ mo_coeff[0]
+        dq[nc:ni, :] += orbo_a[:, nc:ni].T @ vkcao[1] @ mo_coeff[0] / 2  # K[T]
 
-    x_cv = -c3 * vkcao[5] - c3 * vkcao[6] - c4 * vkcao[7]
-    x_co = -c3 * vkcao[4] - 0.5 * c2 * vkcao[6] - c5 * vkcao[7] - 0.5 * c2 * vjcao[5] + 0.5 * c2 * vjcao[6]
-    x_ov = -c3 * vkcao[4] - 0.5 * c2 * vkcao[5] - c5 * vkcao[7] - 0.5 * c2 * vjcao[6] + 0.5 * c2 * vjcao[5]
-    x_oo = -c4 * vkcao[4] - c5 * vkcao[5] - c5 * vkcao[6]
-    x_cv_i = orbo_b.T @ x_cv.T @ mo_coeff[0]
-    x_cv_a = orbv_a.T @ x_cv @ mo_coeff[0]
-    x_co_i = orbo_b.T @ x_co.T @ mo_coeff[0]
-    x_co_t = orbv_b[:, :no].T @ x_co @ mo_coeff[0]
-    x_ov_t = orbv_b[:, :no].T @ x_ov.T @ mo_coeff[0]
-    x_ov_v = orbv_a.T @ x_ov @ mo_coeff[0]
-    x_oo_t = orbo_a[:, nc:ni].T @ x_oo @ mo_coeff[0]
-    x_oo_u = orbo_a[:, nc:ni].T @ x_oo.T @ mo_coeff[0]
+        x_cv = -c3 * vkcao[5] - c3 * vkcao[6] - c4 * vkcao[7]
+        x_co = -c3 * vkcao[4] - 0.5 * c2 * vkcao[6] - c5 * vkcao[7] - 0.5 * c2 * vjcao[5] + 0.5 * c2 * vjcao[6]
+        x_ov = -c3 * vkcao[4] - 0.5 * c2 * vkcao[5] - c5 * vkcao[7] - 0.5 * c2 * vjcao[6] + 0.5 * c2 * vjcao[5]
+        x_oo = -c4 * vkcao[4] - c5 * vkcao[5] - c5 * vkcao[6]
+        x_cv_i = orbo_b.T @ x_cv.T @ mo_coeff[0]
+        x_cv_a = orbv_a.T @ x_cv @ mo_coeff[0]
+        x_co_i = orbo_b.T @ x_co.T @ mo_coeff[0]
+        x_co_t = orbv_b[:, :no].T @ x_co @ mo_coeff[0]
+        x_ov_t = orbv_b[:, :no].T @ x_ov.T @ mo_coeff[0]
+        x_ov_v = orbv_a.T @ x_ov @ mo_coeff[0]
+        x_oo_t = orbo_a[:, nc:ni].T @ x_oo @ mo_coeff[0]
+        x_oo_u = orbo_a[:, nc:ni].T @ x_oo.T @ mo_coeff[0]
 
-    dq[ni:, :] += xp.einsum('ip,ai->ap', x_cv_i, v[no:, :nc])
-    dq[:nc, :] += xp.einsum('ap,ai->ip', x_cv_a, v[no:, :nc])
-    dq[:nc, :] += xp.einsum('tp,ti->ip', x_co_t, v[:no, :nc])
-    dq[nc:ni, :] += xp.einsum('ip,ti->tp', x_co_i, v[:no, :nc])
-    dq[nc:ni, :] += xp.einsum('ap,at->tp', x_ov_v, v[no:, nc:ni])
-    dq[ni:, :] += xp.einsum('tp,at->ap', x_ov_t, v[no:, nc:ni])
-    dq[nc:ni, :] += xp.einsum('vp,vt->tp', x_oo_t, v[:no, nc:ni])
-    dq[nc:ni, :] += xp.einsum('tp,vt->vp', x_oo_u, v[:no, nc:ni])
+        dq[ni:, :] += xp.einsum('ip,ai->ap', x_cv_i, v[no:, :nc])
+        dq[:nc, :] += xp.einsum('ap,ai->ip', x_cv_a, v[no:, :nc])
+        dq[:nc, :] += xp.einsum('tp,ti->ip', x_co_t, v[:no, :nc])
+        dq[nc:ni, :] += xp.einsum('ip,ti->tp', x_co_i, v[:no, :nc])
+        dq[nc:ni, :] += xp.einsum('ap,at->tp', x_ov_v, v[no:, nc:ni])
+        dq[ni:, :] += xp.einsum('tp,at->ap', x_ov_t, v[no:, nc:ni])
+        dq[nc:ni, :] += xp.einsum('vp,vt->tp', x_oo_t, v[:no, nc:ni])
+        dq[nc:ni, :] += xp.einsum('tp,vt->vp', x_oo_u, v[:no, nc:ni])
 
-    dq = fglobal * dq
-    wvc += dq[:nc, ni:].T - dq[ni:, :nc]
-    woc += dq[:nc, nc:ni].T - dq[nc:ni, :nc]
-    wvo += dq[nc:ni, ni:].T - dq[ni:, nc:ni]
+        dq = fglobal * dq
+        wvc += dq[:nc, ni:].T - dq[ni:, :nc]
+        woc += dq[:nc, nc:ni].T - dq[nc:ni, :nc]
+        wvo += dq[nc:ni, ni:].T - dq[ni:, nc:ni]
 
     w = xp.hstack((wvc.ravel(), wvo.ravel(), woc.ravel())) * 2
     time1 = log.timer("calculate Q", *time1)
@@ -644,7 +647,8 @@ def grad_elec(td, fglobal=None, fit=True,d_lda=0.3, atmlst=None, max_memory=2000
     im0[nc:ni, ni:] += xp.einsum('ti,ai->ta', z1b[:no], fockbmo[ni:, :nc]) / 2
 
     # 5.3 add correct term
-    im0 += dq
+    if uda:
+        im0 += dq
     im0 = mo_coeff[0] @ im0 @ mo_coeff[0].T
     time1 = log.timer("calculate W", *time1)
 
@@ -696,11 +700,10 @@ def grad_elec(td, fglobal=None, fit=True,d_lda=0.3, atmlst=None, max_memory=2000
             k_factors = [0]
             dvhf = jk_energies_per_atom(mf, dms, j_factors, k_factors, sum_results=True)
 
-        # if with_k and omega != 0:
-        #     j_factors = [0, 0, 0]
-        #     k_factors = [alpha - hyb, alpha - hyb, 2 * (alpha - hyb)]
-        #     dvhf += td.jk_energies_per_atom(dms[1:], j_factors, k_factors, omega=omega, sum_results=True)
-        # time1 = log.timer('2e AO integral derivatives', *time1)
+        if with_k and omega != 0:
+            j_factors = [0, 0, 0]
+            k_factors = [alpha - hyb, alpha - hyb, 2 * (alpha - hyb)]
+            dvhf += jk_energies_per_atom(mf, dms[1:], j_factors, k_factors, omega=omega, sum_results=True)
 
         z1ao = z1ao.view(xp.ndarray)
         fxcz1 = gpu_tduks_grad._contract_xc_kernel(
@@ -719,28 +722,29 @@ def grad_elec(td, fglobal=None, fit=True,d_lda=0.3, atmlst=None, max_memory=2000
         dveff1_2 = gpu_rhf_grad.contract_h1e_dm(mol, f1vo[1:], dmt, hermi=0) * 2
         de += dveff1_0 + dveff1_1 + dveff1_2
 
-        correction = gpu_rhf_grad.contract_h1e_dm(mol, h1, dmHFao, hermi=1)
-        correction += gpu_rhf_grad.int3c2e.get_dh1e(mol, dmHFao).get()
-        dm_delta = dmtco - dmtov
-        dm_pairs = [
-            [scorrao, dmSao], [oo0j, dmHFao], [oo0a, dmHFaao],
-            [oo0b, dmHFbao], [dm_delta, dm_delta],
-            # K_il[A_jk] is contracted with B_il in the CPU branch, so the
-            # pair-energy API must receive B.T as its second density.
-            [dmtcv, dmtco.T], [dmtcv, dmtov.T], [dmtco, dmtov.T],
-            [dmtcv, dmtoo.T], [dmtco, dmtoo.T], [dmtov, dmtoo.T]
-        ]
+        if uda:
+            correction = gpu_rhf_grad.contract_h1e_dm(mol, h1, dmHFao, hermi=1)
+            correction += gpu_rhf_grad.int3c2e.get_dh1e(mol, dmHFao).get()
+            dm_delta = dmtco - dmtov
+            dm_pairs = [
+                [scorrao, dmSao], [oo0j, dmHFao], [oo0a, dmHFaao],
+                [oo0b, dmHFbao], [dm_delta, dm_delta],
+                # K_il[A_jk] is contracted with B_il in the CPU branch, so the
+                # pair-energy API must receive B.T as its second density.
+                [dmtcv, dmtco.T], [dmtcv, dmtov.T], [dmtco, dmtov.T],
+                [dmtcv, dmtoo.T], [dmtco, dmtoo.T], [dmtov, dmtoo.T]
+            ]
 
-        # _jk_energies_per_atom uses energy-derivative normalization:
-        # J(A, B) = J_cpu_cross(A, B) / 2 and
-        # K(A, B) = -K_cpu_cross(A, B) / 4.
-        j_factors = [0.0, 2.0, 0.0, 0.0, -c2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        k_factors = [-4.0, 0.0, 4.0, 4.0, 0.0, 8.0 * c3, 8.0 * c3,
-            4.0 * c2, 8.0 * c4, 8.0 * c5, 8.0 * c5]
-        correction += jk_energies_per_atom(mf, dm_pairs,
-            j_factor=j_factors, k_factor=k_factors, sum_results=True,)
+            # _jk_energies_per_atom uses energy-derivative normalization:
+            # J(A, B) = J_cpu_cross(A, B) / 2 and
+            # K(A, B) = -K_cpu_cross(A, B) / 4.
+            j_factors = [0.0, 2.0, 0.0, 0.0, -c2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            k_factors = [-4.0, 0.0, 4.0, 4.0, 0.0, 8.0 * c3, 8.0 * c3,
+                4.0 * c2, 8.0 * c4, 8.0 * c5, 8.0 * c5]
+            correction += jk_energies_per_atom(mf, dm_pairs,
+                j_factor=j_factors, k_factor=k_factors, sum_results=True,)
 
-        de += correction * fglobal
+            de += correction * fglobal
         de = xp.asarray(de)
     else:
         mf_grad = td.base._scf.nuc_grad_method()
@@ -752,17 +756,23 @@ def grad_elec(td, fglobal=None, fit=True,d_lda=0.3, atmlst=None, max_memory=2000
             vj, vk = td.get_jk(mol, (oo0a, dmz1dooa, oo0b, dmz1dvvb))
             vj = vj.reshape(2, 2, 3, nao, nao)
             vk = vk.reshape(2, 2, 3, nao, nao) * hyb
-            veff1 = vj[0] + vj[1] - vk
             vk1 = -td.get_k(mol, (dmt, dmt.T)) * hyb
+            if omega != 0:
+                vk += td.get_k(
+                    mol, (oo0a, dmz1dooa, oo0b, dmz1dvvb), omega=omega
+                ).reshape(2, 2, 3, nao, nao) * (alpha - hyb)
+                vk1 += -td.get_k(mol, (dmt, dmt.T), omega=omega) * (alpha - hyb)
+            veff1 = vj[0] + vj[1] - vk
         else:
             vj = td.get_j(mol, (oo0a, dmz1dooa, oo0b, dmz1dvvb))
             vj = vj.reshape(2, 2, 3, nao, nao)
             veff1 = vj[0] + vj[1]
             veff1 = xp.stack((veff1, veff1))
 
-        dm = (scorrao, dmSao, dmHFaao, dmHFbao, dmtcv, dmtco, dmtov, dmtoo,
-               oo0a, oo0b, oo0j, dmtcv.T, dmtco.T, dmtov.T, dmtoo.T)
-        vjcg, vkcg = td.get_jk(mol, dm, hermi=0)  # correct potential gradient
+        if uda:
+            dm = (scorrao, dmSao, dmHFaao, dmHFbao, dmtcv, dmtco, dmtov, dmtoo,
+                oo0a, oo0b, oo0j, dmtcv.T, dmtco.T, dmtov.T, dmtoo.T)
+            vjcg, vkcg = td.get_jk(mol, dm, hermi=0)  # correct potential gradient
 
         fxcz1 = tduks_grad._contract_xc_kernel(
             tdro, mf.xc, z1ao, None, False, False, max_memory)[0]
@@ -798,60 +808,61 @@ def grad_elec(td, fglobal=None, fit=True,d_lda=0.3, atmlst=None, max_memory=2000
             de[k] -= lib.einsum('xpq,qp->x', s1[:, p0:p1], im0[:, p0:p1])
 
             # correct term
-            # dm = (scorrao, dmSao, dmHFaao, dmHFbao, dmtcv, dmtco, dmtov, dmtoo, oo0a, oo0b, oo0j)
-            # \partial F_{\mu\nu}^{S} / \partial\xi
-            de[k] += lib.einsum("xpq,pq->x", vkcg[0, :, p0:p1], dmSao[p0:p1]) * fglobal
-            de[k] += lib.einsum("xpq,pq->x", vkcg[0, :, p0:p1], dmSao.T[p0:p1]) * fglobal
-            de[k] += lib.einsum("xpq,pq->x", vkcg[1, :, p0:p1], scorrao[p0:p1]) * fglobal
-            de[k] += lib.einsum("xpq,pq->x", vkcg[1, :, p0:p1], scorrao.T[p0:p1]) * fglobal
-            # \partial F_{\mu\nu}^{HF,\sigma} / \partial\xi
-            de[k] += lib.einsum('xpq,pq->x', h1ao, dmHFao) * fglobal
-            de[k] += lib.einsum("xpq,pq->x", vjcg[10, :, p0:p1], dmHFao[p0:p1]) * fglobal
-            de[k] += lib.einsum("xpq,pq->x", vjcg[10, :, p0:p1], dmHFao.T[p0:p1]) * fglobal
-            de[k] += lib.einsum("xpq,pq->x", vjcg[2, :, p0:p1] + vjcg[3, :, p0:p1], oo0j[p0:p1]) * fglobal
-            de[k] += lib.einsum("xpq,pq->x", vjcg[2, :, p0:p1] + vjcg[3, :, p0:p1], oo0j.T[p0:p1]) * fglobal
-            de[k] -= lib.einsum('xpq,pq->x', vkcg[8, :, p0:p1], dmHFaao[p0:p1]) * fglobal
-            de[k] -= lib.einsum('xpq,pq->x', vkcg[8, :, p0:p1], dmHFaao.T[p0:p1]) * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[2, :, p0:p1], oo0a[p0:p1]) * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[2, :, p0:p1], oo0a.T[p0:p1]) * fglobal
-            de[k] -= lib.einsum('xpq,pq->x', vkcg[9, :, p0:p1], dmHFbao[p0:p1]) * fglobal
-            de[k] -= lib.einsum('xpq,pq->x', vkcg[9, :, p0:p1], dmHFbao.T[p0:p1]) * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[3, :, p0:p1], oo0b[p0:p1]) * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[3, :, p0:p1], oo0b.T[p0:p1]) * fglobal
-            # \partial J^{ao} / \partial\xi
-            de[k] -= lib.einsum("xpq,pq->x", vjcg[5, :, p0:p1], dmtco[p0:p1]) * c2 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vjcg[5, :, p0:p1], dmtco.T[p0:p1]) * c2 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vjcg[6, :, p0:p1], dmtov[p0:p1]) * c2 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vjcg[6, :, p0:p1], dmtov.T[p0:p1]) * c2 * fglobal
-            de[k] += lib.einsum("xpq,pq->x", vjcg[6, :, p0:p1], dmtco[p0:p1]) * c2 * fglobal
-            de[k] += lib.einsum("xpq,pq->x", vjcg[6, :, p0:p1], dmtco.T[p0:p1]) * c2 * fglobal
-            de[k] += lib.einsum("xpq,pq->x", vjcg[5, :, p0:p1], dmtov[p0:p1]) * c2 * fglobal
-            de[k] += lib.einsum("xpq,pq->x", vjcg[5, :, p0:p1], dmtov.T[p0:p1]) * c2 * fglobal
-            # \partial K^{ao} / \partial\xi
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[4, :, p0:p1], dmtco[p0:p1]) * 2 * c3 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[11, :, p0:p1], dmtco.T[p0:p1]) * 2 * c3 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[5, :, p0:p1], dmtcv[p0:p1]) * 2 * c3 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[12, :, p0:p1], dmtcv.T[p0:p1]) * 2 * c3 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[4, :, p0:p1], dmtov[p0:p1]) * 2 * c3 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[11, :, p0:p1], dmtov.T[p0:p1]) * 2 * c3 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[6, :, p0:p1], dmtcv[p0:p1]) * 2 * c3 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[13, :, p0:p1], dmtcv.T[p0:p1]) * 2 * c3 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[5, :, p0:p1], dmtov[p0:p1]) * c2 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[12, :, p0:p1], dmtov.T[p0:p1]) * c2 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[6, :, p0:p1], dmtco[p0:p1]) * c2 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[13, :, p0:p1], dmtco.T[p0:p1]) * c2 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[4, :, p0:p1], dmtoo[p0:p1]) * 2 * c4 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[11, :, p0:p1], dmtoo.T[p0:p1]) * 2 * c4 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[7, :, p0:p1], dmtcv[p0:p1]) * 2 * c4 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[14, :, p0:p1], dmtcv.T[p0:p1]) * 2 * c4 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[5, :, p0:p1], dmtoo[p0:p1]) * 2 * c5 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[12, :, p0:p1], dmtoo.T[p0:p1]) * 2 * c5 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[7, :, p0:p1], dmtco[p0:p1]) * 2 * c5 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[14, :, p0:p1], dmtco.T[p0:p1]) * 2 * c5 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[6, :, p0:p1], dmtoo[p0:p1]) * 2 * c5 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[13, :, p0:p1], dmtoo.T[p0:p1]) * 2 * c5 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[7, :, p0:p1], dmtov[p0:p1]) * 2 * c5 * fglobal
-            de[k] -= lib.einsum("xpq,pq->x", vkcg[14, :, p0:p1], dmtov.T[p0:p1]) * 2 * c5 * fglobal
+            if uda:
+                # dm = (scorrao, dmSao, dmHFaao, dmHFbao, dmtcv, dmtco, dmtov, dmtoo, oo0a, oo0b, oo0j)
+                # \partial F_{\mu\nu}^{S} / \partial\xi
+                de[k] += lib.einsum("xpq,pq->x", vkcg[0, :, p0:p1], dmSao[p0:p1]) * fglobal
+                de[k] += lib.einsum("xpq,pq->x", vkcg[0, :, p0:p1], dmSao.T[p0:p1]) * fglobal
+                de[k] += lib.einsum("xpq,pq->x", vkcg[1, :, p0:p1], scorrao[p0:p1]) * fglobal
+                de[k] += lib.einsum("xpq,pq->x", vkcg[1, :, p0:p1], scorrao.T[p0:p1]) * fglobal
+                # \partial F_{\mu\nu}^{HF,\sigma} / \partial\xi
+                de[k] += lib.einsum('xpq,pq->x', h1ao, dmHFao) * fglobal
+                de[k] += lib.einsum("xpq,pq->x", vjcg[10, :, p0:p1], dmHFao[p0:p1]) * fglobal
+                de[k] += lib.einsum("xpq,pq->x", vjcg[10, :, p0:p1], dmHFao.T[p0:p1]) * fglobal
+                de[k] += lib.einsum("xpq,pq->x", vjcg[2, :, p0:p1] + vjcg[3, :, p0:p1], oo0j[p0:p1]) * fglobal
+                de[k] += lib.einsum("xpq,pq->x", vjcg[2, :, p0:p1] + vjcg[3, :, p0:p1], oo0j.T[p0:p1]) * fglobal
+                de[k] -= lib.einsum('xpq,pq->x', vkcg[8, :, p0:p1], dmHFaao[p0:p1]) * fglobal
+                de[k] -= lib.einsum('xpq,pq->x', vkcg[8, :, p0:p1], dmHFaao.T[p0:p1]) * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[2, :, p0:p1], oo0a[p0:p1]) * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[2, :, p0:p1], oo0a.T[p0:p1]) * fglobal
+                de[k] -= lib.einsum('xpq,pq->x', vkcg[9, :, p0:p1], dmHFbao[p0:p1]) * fglobal
+                de[k] -= lib.einsum('xpq,pq->x', vkcg[9, :, p0:p1], dmHFbao.T[p0:p1]) * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[3, :, p0:p1], oo0b[p0:p1]) * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[3, :, p0:p1], oo0b.T[p0:p1]) * fglobal
+                # \partial J^{ao} / \partial\xi
+                de[k] -= lib.einsum("xpq,pq->x", vjcg[5, :, p0:p1], dmtco[p0:p1]) * c2 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vjcg[5, :, p0:p1], dmtco.T[p0:p1]) * c2 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vjcg[6, :, p0:p1], dmtov[p0:p1]) * c2 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vjcg[6, :, p0:p1], dmtov.T[p0:p1]) * c2 * fglobal
+                de[k] += lib.einsum("xpq,pq->x", vjcg[6, :, p0:p1], dmtco[p0:p1]) * c2 * fglobal
+                de[k] += lib.einsum("xpq,pq->x", vjcg[6, :, p0:p1], dmtco.T[p0:p1]) * c2 * fglobal
+                de[k] += lib.einsum("xpq,pq->x", vjcg[5, :, p0:p1], dmtov[p0:p1]) * c2 * fglobal
+                de[k] += lib.einsum("xpq,pq->x", vjcg[5, :, p0:p1], dmtov.T[p0:p1]) * c2 * fglobal
+                # \partial K^{ao} / \partial\xi
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[4, :, p0:p1], dmtco[p0:p1]) * 2 * c3 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[11, :, p0:p1], dmtco.T[p0:p1]) * 2 * c3 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[5, :, p0:p1], dmtcv[p0:p1]) * 2 * c3 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[12, :, p0:p1], dmtcv.T[p0:p1]) * 2 * c3 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[4, :, p0:p1], dmtov[p0:p1]) * 2 * c3 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[11, :, p0:p1], dmtov.T[p0:p1]) * 2 * c3 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[6, :, p0:p1], dmtcv[p0:p1]) * 2 * c3 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[13, :, p0:p1], dmtcv.T[p0:p1]) * 2 * c3 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[5, :, p0:p1], dmtov[p0:p1]) * c2 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[12, :, p0:p1], dmtov.T[p0:p1]) * c2 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[6, :, p0:p1], dmtco[p0:p1]) * c2 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[13, :, p0:p1], dmtco.T[p0:p1]) * c2 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[4, :, p0:p1], dmtoo[p0:p1]) * 2 * c4 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[11, :, p0:p1], dmtoo.T[p0:p1]) * 2 * c4 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[7, :, p0:p1], dmtcv[p0:p1]) * 2 * c4 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[14, :, p0:p1], dmtcv.T[p0:p1]) * 2 * c4 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[5, :, p0:p1], dmtoo[p0:p1]) * 2 * c5 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[12, :, p0:p1], dmtoo.T[p0:p1]) * 2 * c5 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[7, :, p0:p1], dmtco[p0:p1]) * 2 * c5 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[14, :, p0:p1], dmtco.T[p0:p1]) * 2 * c5 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[6, :, p0:p1], dmtoo[p0:p1]) * 2 * c5 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[13, :, p0:p1], dmtoo.T[p0:p1]) * 2 * c5 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[7, :, p0:p1], dmtov[p0:p1]) * 2 * c5 * fglobal
+                de[k] -= lib.einsum("xpq,pq->x", vkcg[14, :, p0:p1], dmtov.T[p0:p1]) * 2 * c5 * fglobal
             # de[k] += td.extra_force(ia, locals())  # extension, here always zero
     log.timer("Integral derivatives and assembly", *time1)
     log.timer("Total electronic gradient", *time0)
@@ -876,7 +887,7 @@ class _RO2U:
 
 class SFD_gradient(rohf_grad.Gradients):
     cphf_max_cycle = getattr(__config__, 'grad_tdrhf_Gradients_cphf_max_cycle', 20) + 1000
-    cphf_conv_tol = getattr(__config__, 'grad_tdrhf_Gradients_cphf_conv_tol', 1e-8)
+    cphf_conv_tol = getattr(__config__, 'grad_tdrhf_Gradients_cphf_conv_tol', 1e-12)
     dsolve_lindep = getattr(__config__, 'lib_linalg_helper_dsolve_lindep', 1e-13)
 
     def __init__(self, td, method=1, state=1):
@@ -890,9 +901,9 @@ class SFD_gradient(rohf_grad.Gradients):
         self.de = None  # gradient of molecule
         self.atmlst = None  # which atom will be calculate gradient
         if method == 1:
-            self.collinear_samples = 20
+            self.base.collinear_samples = 20
         elif method == 2:
-            self.collinear_samples = -1
+            self.base.collinear_samples = -1
         else:
             raise NotImplementedError("ALDA0 and Noncollinear kernel do not implement")
 

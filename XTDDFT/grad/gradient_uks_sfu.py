@@ -348,6 +348,9 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
         vj0 = xp.asarray(vj0)
         vk0 = xp.asarray(vk0) * hyb
         vk1 = xp.asarray(mf.get_k(mol, dmt, hermi=0)) * hyb  # c_x(\mu\lambda|\kappa\nu)
+        if omega != 0:
+            vk0 += xp.asarray(mf.get_k(mol, (dmzvva, dmzoob), hermi=1, omega=omega) * (alpha - hyb))
+            vk1 += xp.asarray(mf.get_k(mol, dmt, hermi=0, omega=omega) * (alpha - hyb))
 
         # G_{\mu\nu}^{\sigma}[T] + g^{xc}[X,X]
         veff0doo = vj0[0] + vj0[1] - vk0 + f1oo[:, 0] + k1ao[:, 0]
@@ -477,11 +480,10 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
             k_factors = [0]
             dvhf = jk_energies_per_atom(mf, dms, j_factors, k_factors, sum_results=True)
 
-        # if with_k and omega != 0:
-        #     j_factors = [0, 0, 0]
-        #     k_factors = [alpha - hyb, alpha - hyb, 2 * (alpha - hyb)]
-        #     dvhf += td.jk_energies_per_atom(dms[1:], j_factors, k_factors, omega=omega, sum_results=True)
-        # time1 = log.timer('2e AO integral derivatives', *time1)
+        if with_k and omega != 0:
+            j_factors = [0, 0, 0]
+            k_factors = [alpha - hyb, alpha - hyb, 2 * (alpha - hyb)]
+            dvhf += jk_energies_per_atom(mf, dms[1:], j_factors, k_factors, omega=omega, sum_results=True)
 
         z1ao = z1ao.view(xp.ndarray)
         fxcz1 = gpu_tduks_grad._contract_xc_kernel(td, mf.xc, 2*z1ao, None, False, False)[0]
@@ -513,6 +515,9 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
             vj = vj.reshape(2, 2, 3, nao, nao)
             vk = vk.reshape(2, 2, 3, nao, nao) * hyb
             vk1 = -td.get_k(mol, xp.stack((dmt, dmt.T))) * hyb
+            if omega != 0:
+                vk += td.get_k(mol, dm, omega=omega).reshape(2, 2, 3, nao, nao) * (alpha - hyb)
+                vk1 += -td.get_k(mol, (dmt, dmt.T), omega=omega) * (alpha - hyb)
             veff1 = vj[0] + vj[1] - vk
         else:
             vj = td.get_j(mol, dm, hermi=1).reshape(2, 2, 3, nao, nao)
@@ -557,8 +562,8 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
 
 
 class SFU_gradient(uhf_grad.Gradients):
-    cphf_max_cycle = getattr(__config__, 'grad_tdrhf_Gradients_cphf_max_cycle', 20) + 20
-    cphf_conv_tol = getattr(__config__, 'grad_tdrhf_Gradients_cphf_conv_tol', 1e-8)
+    cphf_max_cycle = getattr(__config__, 'grad_tdrhf_Gradients_cphf_max_cycle', 20) + 1000
+    cphf_conv_tol = getattr(__config__, 'grad_tdrhf_Gradients_cphf_conv_tol', 1e-12)
 
     def __init__(self, td, method=1, state=1):
         self.base = td
@@ -571,9 +576,9 @@ class SFU_gradient(uhf_grad.Gradients):
         self.de = None  # gradient of molecule
         self.atmlst = None  # which atom will be calculate gradient
         if method == 1:
-            self.collinear_samples = 20
+            self.base.collinear_samples = 20
         elif method == 2:
-            self.collinear_samples = -1
+            self.base.collinear_samples = -1
         else:
             raise NotImplementedError("ALDA0 and Noncollinear kernel do not implement")
         

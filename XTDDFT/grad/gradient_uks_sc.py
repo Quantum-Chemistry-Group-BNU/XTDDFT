@@ -314,6 +314,8 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
         #  how it influence time usage.
         vj, vk = mf.get_jk(mol, dm, hermi=0)  # g_{\mu\nu}^{\sigma}[T]
         vk *= hyb
+        if omega != 0:
+            vk += mf.get_k(mol, dm, hermi=0, omega=omega) * (alpha - hyb)
         veff0doo = vj[0] + vj[1] - vk[:2] + f1oo[:, 0] + k1ao[:, 0]
         wvoa = (orbv_a.T @ veff0doo[0] @ orbo_a) * 2
         wvob = (orbv_b.T @ veff0doo[1] @ orbo_b) * 2
@@ -444,7 +446,23 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
             xp.stack(((dmxa - dmxa.T) * .5, (dmxb - dmxb.T) * .5)),
             0.0, k_factor, hermi=2,
         )
+        if with_k and omega != 0:
+            j_factor = 0.0
+            k_factor = alpha - hyb  # =beta
 
+            dvhf += get_veff(td, mol,
+                    xp.stack(((dmz1dooa + dmz1dooa.T) * 0.5 + oo0a,
+                               (dmz1doob + dmz1doob.T) * 0.5 + oo0b)),
+                    j_factor=0.0, k_factor = k_factor, omega=omega, hermi=1)
+            dvhf -= get_veff(td, mol,
+                    xp.stack(((dmz1dooa + dmz1dooa.T) * 0.5, (dmz1doob + dmz1doob.T) * 0.5)),
+                    j_factor=0.0, k_factor = k_factor, omega=omega, hermi=1)
+            dvhf += 2 * get_veff(td, mol,
+                    xp.stack(((dmxa + dmxa.T) * 0.5, (dmxb + dmxb.T) * 0.5)),
+                    j_factor=0.0, k_factor = k_factor, omega=omega, hermi=1)
+            dvhf -= 2 * get_veff(td, mol,
+                    xp.stack(((dmxa - dmxa.T) * 0.5, (dmxb - dmxb.T) * 0.5)),
+                    j_factor=0.0, k_factor = k_factor, omega=omega, hermi=2)
         de = dh_ground_and_td + xp.asnumpy(dh1e_ground_and_td) - ds + 2 * dvhf
         dveff1_0 = gpu_rhf_grad.contract_h1e_dm(mol, vxc1[0, 1:], oo0a + dmz1dooa, hermi=0)
         dveff1_0 += gpu_rhf_grad.contract_h1e_dm(mol, vxc1[1, 1:], oo0b + dmz1doob, hermi=0)
@@ -471,8 +489,8 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
             vj, vk = td.get_jk(mol, dm)
             vj = vj.reshape(2,4,3,nao,nao)
             vk = vk.reshape(2,4,3,nao,nao) * hyb
-            # if omega != 0:
-            #     vk += td.get_k(mol, dm, omega=omega).reshape(2,4,3,nao,nao) * (alpha-hyb)
+            if omega != 0:
+                vk += td.get_k(mol, dm, omega=omega).reshape(2,4,3,nao,nao) * (alpha-hyb)
             veff1 = vj[0] + vj[1] - vk
         else:
             vj = td.get_j(mol, dm).reshape(2,4,3,nao,nao)
@@ -522,8 +540,8 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
 
 
 class SC_gradient(uhf_grad.Gradients):
-    cphf_max_cycle = getattr(__config__, 'grad_tdrhf_Gradients_cphf_max_cycle', 20) + 20
-    cphf_conv_tol = getattr(__config__, 'grad_tdrhf_Gradients_cphf_conv_tol', 1e-8)
+    cphf_max_cycle = getattr(__config__, 'grad_tdrhf_Gradients_cphf_max_cycle', 20) + 1000
+    cphf_conv_tol = getattr(__config__, 'grad_tdrhf_Gradients_cphf_conv_tol', 1e-12)
 
     def __init__(self, td, state=1):
         self.base = td

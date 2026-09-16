@@ -247,6 +247,8 @@ def grad_elec(td, atmlst=None, max_memory=2000,
     mol = td.mol
     xp = array_module(mf)
     gpu = is_gpu_mf(mf)
+    # suda is capital letter of should use delta a
+    uda = td.base.use_delta_a
     if gpu:
         from gpu4pyscf.lib import logger
     else:
@@ -274,8 +276,9 @@ def grad_elec(td, atmlst=None, max_memory=2000,
     orbo_a = mo_coeff[0][:, :ni]
     orbv_b = mo_coeff[1][:, nc:]
     orbo_b = mo_coeff[1][:, :nc]
-    # XTDA return spin tensor basis vector, here use spin orbital basis
-    v = xp.asarray(_st2so(xp.asarray(td.v), nc, no, nv))
+    # XTDA return spin tensor basis vector, gradient use spin orbital basis
+    if td.base.davidson and td.base.so2st:
+        v = xp.asarray(_st2so(xp.asarray(td.v), nc, no, nv))
     v = v[:, td.state-1]
     v_cva = v[:nc*nv].reshape(nc, nv)
     v_ova = v[nc*nv:(nc+no)*nv].reshape(no, nv)
@@ -352,6 +355,8 @@ def grad_elec(td, atmlst=None, max_memory=2000,
         #  how it influence time usage.
         vj, vk = mf.get_jk(mol, dm, hermi=0)  # g_{\mu\nu}^{\sigma}[T]
         vk *= hyb
+        if omega != 0:
+            vk += mf.get_k(mol, dm, hermi=0, omega=omega) * (alpha - hyb)
         veff0doo = vj[0] + vj[1] - vk[:2] + f1oo[:, 0] + k1ao[:, 0]
         wvoa = (orbv_a.T @ veff0doo[0] @ orbo_a) * 2
         wvob = (orbv_b.T @ veff0doo[1] @ orbo_b) * 2
@@ -383,32 +388,36 @@ def grad_elec(td, atmlst=None, max_memory=2000,
         wvob -= xp.einsum('ij,aj->ai', veff0mob[:nc, :nc], vb) * 2
         wvob -= xp.einsum('ab,ib->ai', dvvb, fockbmo[:nc, nc:]) * 2
 
-    wcca = (orbo_a.T @ veff0doo[0] @ orbo_a) * 2
-    wcca += xp.einsum('ik,jk->ij', dooa, fockamo[:ni, :ni]) * 2
-    wcca += xp.einsum('aj,ai->ij', veff0moa[ni:, :ni], va) * 2
-    wvvb = xp.einsum('ac,bc->ab', dvvb, fockbmo[nc:, nc:]) * 2
-    wvvb += xp.einsum('bi,ai->ab', veff0mob[nc:, :nc], vb) * 2
     wvc = wvoa[:, :nc] + wvob[no:, :]  # (Q_{ia} - Q_{ai})
-    wvo = wvoa[:, nc:] - (wvvb - wvvb.T)[no:, :no]  # (Q_{ta} - Q_{at})
-    woc = wvob[:no, :] - (wcca - wcca.T)[nc:, :nc]  # (Q_{it} - Q_{ti})
+    wvo = wvoa[:, nc:]  # (Q_{ta} - Q_{at})
+    woc = wvob[:no, :]  # (Q_{it} - Q_{ti})
+    if uda:
+        wcca = (orbo_a.T @ veff0doo[0] @ orbo_a) * 2
+        wcca += xp.einsum('ik,jk->ij', dooa, fockamo[:ni, :ni]) * 2
+        wcca += xp.einsum('aj,ai->ij', veff0moa[ni:, :ni], va) * 2
+        wvvb = xp.einsum('ac,bc->ab', dvvb, fockbmo[nc:, nc:]) * 2
+        wvvb += xp.einsum('bi,ai->ab', veff0mob[nc:, :nc], vb) * 2
+        wvo -= (wvvb - wvvb.T)[no:, :no]  # (Q_{ta} - Q_{at})
+        woc -= (wcca - wcca.T)[nc:, :nc]  # (Q_{it} - Q_{ti})
 
     # 3.2 add correct term
-    if gpu:
-        FSao = mf.get_k(mol, xp.stack((scorrao, dmcorrao)), hermi=0)
-    else:
-        from pyscf import scf
+    if uda:
+        if gpu:
+            FSao = mf.get_k(mol, xp.stack((scorrao, dmcorrao)), hermi=0)
+        else:
+            from pyscf import scf
 
-        FSao = scf.ROHF(mol).get_k(
-            mol, xp.stack((scorrao, dmcorrao)), hermi=0
-        )
-    FSao = xp.asarray(FSao)
-    FSmo = mo_coeff[0].T @ FSao @ mo_coeff[0]
-    wvc += xp.einsum('ij,aj->ai', dmcc, FSmo[0, ni:, :nc]) * 2
-    wvc -= xp.einsum('ab,ib->ai', dmvv, FSmo[0, :nc, ni:]) * 2
-    wvo += FSmo[1, ni:, nc:ni]
-    wvo -= xp.einsum('ab,tb->at', dmvv, FSmo[0, nc:ni, ni:]) * 2
-    woc += xp.einsum('ij,tj->ti', dmcc, FSmo[0, nc:ni, :nc]) * 2
-    woc -= FSmo[1, nc:ni, :nc]
+            FSao = scf.ROHF(mol).get_k(
+                mol, xp.stack((scorrao, dmcorrao)), hermi=0
+            )
+        FSao = xp.asarray(FSao)
+        FSmo = mo_coeff[0].T @ FSao @ mo_coeff[0]
+        wvc += xp.einsum('ij,aj->ai', dmcc, FSmo[0, ni:, :nc]) * 2
+        wvc -= xp.einsum('ab,ib->ai', dmvv, FSmo[0, :nc, ni:]) * 2
+        wvo += FSmo[1, ni:, nc:ni]
+        wvo -= xp.einsum('ab,tb->at', dmvv, FSmo[0, nc:ni, ni:]) * 2
+        woc += xp.einsum('ij,tj->ti', dmcc, FSmo[0, nc:ni, :nc]) * 2
+        woc -= FSmo[1, nc:ni, :nc]
     w = xp.hstack((wvc.ravel(), wvo.ravel(), woc.ravel()))
     time1 = log.timer("calculate Q", *time1)
 
@@ -518,11 +527,12 @@ def grad_elec(td, atmlst=None, max_memory=2000,
     im0[nc:ni, ni:] += xp.einsum('ti,ai->ta', z1b[:no], fockbmo[ni:, :nc]) / 2
 
     # 5.3 add correct term
-    scorrmo = xp.zeros((nao, nao))
-    scorrmo[nc:ni, nc:ni] = xp.eye(no) / 2
-    im0[:nc, :] += xp.einsum('ij,pj->ip', dmcc, FSmo[0, :, :nc])
-    im0[ni:, :] += xp.einsum('ab,pb->ap', dmvv, FSmo[0, :, ni:])
-    im0[nc:ni, :] += FSmo[1, nc:ni, :] / 2
+    if uda:
+        scorrmo = xp.zeros((nao, nao))
+        scorrmo[nc:ni, nc:ni] = xp.eye(no) / 2
+        im0[:nc, :] += xp.einsum('ij,pj->ip', dmcc, FSmo[0, :, :nc])
+        im0[ni:, :] += xp.einsum('ab,pb->ap', dmvv, FSmo[0, :, ni:])
+        im0[nc:ni, :] += FSmo[1, nc:ni, :] / 2
 
     im0 = mo_coeff[0] @ im0 @ mo_coeff[0].T
     time1 = log.timer("calculate W", *time1)
@@ -574,6 +584,23 @@ def grad_elec(td, atmlst=None, max_memory=2000,
             xp.stack(((dmxa - dmxa.T) * .5, (dmxb - dmxb.T) * .5)),
             0.0, k_factor, hermi=2,
         )
+        if with_k and omega != 0:
+            j_factor = 0.0
+            k_factor = alpha - hyb  # =beta
+
+            dvhf += get_veff(td, mol,
+                    xp.stack(((dmz1dvva + dmz1dvva.T) * 0.5 + oo0a,
+                               (dmz1doob + dmz1doob.T) * 0.5 + oo0b)),
+                    j_factor=0.0, k_factor = k_factor, omega=omega, hermi=1)
+            dvhf -= get_veff(td, mol,
+                    xp.stack(((dmz1dvva + dmz1dvva.T) * 0.5, (dmz1doob + dmz1doob.T) * 0.5)),
+                    j_factor=0.0, k_factor = k_factor, omega=omega, hermi=1)
+            dvhf += 2 * get_veff(td, mol,
+                    xp.stack(((dmxa + dmxa.T) * 0.5, (dmxb + dmxb.T) * 0.5)),
+                    j_factor=0.0, k_factor = k_factor, omega=omega, hermi=1)
+            dvhf -= 2 * get_veff(td, mol,
+                    xp.stack(((dmxa - dmxa.T) * 0.5, (dmxb - dmxb.T) * 0.5)),
+                    j_factor=0.0, k_factor = k_factor, omega=omega, hermi=2)
         de = dh_ground_and_td + xp.asnumpy(dh1e_ground_and_td) - ds + 2 * dvhf
 
         dveff1_0 = gpu_rhf_grad.contract_h1e_dm(mol, vxc1[0, 1:], oo0a + dmz1dvva, hermi=0)
@@ -585,10 +612,12 @@ def grad_elec(td, atmlst=None, max_memory=2000,
         dveff1_2 += gpu_rhf_grad.contract_h1e_dm(mol, f1vo[1, 1:] * 2, dmxb, hermi=0)
 
         # correct term
-        dcorr = get_veff(td, mol, scorrao + dmcorrao, j_factor=0.0, k_factor=-1.0, hermi=1)
-        dcorr -= get_veff(td, mol, scorrao, j_factor=0.0, k_factor=-1.0, hermi=1)
-        dcorr -= get_veff(td, mol, dmcorrao, j_factor=0.0, k_factor=-1.0, hermi=1)
-        de += dveff1_0 + dveff1_1 + dveff1_2 + 4 * dcorr
+        if uda:
+            dcorr = get_veff(td, mol, scorrao + dmcorrao, j_factor=0.0, k_factor=-1.0, hermi=1)
+            dcorr -= get_veff(td, mol, scorrao, j_factor=0.0, k_factor=-1.0, hermi=1)
+            dcorr -= get_veff(td, mol, dmcorrao, j_factor=0.0, k_factor=-1.0, hermi=1)
+            de += 4 * dcorr
+        de += dveff1_0 + dveff1_1 + dveff1_2
         de = xp.asarray(de)
         if atmlst is not None:
             de = de[xp.asarray(tuple(atmlst), dtype=int)]
@@ -603,8 +632,8 @@ def grad_elec(td, atmlst=None, max_memory=2000,
             vj, vk = td.get_jk(mol, dm)
             vj = vj.reshape(2,4,3,nao,nao)
             vk = vk.reshape(2,4,3,nao,nao) * hyb
-            # if omega != 0:
-            #     vk += td.get_k(mol, dm, omega=omega).reshape(2,4,3,nao,nao) * (alpha-hyb)
+            if omega != 0:
+                vk += td.get_k(mol, dm, omega=omega).reshape(2,4,3,nao,nao) * (alpha-hyb)
             veff1 = vj[0] + vj[1] - vk
         else:
             vj = td.get_j(mol, dm).reshape(2,4,3,nao,nao)
@@ -648,10 +677,11 @@ def grad_elec(td, atmlst=None, max_memory=2000,
             de[k] += xp.einsum('xji,ij->x', veff1b[3,:,p0:p1], dmxb[:,p0:p1])*2
 
             # add correct term
-            de[k] += xp.einsum('xpq,pq->x', vkc[0, :, p0:p1], dmcorrao[p0:p1])
-            de[k] += xp.einsum('xpq,qp->x', vkc[0, :, p0:p1], dmcorrao[:, p0:p1])
-            de[k] += xp.einsum('xpq,pq->x', vkc[1, :, p0:p1], scorrao[p0:p1])
-            de[k] += xp.einsum('xpq,qp->x', vkc[1, :, p0:p1], scorrao[:, p0:p1])
+            if uda:
+                de[k] += xp.einsum('xpq,pq->x', vkc[0, :, p0:p1], dmcorrao[p0:p1])
+                de[k] += xp.einsum('xpq,qp->x', vkc[0, :, p0:p1], dmcorrao[:, p0:p1])
+                de[k] += xp.einsum('xpq,pq->x', vkc[1, :, p0:p1], scorrao[p0:p1])
+                de[k] += xp.einsum('xpq,qp->x', vkc[1, :, p0:p1], scorrao[:, p0:p1])
 
             # de[k] += td.extra_force(ia, locals())  # extension, here always zero
     log.timer("Integral derivatives and assembly", *time1)
@@ -680,7 +710,7 @@ class _RO2U:
 
 class SC_gradient(rohf_grad.Gradients):
     cphf_max_cycle = getattr(__config__, 'grad_tdrhf_Gradients_cphf_max_cycle', 20) + 1000
-    cphf_conv_tol = getattr(__config__, 'grad_tdrhf_Gradients_cphf_conv_tol', 1e-8)
+    cphf_conv_tol = getattr(__config__, 'grad_tdrhf_Gradients_cphf_conv_tol', 1e-12)
     dsolve_lindep = getattr(__config__, 'lib_linalg_helper_dsolve_lindep', 1e-13)
 
     def __init__(self, td, state=1):
