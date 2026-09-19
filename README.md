@@ -98,6 +98,10 @@ energies_ev, vectors = td.kernel(nstates=3)
 approximation (COL). `SA` controls the spin-adaptation correction: 0 keeps
 the SF-TDA block, while 1--3 add progressively more $\Delta A$ terms.
 These are spin-flip-down excitations ($S_f=S_i-1$).
+With `remove=None`, restricted `SA=0` calculations retain the full
+conventional SF-TDA space; restricted `SA>0` calculations project out the
+$S_-|\Phi_0\rangle$ reference component. Pass `remove=True` or `False`
+to override this default.
 
 ## Transition densities, dipoles, and NTOs
 

@@ -153,6 +153,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         # compatibility with existing callers.
         # self.debug_sa0_hdiag = bool(debug_sa0_hdiag)
         self.SA = (0 if self.type_u else 3) if SA is None else SA
+        self.re = not self.type_u and self.SA > 0
         spin_mf = _as_cpu_mf(mf)
         _,dsp1 = spin_mf.spin_square()
         self.ground_s = (dsp1-1)/2
@@ -1706,7 +1707,10 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
     def kernel(self, nstates=1, remove=None, frozen=None, foo=1.0, d_lda=0.3,
                fglobal=None, fit=True, save=False, save_file=None, init_space=None,
                hdiag_file=None):
-        self.re = (_asnumpy(self.mf.mo_coeff).ndim != 3) if remove is None else bool(remove)
+        self.re = (
+            _asnumpy(self.mf.mo_coeff).ndim != 3 and self.SA > 0
+            if remove is None else bool(remove)
+        )
         nov = (self.nc + self.no) * (self.no + self.nv)
         effective_dim = nov - 1 if self.re else nov
         self.nstates = min(nstates, effective_dim)

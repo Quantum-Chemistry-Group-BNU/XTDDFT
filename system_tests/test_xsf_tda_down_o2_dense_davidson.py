@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 
 import numpy as np
-from pyscf import dft, gto, lib
+from pyscf import dft, gto, lib, scf
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parent))
@@ -12,6 +12,24 @@ sys.path.insert(0, str(ROOT.parent))
 from XTDDFT.XTDDFT.sf_tda_up import SF_TDA_up
 from XTDDFT.XTDDFT.xsf_tda_down import XSF_TDA_down
 from XTDDFT.utils.backend import set_backend
+
+
+def test_rohf_sa0_defaults_to_full_sf_space():
+    set_backend("cpu")
+    lib.num_threads(2)
+    mol = gto.M(
+        atom="O 0 0 0; O 0 0 1.2075",
+        basis="sto-3g",
+        unit="Angstrom",
+        spin=2,
+        verbose=0,
+    )
+    mf = scf.ROHF(mol).run(conv_tol=1e-11)
+    td = XSF_TDA_down(mf, method=2, SA=0, davidson=False)
+    td.kernel(nstates=1)
+
+    assert not td.re
+    assert td.A.shape == ((td.nc + td.no) * (td.no + td.nv),) * 2
 
 
 def test_o2_b3lyp_spin_flip_dense_matches_davidson():
