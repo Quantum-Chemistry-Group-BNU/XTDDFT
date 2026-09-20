@@ -396,6 +396,7 @@ class XTDA(XTDDFT_base):
         # 先重排为 CVa|OVa|COb|CVb；RO 再转张量基，U 参考保留轨道基。
         # Public RO vectors are always ST; so2st only selects the dense matrix basis.
         ordered_v = raw_v[self.order]
+        assert self.so2st == True, "Davidson must use spin tensor basis"
         if self.type_u:
             self.v = ordered_v
         else:

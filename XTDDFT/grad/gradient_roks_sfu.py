@@ -461,16 +461,41 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
     # Z, instead of 1/2 Z
     if gpu:
         from cupyx.scipy.sparse.linalg import LinearOperator, gmres
-
-        operator = LinearOperator((w.size, w.size), matvec=matvec, dtype=w.dtype)
-        z, info = gmres(operator, w, tol=td.cphf_conv_tol, maxiter=td.cphf_max_cycle)
-        if info != 0:
-            raise RuntimeError(f'cupyx.scipy.sparse fails to solve linear equation info={info}')
     else:
-        z = lib.solve(
-            matvec, w, tol=td.cphf_conv_tol, max_cycle=td.cphf_max_cycle,
-            lindep=td.dsolve_lindep,
-        )
+        from scipy.sparse.linalg import LinearOperator, gmres
+    # Fock-diagonal preconditioner.
+    dvc = (
+        xp.diag(fockacc)[None, :] + xp.diag(fockbcc)[None, :]
+        - xp.diag(fockavv)[:, None] - xp.diag(fockbvv)[:, None]
+    )
+    dvo = xp.diag(fockaoo)[None, :] - xp.diag(fockavv)[:, None]
+    doc = xp.diag(fockbcc)[None, :] - xp.diag(fockboo)[:, None]
+    diagonal = xp.hstack((dvc.ravel(), dvo.ravel(), doc.ravel()))
+    floor = 1e-8
+    diagonal = xp.where(
+        xp.abs(diagonal) < floor,
+        xp.where(diagonal < 0, -floor, floor),
+        diagonal
+    )
+    inv_diagonal = 1.0 / diagonal
+    # # orbital energy preconditioner
+    # inv_diagonal = _orbital_energy_inverse_diagonal(mo_energy, nc, no, xp)
+
+    operator = LinearOperator((w.size, w.size), matvec=matvec, dtype=w.dtype)
+    precond = LinearOperator(
+        operator.shape,
+        matvec=lambda x: inv_diagonal * x.ravel(),
+        dtype=w.dtype,
+    )
+    if gpu:
+        z, info = gmres(operator, w, M=precond, tol=td.cphf_conv_tol,
+                        maxiter=td.cphf_max_cycle,)
+    else:
+        z, info = gmres(operator, w, M=precond, rtol=td.cphf_conv_tol,
+                        maxiter=td.cphf_max_cycle,)
+    if info != 0:
+        raise RuntimeError(f"Z-vector GMRES failed: info={info}")
+    
     zvc = z[:nv*nc].reshape(nv, nc)
     zvo = z[nv*nc:nv*nc+nv*no].reshape(nv, no)
     zoc = z[nv*nc+nv*no:].reshape(no, nc)
@@ -664,7 +689,7 @@ class SFU_gradient(rohf_grad.Gradients):
         self.de = None  # gradient of molecule
         self.atmlst = None  # which atom will be calculate gradient
         if method == 1:
-            self.base.collinear_samples = 20
+            self.base.collinear_samples = td.collinear_samples
         elif method == 2:
             self.base.collinear_samples = -1
         else:

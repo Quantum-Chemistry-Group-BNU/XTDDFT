@@ -40,18 +40,17 @@ method_kind = "xsc"  # "usf_up", "usf_down", "usc", "xsf_up", "xsf_down", "xsc"
 use_gpu = False
 
 xc = "b3lyp"
-basis = '6-31g'
+basis = 'sto3g'
 spin = 2
 charge = 0
 cs = 20  # collinear_samples
-states = [1]
+states = [2]
 sf_method = 1
 verbose = 4  # finite difference output level adjust line 19 in XTDDFT/grad/finite_difference.py 
 atom = '''
-    H   0.000000   0.934473  -0.588078
-    H   0.000000  -0.934473  -0.588078
-    C   0.000000   0.000000   0.000000
-    O   0.000000   0.000000   1.221104
+    C   0.00   0.00   0.00
+    H   0.00   0.95   0.15
+    H   0.10  -0.75   0.65
 '''
 # finite difference use this form coordinate
 atom = parse_xyz_string(atom)

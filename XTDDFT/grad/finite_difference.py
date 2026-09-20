@@ -45,6 +45,8 @@ def fd_gradient(atoms, state, mk, xc='b3lyp', charge=0, spin=2,
     """finite difference truncate to second order, (-3E0+4E+ - E++)/(2h), unit of h is Angstrom"""
     assert isinstance(atoms, List) and (len(atoms[0]) == 2)
     print('***** The molecular coordinates of the finite difference input are in angstroms *****')
+    print('finite difference gradient is an standalone program,' \
+    ' the parameter need change in XTDDFT/grad/finite_difference.py')
     natm = len(atoms)
     spec = dict(charge=charge, spin=spin, basis=basis)
     g = np.zeros((natm, 3))
@@ -67,6 +69,8 @@ def fd_gradient_forth(atoms, state, mk, xc='b3lyp', charge=0, spin=2,
     """finite difference truncate to second order, (-3E0+4E+ - E++)/(2h), unit of h is Angstrom"""
     assert isinstance(atoms, List) and (len(atoms[0]) == 2)
     print('***** The molecular coordinates of the finite difference input are in angstroms *****')
+    print('finite difference gradient is an standalone program,' \
+    ' the parameter need change in XTDDFT/grad/finite_difference.py')
     natm = len(atoms)
     spec = dict(charge=charge, spin=spin, basis=basis)
     g = np.zeros((natm, 3))
@@ -95,6 +99,8 @@ def forward_difference(atoms, state, mk, xc='b3lyp', charge=0, spin=2,
     """finite difference truncate to second order, (-3E0+4E+ - E++)/(2h), unit of h is Angstrom"""
     assert isinstance(atoms, List) and (len(atoms[0]) == 2)
     print('***** The molecular coordinates of the finite difference input are in angstroms *****')
+    print('finite difference gradient is an standalone program,' \
+    ' the parameter need change in XTDDFT/grad/finite_difference.py')
     natm = len(atoms)
     spec = dict(charge=charge, spin=spin, basis=basis)
     g = np.zeros((natm, 3))

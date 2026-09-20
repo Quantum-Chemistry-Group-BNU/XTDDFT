@@ -1707,6 +1707,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
     def kernel(self, nstates=1, remove=None, frozen=None, foo=1.0, d_lda=0.3,
                fglobal=None, fit=True, save=False, save_file=None, init_space=None,
                hdiag_file=None):
+        self.foo = foo
         self.re = (
             _asnumpy(self.mf.mo_coeff).ndim != 3 and self.SA > 0
             if remove is None else bool(remove)

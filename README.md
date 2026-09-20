@@ -38,7 +38,7 @@ Select the numerical backend before constructing a reference or response
 object:
 
 ```python
-from XTDDFT_dev.utils.backend import set_backend
+from XTDDFT.utils.backend import set_backend
 
 set_backend("cpu")       # NumPy/PySCF
 # set_backend("gpu")     # CuPy/GPU4PySCF
@@ -60,7 +60,7 @@ corresponding eigenvectors.
 ### XTDA: spin-conserving response
 
 ```python
-from XTDDFT_dev.XTDDFT.xtda import XTDA
+from XTDDFT.XTDDFT.xtda import XTDA
 
 td = XTDA(mf, method=0, davidson=True, davidson_backend="cpu",
           davidson_method="krylov")
@@ -75,7 +75,7 @@ spin-conserving excitations ($S_f=S_i$). `save=True` or
 ### SF_TDA_up: spin-flip-up response
 
 ```python
-from XTDDFT_dev.XTDDFT.sf_tda_up import SF_TDA_up
+from XTDDFT.XTDDFT.sf_tda_up import SF_TDA_up
 
 td = SF_TDA_up(mf, method=1, collinear_samples=20)
 energies_ev, vectors = td.kernel(nstates=3)
@@ -88,7 +88,7 @@ approximation (MCOL). These are spin-flip-up excitations
 ### XSF_TDA_down: spin-flip-down response
 
 ```python
-from XTDDFT_dev.XTDDFT.xsf_tda_down import XSF_TDA_down
+from XTDDFT.XTDDFT.xsf_tda_down import XSF_TDA_down
 
 td = XSF_TDA_down(mf, method=2, SA=3, collinear_samples=60)
 energies_ev, vectors = td.kernel(nstates=3)
@@ -133,7 +133,7 @@ gradient = td.nuc_grad_method(state=1).kernel()
 ```
 
 The state number is one-based and refers to an excited state. Implemented
-routes are XTDA `method=0`, SF-TDA `method=1`, and XSF-TDA `method=1` or
+routes are XTDA `method=0`, SF-TDA `method=1` or `method=2`, and XSF-TDA `method=1` or
 `2`. Periodic and GPU references are not supported by the analytic gradient
 driver.
 
@@ -169,8 +169,8 @@ gradients currently support molecular systems only.
 
 ```python
 from pyscf import dft, gto
-from XTDDFT_dev.XTDDFT.xtda import XTDA
-from XTDDFT_dev.utils.backend import set_backend
+from XTDDFT.XTDDFT.xtda import XTDA
+from XTDDFT.utils.backend import set_backend
 
 set_backend("cpu")
 mol = gto.M(
