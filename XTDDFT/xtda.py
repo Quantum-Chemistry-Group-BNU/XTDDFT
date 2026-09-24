@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 
 from .base import (
@@ -396,11 +398,16 @@ class XTDA(XTDDFT_base):
         # 先重排为 CVa|OVa|COb|CVb；RO 再转张量基，U 参考保留轨道基。
         # Public RO vectors are always ST; so2st only selects the dense matrix basis.
         ordered_v = raw_v[self.order]
-        assert self.so2st == True, "Davidson must use spin tensor basis"
         if self.type_u:
             self.v = ordered_v
         else:
             self.v = xp.asarray(_so2st(_asnumpy(ordered_v), self.nc, self.no, self.nv))
+            if not self.so2st:
+                warnings.warn(
+                    "so2st=False: restricted-reference XTDA eigenvectors were converted from SO to ST "
+                    "after the Davidson solve, before property calculations.",
+                    UserWarning, stacklevel=3,
+                )
         logger.info("XTDA {} converged: {}", self.davidson_method, converged)
         return self.e, self.v
 
@@ -713,9 +720,14 @@ class XTDA(XTDDFT_base):
             self.e = e[:nstates]
             self.v = v[:, :nstates]
         if not self.type_u and not self.so2st:
-            # ponytail: normalize once so all RO post-processing receives ST.
+            # SO dense vectors need conversion; ST dense vectors are already in that basis.
             self.v = get_array_module(self.v).asarray(
                 _so2st(_asnumpy(self.v), self.nc, self.no, self.nv)
+            )
+            warnings.warn(
+                "so2st=False: restricted-reference XTDA eigenvectors were converted from SO to ST "
+                "after dense diagonalization, before property calculations.",
+                UserWarning, stacklevel=3,
             )
         return self.e, self.v
 
