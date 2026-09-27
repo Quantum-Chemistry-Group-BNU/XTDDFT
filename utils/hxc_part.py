@@ -19,6 +19,7 @@ from ..XTDDFT.base import (
     _is_pbc_mf,
     _iter_ao_blocks,
     _iter_block_data,
+    _make_reference_dm,
     mf_info,
     _system,
     _is_ks_mf,
@@ -202,10 +203,7 @@ def cache_xc_kernel_sf(mf, mo_coeff, mo_occ, spin=1,max_memory=2000): # for ALDA
         raise ValueError("spin must be 1 for the spin-flip XC kernel")
 
     nao = mo_coeff[0].shape[0]
-    dm0 = mf.make_rdm1()
-    if np.array(mf.mo_coeff).ndim==2:
-        dm0.mo_coeff = (mf.mo_coeff, mf.mo_coeff)
-        dm0.mo_occ = mo_occ
+    dm0 = _make_reference_dm(mf, mo_occ)
     make_rho = ni._gen_rho_evaluator(_system(mf), dm0, hermi=0, with_lapl=False)[0]
 
     fxc_abs = []

@@ -551,6 +551,12 @@ def _make_fock_dm(mf, mo_coeff, mo_occ):
 def _make_reference_dm(mf, mo_occ):
     dm0 = mf.make_rdm1()
     if np.asarray(mf.mo_coeff).ndim == 2:
+        if np.asarray(dm0).ndim == 2:
+            coeff = np.asarray(mf.mo_coeff)
+            occ = np.asarray(_asnumpy(mo_occ))
+            dm0 = lib.tag_array(np.asarray([
+                (coeff * occ[s]) @ coeff.conj().T for s in range(2)
+            ]))
         dm0.mo_coeff = (mf.mo_coeff, mf.mo_coeff)
         dm0.mo_occ = mo_occ
     return dm0
@@ -594,6 +600,8 @@ def _get_mo_fock(mf, mo_coeff, mo_occ=None, force_cpu=False):
                 (mo_coeff[s] * mo_occ[s]) @ mo_coeff[s].conj().T
                 for s in range(2)
             ])
+            if not _is_unrestricted_mf(mf):
+                dm = dm.sum(axis=0)
         vhf = np.asarray(_asnumpy(_drop_gamma_axis(_get_veff(mf, dm))))
         if vhf.ndim == 2:
             vhf = np.stack([vhf, vhf])
