@@ -8,7 +8,10 @@ from pyscf.grad import tdrks as tdrks_grad
 
 from ..xtda import _st2so
 from ...utils.backend import asnumpy
-from ._backend import array_module, is_gpu_mf, nuclear_gradient, ucphf_module
+from ._backend import (
+    array_module, is_gpu_mf, nuclear_gradient, ucphf_module,
+    cpu_df_get_jk, cpu_df_td_aux, validate_gradient_backend, df_jk_energies_per_atom,
+)
 
 
 def jk_energies_per_atom(
@@ -41,6 +44,16 @@ def jk_energies_per_atom(
         An array of shape (*, Natm, 3) if sum_results is False; otherwise,
         an array of shape (Natm, 3).
     """
+    if getattr(mf, "with_df", None) is not None:
+        validate_gradient_backend(mf)
+        if lr_factor is not None or sr_factor is not None:
+            raise NotImplementedError(
+                "DF derivatives use separate full-range and long-range calls"
+            )
+        return df_jk_energies_per_atom(
+            mf, dm_list, j_factor, k_factor, omega=omega, hermi=hermi,
+            sum_results=sum_results, verbose=verbose,
+        )
     from gpu4pyscf.grad.tdrhf import _jk_energies_per_atom
     xp = array_module(mf)
     vhfopt = mf._opt_gpu.get(omega)
@@ -244,6 +257,7 @@ def grad_elec(td, atmlst=None, max_memory=2000,
     # time0 = logger.process_clock(), logger.perf_counter()
 
     mf = td.base._scf
+    validate_gradient_backend(mf)
     mol = td.mol
     xp = array_module(mf)
     gpu = is_gpu_mf(mf)
@@ -402,13 +416,16 @@ def grad_elec(td, atmlst=None, max_memory=2000,
     # 3.2 add correct term
     if uda:
         if gpu:
-            FSao = mf.get_k(mol, xp.stack((scorrao, dmcorrao)), hermi=0)
+            from gpu4pyscf.scf import rohf as gpu_rohf
+            hfc = gpu_rohf.ROHF(mol)
         else:
             from pyscf import scf
-
-            FSao = scf.ROHF(mol).get_k(
-                mol, xp.stack((scorrao, dmcorrao)), hermi=0
-            )
+            hfc = scf.ROHF(mol)
+        # Full-range HF exchange at the supplied densities, with the same DF
+        # approximation as Delta-A; no XC potential or hybrid scaling.
+        if getattr(mf, "with_df", None) is not None:
+            hfc = hfc.density_fit(with_df=mf.with_df)
+        FSao = hfc.get_k(mol, xp.stack((scorrao, dmcorrao)), hermi=0)
         FSao = xp.asarray(FSao)
         FSmo = mo_coeff[0].T @ FSao @ mo_coeff[0]
         wvc += xp.einsum('ij,aj->ai', dmcc, FSmo[0, ni:, :nc]) * 2
@@ -422,7 +439,10 @@ def grad_elec(td, atmlst=None, max_memory=2000,
 
     # 4. constuct G[Z^S] and solve Z-vector equation
     vresp = mf.gen_response(mo_coeff, mo_occ, hermi=1)  # invoke UKS function, same with upper
+    z_matvecs = 0
     def matvec(x):  # ROHF VC/VO/OC orbital Hessian (same as down-rohf)
+        nonlocal z_matvecs
+        z_matvecs += 1
         xvc = x[:nv*nc].reshape(nv, nc)
         xvo = x[nv*nc:nv*nc+nv*no].reshape(nv, no)
         xoc = x[nv*nc+nv*no:].reshape(no, nc)
@@ -489,12 +509,27 @@ def grad_elec(td, atmlst=None, max_memory=2000,
         matvec=lambda x: inv_diagonal * x.ravel(),
         dtype=w.dtype,
     )
+    z_callbacks = 0
+
+    def count_z_iteration(_):
+        nonlocal z_callbacks
+        z_callbacks += 1
+
     if gpu:
+        # CuPy calls the x callback at every residual check, including the
+        # initial/final check. Subtract these matvecs to count Arnoldi steps.
         z, info = gmres(operator, w, M=precond, tol=td.cphf_conv_tol,
-                        maxiter=td.cphf_max_cycle,)
+                        maxiter=td.cphf_max_cycle,
+                        callback=count_z_iteration, callback_type='x')
+        z_iterations = z_matvecs - z_callbacks
     else:
+        # Explicit pr_norm preserves maxiter's restart-cycle meaning in SciPy.
         z, info = gmres(operator, w, M=precond, rtol=td.cphf_conv_tol,
-                        maxiter=td.cphf_max_cycle,)
+                        maxiter=td.cphf_max_cycle,
+                        callback=count_z_iteration, callback_type='pr_norm')
+        z_iterations = z_callbacks
+    log.info("Z-vector iterations (GMRES inner): %d; matvec calls: %d",
+             z_iterations, z_matvecs)
     if info != 0:
         raise RuntimeError(f"Z-vector GMRES failed: info={info}")
 
@@ -583,7 +618,11 @@ def grad_elec(td, atmlst=None, max_memory=2000,
         ds = gpu_rhf_grad.contract_h1e_dm(mol, s1, im0, hermi=0)
         dh1e_ground_and_td = gpu_rhf_grad.int3c2e.get_dh1e(mol, as_dm1)  # 1/r like terms
 
-        get_veff = gpu_tduks_grad.Gradients.get_veff
+        if getattr(mf, "with_df", None) is not None:
+            from gpu4pyscf.df.grad import tduks as df_tduks_grad
+            get_veff = df_tduks_grad.Gradients.get_veff
+        else:
+            get_veff = gpu_tduks_grad.Gradients.get_veff
         k_factor = hyb if with_k else 0.0
         dvhf = get_veff(
             td, mol,
@@ -636,10 +675,13 @@ def grad_elec(td, atmlst=None, max_memory=2000,
 
         # correct term
         if uda:
-            dcorr = get_veff(td, mol, scorrao + dmcorrao, j_factor=0.0, k_factor=-1.0, hermi=1)
-            dcorr -= get_veff(td, mol, scorrao, j_factor=0.0, k_factor=-1.0, hermi=1)
-            dcorr -= get_veff(td, mol, dmcorrao, j_factor=0.0, k_factor=-1.0, hermi=1)
-            de += 4 * dcorr
+            # Pair backend contracts -k/4 Tr[A K(B)]; k=-4 gives
+            # the full derivative of Tr[scorrao K(dmcorrao)]. The DF
+            # spin-resolved get_veff cannot accept these 2-D densities.
+            de += jk_energies_per_atom(
+                mf, [[scorrao, dmcorrao]], j_factor=[0.0], k_factor=[-4.0],
+                hermi=1, sum_results=True,
+            )
         de += dveff1_0 + dveff1_1 + dveff1_2
         de = xp.asarray(de)
         if atmlst is not None:
@@ -651,7 +693,15 @@ def grad_elec(td, atmlst=None, max_memory=2000,
         as_dm1 = oo0a + oo0b + dmz1dvva + dmz1doob
         dm = xp.stack((oo0a, dmz1dvva+dmz1dvva.T, dmxa, dmxa.T,
                        oo0b, dmz1doob+dmz1doob.T, dmxb, dmxb.T))
-        if with_k:
+        fitted = getattr(mf, "with_df", None) is not None
+        if fitted:
+            vj, vk = cpu_df_get_jk(mf_grad, dm, hyb, alpha, omega)
+            de_aux = cpu_df_td_aux(vj, vk, response_scale=0.5)
+            vj = vj.reshape(2, 4, 3, nao, nao)
+            veff1 = xp.stack((vj[0] + vj[1], vj[0] + vj[1]))
+            if with_k:
+                veff1 = veff1 - vk.reshape(2, 4, 3, nao, nao)
+        elif with_k:
             vj, vk = td.get_jk(mol, dm)
             vj = vj.reshape(2,4,3,nao,nao)
             vk = vk.reshape(2,4,3,nao,nao) * hyb
@@ -662,9 +712,13 @@ def grad_elec(td, atmlst=None, max_memory=2000,
             vj = td.get_j(mol, dm).reshape(2,4,3,nao,nao)
             veff1 = vj[0] + vj[1]
 
-        vkc = td.get_k(
-            mol, xp.stack((scorrao, dmcorrao)), hermi=0
-        )  # correct exchange potential
+        if uda:
+            if fitted:
+                _, vkc = cpu_df_get_jk(mf_grad, xp.stack((scorrao, dmcorrao)),
+                                       1., 1., 0., with_j=False)
+                de_aux += vkc.aux[0, 1] + vkc.aux[1, 0]
+            else:
+                vkc = td.get_k(mol, xp.stack((scorrao, dmcorrao)), hermi=0)
         veff1[:,0] += vxc1[:,1:]
         veff1[:,1] +=(f1oo[:,1:] + fxcz1[:,1:] + k1ao[:,1:]) * 2 # *2 for dmz1doo+dmz1oo.T
         veff1[:,2] += f1vo[:,1:]
@@ -707,6 +761,9 @@ def grad_elec(td, atmlst=None, max_memory=2000,
                 de[k] += xp.einsum('xpq,qp->x', vkc[1, :, p0:p1], scorrao[:, p0:p1])
 
             # de[k] += td.extra_force(ia, locals())  # extension, here always zero
+        if fitted:
+            de += de_aux[xp.asarray(tuple(atmlst), dtype=int)]
+
     log.timer("Integral derivatives and assembly", *time1)
     log.timer("Total electronic gradient", *time0)
     return de
@@ -732,8 +789,9 @@ class _RO2U:
 
 
 class SC_gradient(rohf_grad.Gradients):
+    auxbasis_response = True
     cphf_max_cycle = getattr(__config__, 'grad_tdrhf_Gradients_cphf_max_cycle', 20) + 1000
-    cphf_conv_tol = getattr(__config__, 'grad_tdrhf_Gradients_cphf_conv_tol', 1e-12)
+    cphf_conv_tol = getattr(__config__, 'grad_tdrhf_Gradients_cphf_conv_tol', 1e-8)
     dsolve_lindep = getattr(__config__, 'lib_linalg_helper_dsolve_lindep', 1e-13)
 
     def __init__(self, td, state=1):

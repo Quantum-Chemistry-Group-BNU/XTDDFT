@@ -9,7 +9,10 @@ from pyscf.grad import tduks as tduks_grad
 from ...utils.hxc_part import mcfun_eval_xc_adapter_sf
 
 from ...utils.backend import asnumpy
-from ._backend import array_module, is_gpu_mf, nuclear_gradient, ucphf_module
+from ._backend import (
+    array_module, is_gpu_mf, nuclear_gradient, ucphf_module,
+    cpu_df_get_jk, cpu_df_td_aux, validate_gradient_backend, df_jk_energies_per_atom,
+)
 
 
 def jk_energies_per_atom(
@@ -42,6 +45,16 @@ def jk_energies_per_atom(
         An array of shape (*, Natm, 3) if sum_results is False; otherwise,
         an array of shape (Natm, 3).
     """
+    if getattr(mf, "with_df", None) is not None:
+        validate_gradient_backend(mf)
+        if lr_factor is not None or sr_factor is not None:
+            raise NotImplementedError(
+                "DF derivatives use separate full-range and long-range calls"
+            )
+        return df_jk_energies_per_atom(
+            mf, dm_list, j_factor, k_factor, omega=omega, hermi=hermi,
+            sum_results=sum_results, verbose=verbose,
+        )
     from gpu4pyscf.grad.tdrhf import _jk_energies_per_atom
     xp = array_module(mf)
     vhfopt = mf._opt_gpu.get(omega)
@@ -294,6 +307,7 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
     # log = logger.new_logger(td, verbose)
     # time0 = logger.process_clock(), logger.perf_counter()
     mf = td.base._scf
+    validate_gradient_backend(mf)
     mol = td.mol
     xp = array_module(mf)
     gpu = is_gpu_mf(mf)
@@ -376,7 +390,12 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
     # 4. constuct G[Z^S] and solve Z-vector equation
     vresp = mf.gen_response(hermi=1)
 
+    z_iterations = 0
+
     def fvind(x):
+        nonlocal z_iterations
+        # solve_nos1 calls fvind once per Krylov cycle (no initial guess).
+        z_iterations += 1
         xa = x[0, :(nc+no)*nv].reshape(nv, (nc+no))  # Z_{\mu\nu}^{\alpha}
         xb = x[0, (nc+no)*nv:].reshape((no+nv), nc)  # Z_{\mu\nu}^{\beta}
         dma = orbv_a @ xa @ orbo_a.T
@@ -392,6 +411,7 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
     z1a, z1b = ucphf.solve(
         fvind, mo_energy, mo_occ, (wvoa, wvob),
         max_cycle=td.cphf_max_cycle, tol=td.cphf_conv_tol)[0]
+    log.info("Z-vector iterations (UCPHF Krylov): %d", z_iterations)
     time1 = log.timer('Z-vector using UCPHF solver', *time1)
 
     # 5.1. construct W matrix, without Fock part
@@ -456,16 +476,6 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
         dmz1doo = dmz1dvva + dmz1doob
         oo0 = oo0a + oo0b
         if with_k:
-            # # density fitting derivative will use 
-            # if hasattr(dmt, 'symmetrize'):
-            #     dmt_T = tag_array(dmt.T, factor_l=dmt.factor_r, factor_r=dmt.factor_l)
-            # else:
-            #     dmt_T = dmt.T
-            # dms = [[_tag_factorize_dm(dmz1doo + oo0, hermi=1), _tag_factorize_dm(oo0, hermi=1)],
-            #     [_tag_factorize_dm(dmz1dooa + oo0a, hermi=1), oo0a],
-            #     [_tag_factorize_dm(dmz1doob + oo0b, hermi=1), oo0b],
-            #     [dmt, dmt_T]]
-
             dmt_T = dmt.T
             dms = [[dmz1doo + oo0, oo0],
                 [dmz1dvva + oo0a, oo0a],
@@ -510,7 +520,21 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
 
         dm = xp.stack((oo0a, dmz1dvva + dmz1dvva.T,
                        oo0b, dmz1doob + dmz1doob.T))
-        if with_k:
+        fitted = getattr(mf, "with_df", None) is not None
+        if fitted:
+            vj, vk = cpu_df_get_jk(mf_grad, dm, hyb, alpha, omega, hermi=1)
+            de_aux = cpu_df_td_aux(vj, vk, response_scale=0.25)
+            vj = vj.reshape(2, 2, 3, nao, nao)
+            if with_k:
+                vk = vk.reshape(2, 2, 3, nao, nao)
+                _, vk1 = cpu_df_get_jk(mf_grad, xp.stack((dmt, dmt.T)),
+                                       hyb, alpha, omega, with_j=False)
+                de_aux -= vk1.aux[0, 1] + vk1.aux[1, 0]
+                vk1 = -xp.asarray(vk1)
+                veff1 = vj[0] + vj[1] - vk
+            else:
+                veff1 = xp.stack((vj[0] + vj[1], vj[0] + vj[1]))
+        elif with_k:
             vj, vk = td.get_jk(mol, dm, hermi=1)
             vj = vj.reshape(2, 2, 3, nao, nao)
             vk = vk.reshape(2, 2, 3, nao, nao) * hyb
@@ -556,6 +580,9 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
                 de[k] += xp.einsum('xpq,pq->x', vk1[0, :, p0:p1], dmt[p0:p1]) * 2
                 de[k] += xp.einsum('xpq,pq->x', vk1[1, :, p0:p1], dmt.T[p0:p1]) * 2
 
+        if fitted:
+            de += de_aux[xp.asarray(tuple(atmlst), dtype=int)]
+
     log.timer("Integral derivatives and assembly", *time1)
     log.timer("Total electronic gradient", *time0)
     return de
@@ -576,7 +603,7 @@ class SFU_gradient(uhf_grad.Gradients):
         self.de = None  # gradient of molecule
         self.atmlst = None  # which atom will be calculate gradient
         if method == 1:
-            self.base.collinear_samples = 20
+            self.base.collinear_samples = getattr(td, "collinear_samples", 20)
         elif method == 2:
             self.base.collinear_samples = -1
         else:

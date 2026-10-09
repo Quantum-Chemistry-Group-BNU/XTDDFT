@@ -374,6 +374,9 @@ def _make_rohf_reference_mf(mf):
         hf = scf.ROHF(mf.mol)
         if getattr(mf, "with_x2c", None) is not None and hasattr(hf, "x2c"):
             hf = hf.x2c()
+        if getattr(mf, "with_df", None) is not None:
+            hf = hf.density_fit(with_df=mf.with_df,
+                                only_dfj=getattr(mf, "only_dfj", False))
 
     for name in ("with_df", "exxdiv", "max_memory", "verbose", "stdout"):
         if hasattr(mf, name):
@@ -388,6 +391,8 @@ def _ao2mo_full_gamma(mf, mo_coeff):
     nmo = mo_coeff.shape[1]
     if _is_pbc_mf(mf):
         eri = _df_ao2mo_pbc(mf, [mo_coeff] * 4, compact=False)
+    elif getattr(mf, "with_df", None) is not None and not getattr(mf, "only_dfj", False):
+        eri = mf.with_df.ao2mo([mo_coeff] * 4, compact=False)
     else:
         eri = ao2mo.general(mf.mol, [mo_coeff] * 4, compact=False)
     return _asnumpy(eri).reshape(nmo, nmo, nmo, nmo)

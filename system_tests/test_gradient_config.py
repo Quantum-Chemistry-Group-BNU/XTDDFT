@@ -117,3 +117,92 @@ def test_mcol_rejects_invalid_collinear_samples(monkeypatch, samples):
 
     with pytest.raises(ValueError, match="positive integer"):
         sf_tda_up.SF_TDA_up(object(), method=1, collinear_samples=samples)
+
+
+def _gradient_reference(reference="UKS", gpu=True, density_fit=True, only_dfj=False):
+    """No CUDA needed: only the reference type and DF configuration are inspected."""
+    cls = type(reference, (), {"__module__": "gpu4pyscf.dft" if gpu else "pyscf.dft"})
+    mf = cls()
+    mf.with_df = object() if density_fit else None
+    mf.only_dfj = only_dfj
+    mf.xc = "b3lyp"
+    mf._numint = SimpleNamespace(_xc_type=lambda _xc: "GGA")
+    return mf
+
+
+@pytest.mark.parametrize("reference", ["UKS", "ROKS"])
+def test_gpu_df_gradient_is_accepted(reference):
+    from XTDDFT.XTDDFT.grad._backend import validate_gradient_backend
+
+    validate_gradient_backend(_gradient_reference(reference=reference))
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"only_dfj": True},
+    {"gpu": False, "only_dfj": True},
+])
+def test_unsupported_df_gradient_is_rejected(kwargs):
+    from XTDDFT.XTDDFT.grad._backend import validate_gradient_backend
+
+    with pytest.raises(NotImplementedError, match="density fitting|DF|RI-J"):
+        validate_gradient_backend(_gradient_reference(**kwargs))
+
+
+@pytest.mark.parametrize("module_name,class_name", [
+    ("gradient_uks_sfd", "SFD_gradient"),
+    ("gradient_uks_sfu", "SFU_gradient"),
+])
+def test_uks_sf_gradient_keeps_excitation_sampling(module_name, class_name):
+    from importlib import import_module
+
+    cls = getattr(import_module("XTDDFT.XTDDFT.grad." + module_name), class_name)
+    td = SimpleNamespace(mf=_gradient_reference(density_fit=False), mol=None,
+                         v=np.zeros((1, 1)), collinear_samples=24)
+    gradient = cls(td, method=1)
+    assert gradient.base.collinear_samples == 24
+    assert td.collinear_samples == 24
+
+
+@pytest.mark.parametrize("module_name", ["gradient_uks_sfd", "gradient_uks_sfu",
+                                         "gradient_roks_sfd", "gradient_roks_sfu",
+                                         "gradient_roks_sc"])
+@pytest.mark.parametrize("omega", [None, 0.3])
+def test_sf_df_derivative_dispatch_preserves_nonsymmetric_pairs(monkeypatch, module_name, omega):
+    """Catches accidental direct-integral routing or transpose/symmetry loss without CUDA."""
+    from importlib import import_module
+    from types import ModuleType
+
+    module = import_module("XTDDFT.XTDDFT.grad." + module_name)
+    mf = _gradient_reference(reference="ROKS" if "roks" in module_name else "UKS")
+    transition = np.array([[0., 2.], [-1., 0.]])
+    pairs = [[transition, transition.T]]
+    expected = np.array([[1., -2., 3.]])
+
+    def df_derivative(grad, dm_list, j_factor=None, k_factor=None, **kwargs):
+        assert grad.base._scf is mf
+        assert grad.auxbasis_response is True
+        np.testing.assert_array_equal(dm_list[0][0], transition)
+        np.testing.assert_array_equal(dm_list[0][1], transition.T)
+        assert j_factor == [0.]
+        assert k_factor == [0.4]
+        assert kwargs["omega"] == (0. if omega is None else omega)
+        assert kwargs["sum_results"] is True
+        return expected.copy()
+
+    # Only the CUDA boundary is replaced. The production dispatch runs unchanged.
+    for name in ("gpu4pyscf", "gpu4pyscf.df", "gpu4pyscf.df.grad",
+                 "gpu4pyscf.df.grad.tdrhf"):
+        stub = ModuleType(name)
+        stub.__path__ = []
+        monkeypatch.setitem(sys.modules, name, stub)
+    sys.modules["gpu4pyscf.df.grad.tdrhf"].Gradients = SimpleNamespace(
+        jk_energies_per_atom=df_derivative)
+    actual = module.jk_energies_per_atom(
+        mf, pairs, [0.], [0.4], omega=omega, sum_results=True)
+    np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize("reference", ["UKS", "ROKS"])
+def test_cpu_df_gradient_is_accepted(reference):
+    from XTDDFT.XTDDFT.grad._backend import validate_gradient_backend
+    validate_gradient_backend(_gradient_reference(gpu=False, reference=reference))

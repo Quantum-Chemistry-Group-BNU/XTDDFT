@@ -1,4 +1,4 @@
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 from pyscf.grad.rhf import grad_nuc
@@ -23,12 +23,38 @@ def validate_gradient_backend(mf) -> None:
     if _is_pbc_mf(mf):
         raise NotImplementedError("Analytic gradients support molecular calculations only")
     if getattr(mf, "with_df", None) is not None:
-        raise NotImplementedError(
-            "Analytic gradients currently require direct integrals; density fitting changes the formula"
-        )
+        from . import _reference_family
+
+        family = _reference_family(mf)
+        if family not in ("uks", "roks"):
+            raise NotImplementedError(
+                "Density fitting analytic gradients support UKS and ROKS references"
+            )
+        if getattr(mf, "only_dfj", False):
+            raise NotImplementedError(
+                "DF gradients require RI-JK (only_dfj=False), not RI-J"
+            )
     if is_gpu_mf(mf):
         if mf._numint._xc_type(mf.xc).upper() == "MGGA":
             raise NotImplementedError("GPU analytic gradients do not support MGGA")
+
+
+def df_jk_energies_per_atom(mf, dm_list, j_factor=None, k_factor=None,
+                           omega=None, hermi=0, sum_results=False, verbose=None):
+    """GPU4PySCF's density-pair derivative, including auxiliary-basis response.
+
+    Use the same interface as gpu4pyscf.df.grad.tduks_sf (1.8.1). Preserve
+    nonsymmetric transition densities: in particular, [X, X.T] is not [X, X].
+    The backend includes both three-center and metric derivatives.
+    """
+    from gpu4pyscf.df.grad.tdrhf import Gradients
+
+    grad = SimpleNamespace(base=SimpleNamespace(_scf=mf), auxbasis_response=True)
+    return Gradients.jk_energies_per_atom(
+        grad, dm_list, j_factor, k_factor,
+        omega=0.0 if omega is None else omega, hermi=hermi,
+        sum_results=sum_results, verbose=verbose,
+    )
 
 
 def ucphf_module(mf):
@@ -41,3 +67,52 @@ def ucphf_module(mf):
 
 def nuclear_gradient(mf, atmlst=None):
     return asarray(mf, grad_nuc(mf.mol, atmlst))
+
+
+def cpu_df_get_jk(mf_grad, dm, hyb, alpha, omega, hermi=0, with_j=True):
+    """DF AO derivatives with hybrid-scaled exchange and its auxiliary response.
+
+    NumPy arithmetic does not scale PySCF's .aux metadata automatically.
+    Scale it explicitly before combining full- and long-range exchange.
+    """
+    from pyscf import lib
+
+    mf_grad.auxbasis_response = True
+    with_k = hyb != 0 or alpha != 0
+    vj, vk = mf_grad.get_jk(dm=dm, hermi=hermi, with_j=with_j, with_k=with_k)
+    if with_k:
+        kaux = vk.aux * hyb
+        vk = np.asarray(vk) * hyb
+        if omega != 0:
+            vk_lr = mf_grad.get_jk(dm=dm, hermi=hermi, with_j=False, omega=omega)[1]
+            vk += np.asarray(vk_lr) * (alpha - hyb)
+            kaux += vk_lr.aux * (alpha - hyb)
+        vk = lib.tag_array(vk, aux=kaux)
+    return vj, vk
+
+
+def cpu_df_td_aux(vj, vk, response_scale):
+    """Auxiliary-center derivatives for the existing spin-resolved density ordering.
+
+    Per spin: [P, D] for SF; [P, D, X, X.T] for SC.
+    D is the response density stored by the caller (normalization differs).
+    response_scale converts the stored response density to the relaxed one.
+    PySCF .aux[i,j] differentiates one auxiliary side; cross terms need both.
+    """
+    nblock = len(vj) // 2
+    ground = np.array([0, nblock])
+    response = ground + 1
+    ja = vj.aux
+    aux = ja[np.ix_(ground, ground)].sum(axis=(0, 1))
+    aux += response_scale * (ja[np.ix_(ground, response)].sum(axis=(0, 1))
+                             + ja[np.ix_(response, ground)].sum(axis=(0, 1)))
+    if vk is not None:
+        ka = vk.aux
+        aux -= ka[ground, ground].sum(axis=0)
+        aux -= response_scale * (ka[ground, response] + ka[response, ground]).sum(axis=0)
+    if nblock == 4:
+        x, xt = ground + 2, ground + 3
+        aux += 4 * ja[np.ix_(x, x)].sum(axis=(0, 1))
+        if vk is not None:
+            aux -= (ka[x, xt] + ka[xt, x]).sum(axis=0)
+    return aux

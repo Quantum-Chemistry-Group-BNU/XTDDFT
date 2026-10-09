@@ -16,9 +16,6 @@ from XTDDFT.XTDDFT.grad.finite_difference import fd_gradient, fd_gradient_forth
 from XTDDFT.utils.backend import set_backend
 
 
-lib.num_threads(int(4))
-
-
 def parse_xyz_string(xyz: str):
     """Change the coordinate format from string to array."""
     atoms = []
@@ -47,6 +44,7 @@ cs = 20  # collinear_samples
 states = [2]
 sf_method = 1
 verbose = 4  # finite difference output level adjust line 19 in XTDDFT/grad/finite_difference.py 
+with_df = True
 atom = '''
     C   0.00   0.00   0.00
     H   0.00   0.95   0.15
@@ -84,8 +82,12 @@ def main():
     )
     if kind[0] == 'u':
         mf = scf.UKS(mol)
+        if with_df:
+            mf = scf.UKS(mol).density_fit()
     else:
         mf = scf.ROKS(mol)
+        if with_df:
+            mf = scf.ROKS(mol).density_fit()
     mf.xc = xc
     mf.conv_tol = 1e-12
     mf.max_cycle = 200

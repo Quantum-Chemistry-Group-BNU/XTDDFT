@@ -58,6 +58,15 @@ def add_hf_a_a2b(a_a2b, mf, orbo_a, orbv_b, nocc_a, nvir_b, hyb=1, omega=None):
             mf, [orbo_a, orbo_a, orbv_b, orbv_b],
             omega=omega, compact=False,
         )
+    elif (getattr(mf, "with_df", None) is not None
+          and not getattr(mf, "only_dfj", False)):
+        # Dense SF must use the same RI-JK integrals as mf.get_k in Davidson.
+        coeffs = [orbo_a, orbo_a, orbv_b, orbv_b]
+        if omega is None or abs(omega) < 1e-14:
+            eri_mo = mf.with_df.ao2mo(coeffs, compact=False)
+        else:
+            with mf.with_df.range_coulomb(omega) as rsh_df:
+                eri_mo = rsh_df.ao2mo(coeffs, compact=False)
     else:
         with mf.mol.with_range_coulomb(omega):
             eri_mo = ao2mo.general(

@@ -10,7 +10,10 @@ from pyscf.grad import tduks as tduks_grad
 from ...utils.hxc_part import mcfun_eval_xc_adapter_sf
 
 from ...utils.backend import asnumpy
-from ._backend import array_module, is_gpu_mf, nuclear_gradient
+from ._backend import (
+    array_module, is_gpu_mf, nuclear_gradient,
+    cpu_df_get_jk, cpu_df_td_aux, validate_gradient_backend, df_jk_energies_per_atom,
+)
 
 
 def jk_energies_per_atom(
@@ -43,6 +46,16 @@ def jk_energies_per_atom(
         An array of shape (*, Natm, 3) if sum_results is False; otherwise,
         an array of shape (Natm, 3).
     """
+    if getattr(mf, "with_df", None) is not None:
+        validate_gradient_backend(mf)
+        if lr_factor is not None or sr_factor is not None:
+            raise NotImplementedError(
+                "DF derivatives use separate full-range and long-range calls"
+            )
+        return df_jk_energies_per_atom(
+            mf, dm_list, j_factor, k_factor, omega=omega, hermi=hermi,
+            sum_results=sum_results, verbose=verbose,
+        )
     from gpu4pyscf.grad.tdrhf import _jk_energies_per_atom
     xp = array_module(mf)
     vhfopt = mf._opt_gpu.get(omega)
@@ -306,6 +319,7 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
 
     mol = td.mol
     mf = td.base._scf
+    validate_gradient_backend(mf)
     sftda = td.base
     xp = array_module(mf)
     gpu = is_gpu_mf(mf)
@@ -419,7 +433,10 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
     # _uks.mo_occ = mo_occ
     # vresp = _uks.gen_response(mo_coeff, mo_occ, hermi=1)
     vresp = mf.gen_response(mo_coeff, mo_occ, hermi=1)  # invoke UKS function, same with upper
+    z_matvecs = 0
     def matvec(x):  # ROHF VC/VO/OC orbital Hessian (same as down-rohf)
+        nonlocal z_matvecs
+        z_matvecs += 1
         xvc = x[:nv*nc].reshape(nv, nc)
         xvo = x[nv*nc:nv*nc+nv*no].reshape(nv, no)
         xoc = x[nv*nc+nv*no:].reshape(no, nc)
@@ -487,12 +504,27 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
         matvec=lambda x: inv_diagonal * x.ravel(),
         dtype=w.dtype,
     )
+    z_callbacks = 0
+
+    def count_z_iteration(_):
+        nonlocal z_callbacks
+        z_callbacks += 1
+
     if gpu:
+        # CuPy calls the x callback at every residual check, including the
+        # initial/final check. Subtract these matvecs to count Arnoldi steps.
         z, info = gmres(operator, w, M=precond, tol=td.cphf_conv_tol,
-                        maxiter=td.cphf_max_cycle,)
+                        maxiter=td.cphf_max_cycle,
+                        callback=count_z_iteration, callback_type='x')
+        z_iterations = z_matvecs - z_callbacks
     else:
+        # Explicit pr_norm preserves maxiter's restart-cycle meaning in SciPy.
         z, info = gmres(operator, w, M=precond, rtol=td.cphf_conv_tol,
-                        maxiter=td.cphf_max_cycle,)
+                        maxiter=td.cphf_max_cycle,
+                        callback=count_z_iteration, callback_type='pr_norm')
+        z_iterations = z_callbacks
+    log.info("Z-vector iterations (GMRES inner): %d; matvec calls: %d",
+             z_iterations, z_matvecs)
     if info != 0:
         raise RuntimeError(f"Z-vector GMRES failed: info={info}")
     
@@ -553,16 +585,6 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
         dmz1doo = dmz1dvva + dmz1doob
         oo0 = oo0a + oo0b
         if with_k:
-            # # density fitting derivative will use 
-            # if hasattr(dmt, 'symmetrize'):
-            #     dmt_T = tag_array(dmt.T, factor_l=dmt.factor_r, factor_r=dmt.factor_l)
-            # else:
-            #     dmt_T = dmt.T
-            # dms = [[_tag_factorize_dm(dmz1doo + oo0, hermi=1), _tag_factorize_dm(oo0, hermi=1)],
-            #     [_tag_factorize_dm(dmz1dooa + oo0a, hermi=1), oo0a],
-            #     [_tag_factorize_dm(dmz1doob + oo0b, hermi=1), oo0b],
-            #     [dmt, dmt_T]]
-
             dmt_T = dmt.T
             dms = [[2 * dmz1doo + oo0, oo0],
                 [2 * dmz1dvva + oo0a, oo0a],
@@ -600,7 +622,7 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
         de += dveff1_0 + dveff1_1 + dveff1_2
         de = xp.asarray(de)
         if atmlst is not None:
-            de = de[atmlst]
+            de = de[xp.asarray(tuple(atmlst), dtype=int)]
     else:
         mf_grad = td.base._scf.nuc_grad_method()
         hcore_deriv = mf_grad.hcore_generator(mol)
@@ -608,7 +630,21 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
         as_dm1 = oo0a + oo0b + dmz1dvva + dmz1doob
 
         dm = xp.stack((oo0a, dmz1dvva, oo0b, dmz1doob))
-        if with_k:
+        fitted = getattr(mf, "with_df", None) is not None
+        if fitted:
+            vj, vk = cpu_df_get_jk(mf_grad, dm, hyb, alpha, omega, hermi=0)
+            de_aux = cpu_df_td_aux(vj, vk, response_scale=1.0)
+            vj = vj.reshape(2, 2, 3, nao, nao)
+            if with_k:
+                vk = vk.reshape(2, 2, 3, nao, nao)
+                _, vk1 = cpu_df_get_jk(mf_grad, xp.stack((dmt, dmt.T)),
+                                       hyb, alpha, omega, with_j=False)
+                de_aux -= vk1.aux[0, 1] + vk1.aux[1, 0]
+                vk1 = -xp.asarray(vk1)
+                veff1 = vj[0] + vj[1] - vk
+            else:
+                veff1 = xp.stack((vj[0] + vj[1], vj[0] + vj[1]))
+        elif with_k:
             vj, vk = td.get_jk(mol, dm)
             vj = vj.reshape(2, 2, 3, nao, nao)
             vk = vk.reshape(2, 2, 3, nao, nao) * hyb
@@ -652,6 +688,9 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
                 de[k] += xp.einsum('xpq,pq->x', f1vo[1:, p0:p1], dmt.T[p0:p1]) * 2
             de[k] -= xp.einsum('xpq,pq->x', s1[:, p0:p1], im0[p0:p1])
             de[k] -= xp.einsum('xpq,qp->x', s1[:, p0:p1], im0[:, p0:p1])
+        if fitted:
+            de += de_aux[xp.asarray(tuple(atmlst), dtype=int)]
+
     log.timer("Integral derivatives and assembly", *time1)
     log.timer("Total electronic gradient", *time0)
     return de
@@ -675,7 +714,7 @@ class _RO2U:
 
 class SFU_gradient(rohf_grad.Gradients):
     cphf_max_cycle = getattr(__config__, 'grad_tdrhf_Gradients_cphf_max_cycle', 20) + 1000
-    cphf_conv_tol = getattr(__config__, 'grad_tdrhf_Gradients_cphf_conv_tol', 1e-12)
+    cphf_conv_tol = getattr(__config__, 'grad_tdrhf_Gradients_cphf_conv_tol', 1e-8)
     dsolve_lindep = getattr(__config__, 'lib_linalg_helper_dsolve_lindep', 1e-13)
 
     def __init__(self, td, method=1, state=1):

@@ -50,6 +50,15 @@ def add_hf_a_b2a(a_b2a, mf, orbo_b, orbv_a, nc, nv, hyb=1, omega=None):
             mf, [orbo_b, orbo_b, orbv_a, orbv_a],
             omega=omega, compact=False,
         )
+    elif (getattr(mf, "with_df", None) is not None
+          and not getattr(mf, "only_dfj", False)):
+        # Dense SF must use the same RI-JK integrals as mf.get_k in Davidson.
+        coeffs = [orbo_b, orbo_b, orbv_a, orbv_a]
+        if omega is None or abs(omega) < 1e-14:
+            eri_mo = mf.with_df.ao2mo(coeffs, compact=False)
+        else:
+            with mf.with_df.range_coulomb(omega) as rsh_df:
+                eri_mo = rsh_df.ao2mo(coeffs, compact=False)
     else:
         if omega is not None and abs(omega) >= 1e-14:
             raise NotImplementedError("Range-separated molecular HF exchange is not implemented in SF_TDA_up.")

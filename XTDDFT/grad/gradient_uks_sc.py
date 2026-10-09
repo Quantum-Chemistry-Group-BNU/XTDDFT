@@ -5,7 +5,10 @@ from pyscf.grad import uhf as uhf_grad
 from pyscf.grad import tdrks as tdrks_grad
 
 from ...utils.backend import asnumpy
-from ._backend import array_module, is_gpu_mf, nuclear_gradient, ucphf_module
+from ._backend import (
+    array_module, is_gpu_mf, nuclear_gradient, ucphf_module,
+    cpu_df_get_jk, cpu_df_td_aux, validate_gradient_backend,
+)
 
 
 def jk_energies_per_atom(
@@ -251,6 +254,7 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
     # time0 = logger.process_clock(), logger.perf_counter()
 
     mf = td.base._scf
+    validate_gradient_backend(mf)
     mol = td.mol
     xp = array_module(mf)
     gpu = is_gpu_mf(mf)
@@ -341,7 +345,12 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
 
     # 4. constuct G[Z^S] and solve Z-vector equation
     vresp = mf.gen_response(hermi=1)
+    z_iterations = 0
+
     def fvind(x):
+        nonlocal z_iterations
+        # solve_nos1 calls fvind once per Krylov cycle (no initial guess).
+        z_iterations += 1
         dm1 = xp.empty((2,nao,nao))
         xa = x[0, :(nc+no)*nv].reshape(nv, nc+no)
         xb = x[0, (nc+no)*nv:].reshape(no+nv, nc)
@@ -359,6 +368,7 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
         fvind, mo_energy, mo_occ, (wvoa, wvob),
         max_cycle=td.cphf_max_cycle, tol=td.cphf_conv_tol
     )[0]
+    log.info("Z-vector iterations (UCPHF Krylov): %d", z_iterations)
     z1ao = xp.empty((2, nao, nao))
     z1ao[0] = orbv_a @ z1a @ orbo_a.T
     z1ao[1] = orbv_b @ z1b @ orbo_b.T
@@ -422,7 +432,13 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
         ds = gpu_rhf_grad.contract_h1e_dm(mol, s1, im0, hermi=0)
         dh1e_ground_and_td = gpu_rhf_grad.int3c2e.get_dh1e(mol, as_dm1)  # 1/r like terms
 
-        get_veff = gpu_tduks_grad.Gradients.get_veff
+        if getattr(mf, "with_df", None) is not None:
+            # Match gpu4pyscf.df.grad.tduks: this contracts both three-center
+            # and metric derivatives, with auxiliary centers moving as well.
+            from gpu4pyscf.df.grad import tduks as df_tduks_grad
+            get_veff = df_tduks_grad.Gradients.get_veff
+        else:
+            get_veff = gpu_tduks_grad.Gradients.get_veff
         k_factor = hyb if with_k else 0.0
         dvhf = get_veff(
             td, mol,
@@ -485,7 +501,15 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
 
         dm = xp.stack((oo0a, dmz1dooa+dmz1dooa.T, dmxa, dmxa.T,
                        oo0b, dmz1doob+dmz1doob.T, dmxb, dmxb.T))
-        if with_k:
+        fitted = getattr(mf, "with_df", None) is not None
+        if fitted:
+            vj, vk = cpu_df_get_jk(mf_grad, dm, hyb, alpha, omega)
+            de_aux = cpu_df_td_aux(vj, vk, response_scale=0.5)
+            vj = vj.reshape(2, 4, 3, nao, nao)
+            veff1 = xp.stack((vj[0] + vj[1], vj[0] + vj[1]))
+            if with_k:
+                veff1 = veff1 - vk.reshape(2, 4, 3, nao, nao)
+        elif with_k:
             vj, vk = td.get_jk(mol, dm)
             vj = vj.reshape(2,4,3,nao,nao)
             vk = vk.reshape(2,4,3,nao,nao) * hyb
@@ -534,12 +558,16 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
             de[k] += xp.einsum('xji,ij->x', veff1b[3,:,p0:p1], dmxb[:,p0:p1])*2
             # de[k] += td.extra_force(ia, locals())  # extension, here always zero
 
+        if fitted:
+            de += de_aux[xp.asarray(tuple(atmlst), dtype=int)]
+
     log.timer("Integral derivatives and assembly", *time1)
     log.timer("Total electronic gradient", *time0)
     return de
 
 
 class SC_gradient(uhf_grad.Gradients):
+    auxbasis_response = True
     cphf_max_cycle = getattr(__config__, 'grad_tdrhf_Gradients_cphf_max_cycle', 20) + 1000
     cphf_conv_tol = getattr(__config__, 'grad_tdrhf_Gradients_cphf_conv_tol', 1e-12)
 
