@@ -3,9 +3,9 @@
 import os
 os.environ["OMP_NUM_THREADS"] = "4"
 os.environ["OMP_DYNAMIC"] = "False"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "4"
+os.environ["OPENBLAS_NUM_THREADS"] = "4"
+os.environ["NUMEXPR_NUM_THREADS"] = "4"
 import numpy as np
 from time import perf_counter
 from pyscf import gto, scf, lib
