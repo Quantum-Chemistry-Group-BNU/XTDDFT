@@ -1416,7 +1416,6 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         return gamma
 
     def _transition_density_matrix_r(self, state_f, state_i):
-        # Already compared and verified against the NTO_XTDDFT.pdf & xtda+soc derivation.pdf  by Longfei Chang 26.09.09
         cv_f, co_f, ov_f, oo_f = self._state_analysis_blocks(state_f)
         cv_i, co_i, ov_i, oo_i = self._state_analysis_blocks(state_i)
         nmo = self.nc + self.no + self.nv
@@ -1442,7 +1441,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         tr_oo_f = np.trace(oo_f)
         tr_oo_i = np.trace(oo_i)
 
-        # PDF Eq. (19): amplitudes are hole-first; gamma[m,n] uses E_mn.
+        # Amplitudes are hole-first; gamma[m,n] = <F|E_mn|I>.
         gamma[v, v] += contract("ia,ib->ab", cv_f, cv_i)
         gamma[c, c] -= contract("ia,ja->ji", cv_f, cv_i)
         gamma[v, o] += factor1 * contract("ia,iv->av", cv_f, co_i)
@@ -1451,10 +1450,11 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         gamma[c, o] -= factor1 * contract("ua,ja->ju", ov_f, cv_i)
         gamma[o, o] += contract("iu,iv->uv", co_f, co_i)
         gamma[c, c] -= contract("iu,ju->ji", co_f, co_i)
-        gamma[c, o] -= factor2 * contract("iu,vu->iv", co_f, oo_i)
-        gamma[c, o] += factor3 * co_f * tr_oo_i
-        gamma[o, c] -= factor2 * contract("ut,jt->uj", oo_f, co_i)
-        gamma[o, c] += factor3 * tr_oo_f * co_i.T
+        # CO bra / OO ket removes a closed-shell electron: E_oi.
+        gamma[o, c] -= factor2 * contract("iu,vu->vi", co_f, oo_i)
+        gamma[o, c] += factor3 * co_f.T * tr_oo_i
+        gamma[c, o] -= factor2 * contract("ut,jt->ju", oo_f, co_i)
+        gamma[c, o] += factor3 * tr_oo_f * co_i
         gamma[v, v] += contract("ua,ub->ab", ov_f, ov_i)
         gamma[o, o] -= contract("ua,va->vu", ov_f, ov_i)
         gamma[v, o] += factor2 * contract("ua,uw->aw", ov_f, oo_i)

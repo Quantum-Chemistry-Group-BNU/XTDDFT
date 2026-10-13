@@ -90,6 +90,51 @@ def test_xsf_oo_transition_density_uses_hole_index_order():
     np.testing.assert_array_equal(method.transition_dipole_matrix()[0, 1], expected_dipole)
 
 
+@pytest.mark.parametrize("sa", [0, 1, 2, 3])
+def test_xsf_co_oo_transition_density_uses_creation_annihilation_order(sa):
+    """For S=1, E_ui|OO_uu-OO_tt>/sqrt(2) = -|CO_ui>."""
+    from XTDDFT.XTDDFT.xsf_tda_down import XSF_TDA_down
+
+    method = object.__new__(XSF_TDA_down)
+    method.nc, method.no, method.nv = 1, 2, 1
+    method.type_u, method.re, method.SA = False, sa > 0, sa
+    method.ground_s, method.nstates = 1.0, 2
+    method.v = np.zeros((8 if sa else 9, 2), dtype=complex)
+    co_phase, oo_phase = 1j, 0.6 + 0.8j
+    method.v[1, 0] = co_phase
+    if sa:
+        method.v[5, 1] = oo_phase  # first projected OO diagonal basis vector
+    else:
+        method.v[5, 1], method.v[8, 1] = oo_phase / np.sqrt(2), -oo_phase / np.sqrt(2)
+
+    expected = np.zeros((4, 4), dtype=complex)
+    expected[1, 0] = -co_phase.conjugate() * oo_phase / (1 if sa else np.sqrt(2))
+    gamma = method.transition_density_matrix(1, 2)
+    np.testing.assert_allclose(gamma, expected, atol=1e-14)
+    np.testing.assert_allclose(method.transition_density_matrix(2, 1), expected.conj().T, atol=1e-14)
+    orbital_derivative = np.zeros((4, 4))
+    orbital_derivative[1, 0], orbital_derivative[0, 1] = 1, -1
+    np.testing.assert_allclose(np.einsum("pq,pq->", gamma, orbital_derivative), expected[1, 0])
+
+
+@pytest.mark.parametrize("oo_diagonal, expected_value", [(0, -1 / np.sqrt(2)), (1, 1 / np.sqrt(2))])
+def test_xsf_co_oo_trace_term_uses_same_direction(oo_diagonal, expected_value):
+    """Raw OO diagonals test the nonzero rho term against S=1 CSFs."""
+    from XTDDFT.XTDDFT.xsf_tda_down import XSF_TDA_down
+
+    method = object.__new__(XSF_TDA_down)
+    method.nc, method.no, method.nv = 1, 2, 0
+    method.type_u, method.re, method.SA = False, False, 3
+    method.ground_s, method.nstates = 1.0, 2
+    method.v = np.zeros((6, 2))
+    method.v[0, 0] = 1
+    method.v[2 + 3 * oo_diagonal, 1] = 1
+    expected = np.zeros((3, 3))
+    expected[1, 0] = expected_value
+    np.testing.assert_allclose(method.transition_density_matrix(1, 2), expected, atol=1e-14)
+    np.testing.assert_allclose(method.transition_density_matrix(2, 1), expected.T, atol=1e-14)
+
+
 def test_sf_up_hole_transition_uses_bra_ket_index_order(monkeypatch):
     """Check the beta-hole term in the SF-TDA-UP transition properties."""
     from types import SimpleNamespace
