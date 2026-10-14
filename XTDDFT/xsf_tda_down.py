@@ -1474,12 +1474,19 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         return self._checked_state_index(state - 1)
 
     def transition_density_matrix(self, state_f=2, state_i=1):
-        """Spin-free transition density matrix for physical excited states.
+        """Normal-ordered spin-free density for physical excited states.
 
         Labels 1, 2, ... denote XSF-TDA excited states. State 0 is the
         reference ground state and is outside this spin-free transition-density
         representation. Restricted references return C|O|V MO order;
         unrestricted references return alpha|beta spin-MO order.
+
+        The reference occupation density is omitted. For distinct orthogonal
+        states this is the full transition density; for identical labels it
+        is the density change, not the full state 1-RDM. To recover that 1-RDM
+        for a normalized state, add diag(2 I_C, I_O, 0 I_V) for restricted
+        references, or the alpha/beta reference occupations for unrestricted
+        references in the returned spin-MO order.
         """
         state_f = self._physical_excited_state_index(state_f)
         state_i = self._physical_excited_state_index(state_i)
@@ -1509,7 +1516,8 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         The returned vectors are embedded in the restricted C|O|V MO order so
         they can be written as cube orbitals.  They are block-resolved
         contracted spin-adapted configurations, not ordinary reference-to-state
-        NTOs.
+        NTOs. Hole-first amplitudes are transposed to particle-by-hole matrices
+        before SVD, including the OO block.
         """
         if self.type_u:
             raise NotImplementedError("block_nto is implemented for restricted XSF-TDA blocks only")
@@ -1525,7 +1533,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
             "CV": (cv.T, "C", "V"),
             "CO": (co.T, "C", "O"),
             "OV": (ov.T, "O", "V"),
-            "OO": (oo, "O", "O"),
+            "OO": (oo.T, "O", "O"),
         }
 
         result = {}

@@ -90,6 +90,30 @@ def test_xsf_oo_transition_density_uses_hole_index_order():
     np.testing.assert_array_equal(method.transition_dipole_matrix()[0, 1], expected_dipole)
 
 
+def test_xsf_oo_block_nto_preserves_hole_particle_direction():
+    """A traceless Q[hole O0, particle O1] must export that same direction."""
+    from XTDDFT.XTDDFT.xsf_tda_down import XSF_TDA_down
+
+    method = object.__new__(XSF_TDA_down)
+    method.nc, method.no, method.nv = 1, 2, 1
+    method.type_u, method.re = False, True
+    method.nstates = 1
+    method.v = np.zeros((8, 1), dtype=complex)
+    method.v[6, 0] = 0.6 + 0.8j  # projected OO off-diagonal: hole O0 -> particle O1
+
+    block = method.block_nto(state=0, nroots=1)["OO"]
+    np.testing.assert_allclose(abs(block["holes"][:, 0]), [0, 1, 0, 0])
+    np.testing.assert_allclose(abs(block["particles"][:, 0]), [0, 0, 1, 0])
+    np.testing.assert_allclose(block["singular_values"], [1])
+    np.testing.assert_allclose(block["weights"], [1])
+    np.testing.assert_allclose(block["block_weight"], 1)
+    np.testing.assert_allclose(block["trace_overlap"], [0])
+    reconstructed = (block["particles"] * block["singular_values"]) @ block["holes"].conj().T
+    expected = np.zeros((4, 4), dtype=complex)
+    expected[2, 1] = method.v[6, 0]
+    np.testing.assert_allclose(reconstructed, expected, atol=1e-14)
+
+
 @pytest.mark.parametrize("sa", [0, 1, 2, 3])
 def test_xsf_co_oo_transition_density_uses_creation_annihilation_order(sa):
     """For S=1, E_ui|OO_uu-OO_tt>/sqrt(2) = -|CO_ui>."""
