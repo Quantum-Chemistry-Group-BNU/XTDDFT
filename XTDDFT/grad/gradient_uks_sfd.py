@@ -335,7 +335,7 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
     orbob = mo_coeff[1][:, :nc]
     orbva = mo_coeff[0][:, ni:]
     orbvb = mo_coeff[1][:, nc:]
-    nao = mo_coeff[0].shape[0]
+    nao, nmo = mo_coeff[0].shape
 
     v = xp.asarray(td.v[:, td.state - 1])
     v_cv = v[:nc*nv].reshape(nc, nv)
@@ -429,8 +429,8 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
     veff = vresp((z1ao + z1ao.transpose(0, 2, 1)))
 
     # 5.1 construct complete W matrix
-    im0a = xp.zeros((nao, nao))
-    im0b = xp.zeros((nao, nao))
+    im0a = xp.zeros((nmo, nmo))
+    im0b = xp.zeros((nmo, nmo))
     im0a[:ni, :ni] = orboa.T @ (veff0doo[0] + veff[0]) @ orboa
     im0a[:ni, :ni] += xp.einsum("aj,ai->ij", veff0mo[nc:, :ni], v)
     im0b[:nc, :nc] = orbob.T @ (veff0doo[1] + veff[1]) @ orbob
@@ -444,8 +444,8 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
     zeta_b[nc:, :nc] = mo_energy[1][:nc]
     zeta_a[:ni, ni:] = mo_energy[0][ni:]
     zeta_b[:nc, nc:] = mo_energy[1][nc:]
-    dm1a = xp.zeros((nao, nao))
-    dm1b = xp.zeros((nao, nao))
+    dm1a = xp.zeros((nmo, nmo))
+    dm1b = xp.zeros((nmo, nmo))
     dm1a[:ni, :ni] = dooa
     dm1b[nc:, nc:] = dvvb
     dm1a[ni:, :ni] = z1a * 2

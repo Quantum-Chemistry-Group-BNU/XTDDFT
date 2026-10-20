@@ -444,3 +444,61 @@ def test_cpu_df_aux_response_matches_auxiliary_center_finite_difference(spin_con
     finite_difference = (energy(auxmol.set_geom_(plus, unit="Bohr", inplace=False))
                          - energy(auxmol.set_geom_(minus, unit="Bohr", inplace=False))) / (2*step)
     assert actual[1, 1] == pytest.approx(finite_difference, abs=2e-8, rel=2e-6)
+
+
+@pytest.mark.parametrize('sum_results', [False, True])
+@pytest.mark.parametrize('omega', [None, 0.3])
+def test_gpu_df_derivative_pairs_are_streamed(monkeypatch, sum_results, omega):
+    """Preserve pair ordering/scaling while isolating the pure-J density pair."""
+    from types import SimpleNamespace
+    from XTDDFT.XTDDFT.grad._backend import df_jk_energies_per_atom
+    calls = []
+    x = np.array([[1., 2.], [3., 4.]])
+    pairs = [[x, x], [2*x, x], [x, x.T]]
+    jf, kf = [0.5, 0., 0.], [0., 0.2, 0.4]
+
+    def native(grad, dm_list, j_factor, k_factor, **kwargs):
+        assert grad.auxbasis_response
+        assert len(dm_list) == 1
+        calls.append((dm_list, kwargs))
+        j = 0 if j_factor is None else j_factor[0]
+        k = 0 if k_factor is None else k_factor[0]
+        a, b = dm_list[0]
+        # Deliberately sensitive to X versus X.T and density-pair ordering.
+        value = j * a.sum() * b.sum() - k * np.sum(a * b.T)
+        result = np.full((1, 2, 3), value)
+        return result.sum(axis=0) if kwargs['sum_results'] else result
+
+    monkeypatch.setitem(sys.modules, 'gpu4pyscf.df.grad.tdrhf',
+                        SimpleNamespace(Gradients=SimpleNamespace(jk_energies_per_atom=native)))
+    actual = df_jk_energies_per_atom(object(), pairs, jf, kf,
+                                   omega=omega, sum_results=sum_results)
+    expected = np.stack([np.full((2, 3), j*a.sum()*b.sum()-k*np.sum(a*b.T))
+                         for (a, b), j, k in zip(pairs, jf, kf)])
+    np.testing.assert_allclose(actual, expected.sum(axis=0) if sum_results else expected)
+    assert len(calls) == 3
+    assert calls[2][0][0][1] is x.T or np.array_equal(calls[2][0][0][1], x.T)
+    assert all(c[1]['omega'] == (0. if omega is None else omega) for c in calls)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize('sum_results', [False, True])
+def test_gpu_df_streamed_matches_native(gpu_df_backend, sum_results):
+    from types import SimpleNamespace
+    from gpu4pyscf.df.grad.tdrhf import Gradients
+    from XTDDFT.XTDDFT.grad._backend import df_jk_energies_per_atom
+    cp = gpu_df_backend
+    mol = gto.M(atom=ATOM, spin=2, basis='sto3g', verbose=0)
+    mf = dft.UKS(mol).to_gpu().density_fit(auxbasis='weigend')
+    mf.with_df.build()
+    rng = np.random.default_rng(7)
+    a, b, x = cp.asarray(rng.normal(size=(3, mol.nao, mol.nao)))
+    a, b = a + a.T, b + b.T
+    pairs = [[a, b], [a, a], [x, x.T]]
+    jf, kf = [0.5, 0., 0.], [0., 0.2, 0.4]
+    grad = SimpleNamespace(base=SimpleNamespace(_scf=mf), auxbasis_response=True)
+    expected = Gradients.jk_energies_per_atom(
+        grad, pairs, jf, kf, sum_results=sum_results)
+    actual = df_jk_energies_per_atom(
+        mf, pairs, jf, kf, sum_results=sum_results)
+    np.testing.assert_allclose(actual, expected, atol=1e-8, rtol=1e-8)

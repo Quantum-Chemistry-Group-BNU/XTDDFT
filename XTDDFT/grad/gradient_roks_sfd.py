@@ -346,7 +346,7 @@ def grad_elec(td, fglobal=None, foo=1, atmlst=None, max_memory=2000, verbose=log
     no = len(occidx_a) - len(occidx_b)
     ni = nc + no  # convenient use, alpha occ
     na = no + nv  # convenient use, beta vir
-    nao = mo_coeff[0].shape[0]
+    nao, nmo = mo_coeff[0].shape
     orbv_a = mo_coeff[0][:, ni:]
     orbo_a = mo_coeff[0][:, :ni]
     orbv_b = mo_coeff[1][:, nc:]
@@ -397,7 +397,7 @@ def grad_elec(td, fglobal=None, foo=1, atmlst=None, max_memory=2000, verbose=log
         dmvob += xp.einsum('ut,at->au', v[:no, nc:ni], v[no:, nc:ni]) * c5
         scorrao = orbo_a[:, nc:ni] @ (xp.eye(no)/2) @ orbo_a[:, nc:ni].T
 
-        dmS = xp.zeros((nao, nao))  # contract with F^{S}
+        dmS = xp.zeros((nmo, nmo))  # contract with F^{S}
         dmHFa = xp.zeros_like(dmS)  # contract with F^{HF,\alpha}
         dmHFb = xp.zeros_like(dmS)  # contract with F^{HF,\beta}
         dmS[:nc, :nc] = dmcc
@@ -674,8 +674,8 @@ def grad_elec(td, fglobal=None, foo=1, atmlst=None, max_memory=2000, verbose=log
     z1ao[0] = orbv_a @ z1a @ orbo_a.T
     z1ao[1] = orbv_b @ z1b @ orbo_b.T
     veff = vresp((z1ao + z1ao.transpose(0, 2, 1)) / 2)  # G_{\mu\nu}^{\sigma}[Z^S]
-    im0a = xp.zeros((nao, nao))
-    im0b = xp.zeros((nao, nao))
+    im0a = xp.zeros((nmo, nmo))
+    im0b = xp.zeros((nmo, nmo))
     im0a[:ni, :ni] += fockamo[:ni, :ni]  # ground state
     im0b[:nc, :nc] += fockbmo[:nc, :nc]  # ground state
     im0a[:ni, :ni] += orbo_a.T @ veff0doo[0] @ orbo_a

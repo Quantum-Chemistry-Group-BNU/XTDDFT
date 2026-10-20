@@ -50,6 +50,35 @@ def df_jk_energies_per_atom(mf, dm_list, j_factor=None, k_factor=None,
     from gpu4pyscf.df.grad.tdrhf import Gradients
 
     grad = SimpleNamespace(base=SimpleNamespace(_scf=mf), auxbasis_response=True)
+    if isinstance(dm_list, (list, tuple)) and len(dm_list) > 1:
+        n = len(dm_list)
+        if any(f is not None and len(f) != n for f in (j_factor, k_factor)):
+            raise ValueError("J/K factor counts must match the density-pair count")
+        # A mixed J/K batch builds exchange intermediates even for pure-J
+        # pairs. Isolate pairs to select the native J-only path and bound the
+        # number of simultaneously resident naux * rank1 * rank2 tensors.
+        # Keep list semantics: ndarray inputs have different symmetry factors.
+        results = []
+        total = None
+        for i, pair in enumerate(dm_list):
+            jf = None if j_factor is None else j_factor[i:i+1]
+            kf = None if k_factor is None else k_factor[i:i+1]
+            if jf is not None and jf[0] == 0 and kf is not None and kf[0] != 0:
+                jf = None
+            result = Gradients.jk_energies_per_atom(
+                grad, [pair], jf, kf,
+                omega=0.0 if omega is None else omega,
+                hermi=hermi if isinstance(hermi, int) else hermi[i:i+1],
+                sum_results=sum_results, verbose=verbose,
+            )
+            if sum_results:
+                if total is None:
+                    total = result
+                else:
+                    total += result
+            else:
+                results.append(result)
+        return total if sum_results else np.concatenate(results, axis=0)
     return Gradients.jk_energies_per_atom(
         grad, dm_list, j_factor, k_factor,
         omega=0.0 if omega is None else omega, hermi=hermi,

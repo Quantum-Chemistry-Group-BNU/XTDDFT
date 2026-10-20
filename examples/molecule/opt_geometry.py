@@ -4,15 +4,15 @@ import os
 
 os.environ["OMP_NUM_THREADS"] = "4"
 os.environ["OMP_DYNAMIC"] = "False"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "4"
+os.environ["OPENBLAS_NUM_THREADS"] = "4"
+os.environ["NUMEXPR_NUM_THREADS"] = "4"
 
 import time
 from pathlib import Path
 
 import numpy as np
-from pyscf import gto, scf
+from pyscf import gto, lib, scf
 from pyscf.geomopt import as_pyscf_method, geometric_solver
 
 from XTDDFT.XTDDFT.sf_tda_up import SF_TDA_up
@@ -34,6 +34,8 @@ SUPPORTED_METHODS = (
 # ===== Manually edit these parameters on the server =====
 method_kind = "xsf_down"
 use_gpu = False
+with_df = True  # RI-JK density fitting for SCF, response and gradients
+auxbasis = None  # None: PySCF default; or an explicit JK-fitting basis
 xc = "b3lyp"
 basis = "cc-pvdz"
 spin = 2
@@ -45,7 +47,7 @@ verbose = 4
 conv_tol = 1e-10
 max_cycle = 200
 grids_level = 5
-maxsteps = 100
+maxsteps = 50
 trajectory_file = Path(f"ch2o_{method_kind}_opt_traj.xyz")
 atom = """
     H   0.000000   0.934473  -0.588078
@@ -54,11 +56,11 @@ atom = """
     O   0.000000   0.000000   1.221104
 """
 conv_params = {
-    "convergence_energy": 1e-6,
-    "convergence_grms": 3e-4,
-    "convergence_gmax": 4.5e-4,
-    "convergence_drms": 1.2e-3,
-    "convergence_dmax": 1.8e-3,
+    "convergence_energy": 1e-6,  # energy, Eh
+    "convergence_grms": 3e-4,  # root mean square gradient, Eh/bohr
+    "convergence_gmax": 4.5e-4,  # max gradient, Eh/bohr
+    "convergence_drms": 1.2e-3,  # root mean square displace, Angstrom
+    "convergence_dmax": 1.8e-3,  # max displace, Angstrom
 }
 # ========================================================
 
@@ -75,6 +77,8 @@ def build_reference(mol, kind=None, use_gpu=False):
     kind = method_kind if kind is None else kind
     kind = _check_method_kind(kind)
     mf = scf.UKS(mol) if kind.startswith("u") else scf.ROKS(mol)
+    if with_df:
+        mf = mf.density_fit(auxbasis=auxbasis, only_dfj=False)
     mf.xc = xc
     mf.conv_tol = conv_tol
     mf.max_cycle = max_cycle
@@ -96,6 +100,50 @@ def build_response(mf, kind=None):
     if kind.endswith("sf_up"):
         return SF_TDA_up(mf, **kwargs)
     return XSF_TDA_down(mf, **kwargs)
+
+
+def reference_gradient(mf):
+    """Use native gradients, or GPU UKS derivatives at fixed ROKS orbitals."""
+    if callable(mf.nuc_grad_method):
+        return mf.nuc_grad_method().kernel()
+
+    # GPU scanners have a pyscf.* module name: GPU4PySCF 58f79f0's
+    # to_cpu then returns early, leaving ROKS.to_cpu's output empty.
+    if isinstance(mf, lib.SinglePointScanner):
+        mf = mf.undo_scanner()
+
+    # GPU4PySCF ROKS has no native gradient. Retain its restricted orbitals
+    # and use the ROHF energy-weighted density (pyscf.grad.rohf.make_rdm1e).
+    if mf.mo_coeff.ndim != 2 or not callable(getattr(mf, "to_cpu", None)):
+        raise NotImplementedError("Reference has no supported nuclear gradient")
+    xp = get_array_module(mf.mo_coeff)
+    fock = mf.get_fock(dm=mf.make_rdm1())
+    occupied = (mf.mo_coeff[:, mf.mo_occ > 0],
+                mf.mo_coeff[:, mf.mo_occ == 2])
+    dme = xp.stack([
+        c @ (c.conj().T @ f @ c) @ c.conj().T
+        for c, f in zip(occupied, (fock.focka, fock.fockb))
+    ])
+    # Conversion transfers orbital data only; do not run a UKS SCF.
+    uks_view = mf.copy().to_cpu().to_uks().to_gpu()
+    if getattr(mf, "with_df", None) is not None:
+        if (getattr(uks_view, "with_df", None) is None
+                or uks_view.with_df.auxbasis != mf.with_df.auxbasis
+                or uks_view.only_dfj != mf.only_dfj):
+            raise RuntimeError("ROKS conversion changed density-fitting settings")
+    if (uks_view.mo_energy is None or uks_view.mo_coeff is None
+            or uks_view.mo_occ is None):
+        raise RuntimeError("ROKS conversion lost orbitals; refusing automatic UKS SCF")
+    if (not xp.array_equal(uks_view.mo_coeff, xp.stack([mf.mo_coeff] * 2))
+            or not xp.array_equal(uks_view.mo_occ,
+                                  xp.stack([mf.mo_occ > 0, mf.mo_occ == 2]))
+            or uks_view.grids.level != mf.grids.level):
+        raise RuntimeError("ROKS conversion changed orbitals, occupations or grid level")
+    grad = uks_view.nuc_grad_method()
+    if getattr(uks_view, "with_df", None) is not None:
+        grad.auxbasis_response = True
+    grad.make_rdm1e = lambda *args, **kwargs: dme
+    return grad.kernel()
 
 
 def solve_excited(mol, with_gradient=True, use_gpu=False):
@@ -137,14 +185,22 @@ def main():
         verbose=verbose,
     )
 
-    reference = build_reference(
-        mol, use_gpu=use_gpu and method_kind.lower().startswith("u")
-    )
+    reference = build_reference(mol, use_gpu=use_gpu)
     reference.kernel()
     if not reference.converged:
         raise RuntimeError("Reference-state SCF did not converge")
+    reference_scanner = reference.as_scanner()
+
+    def reference_energy_gradient(current_mol):
+        energy = reference_scanner(current_mol)
+        if not reference_scanner.converged:
+            raise RuntimeError("Reference-state SCF did not converge")
+        gradient = reference_gradient(reference_scanner)
+        return float(energy), asnumpy(gradient)
+
+    reference_method = as_pyscf_method(mol, reference_energy_gradient)
     mol_reference = geometric_solver.optimize(
-        reference, maxsteps=maxsteps, **conv_params
+        reference_method, maxsteps=maxsteps, **conv_params
     )
 
     timings = {"scf": [], "excitation": [], "gradient": []}

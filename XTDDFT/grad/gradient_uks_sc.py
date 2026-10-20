@@ -268,7 +268,7 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
     mo_energy = xp.asarray(mf.mo_energy)
     mo_coeff = xp.asarray(mf.mo_coeff)
     mo_occ = xp.asarray(mf.mo_occ)
-    nao = mo_coeff[0].shape[0]
+    nao, nmo = mo_coeff[0].shape
     occidx_a = xp.where(mo_occ[0] == 1)[0]
     viridx_a = xp.where(mo_occ[0] == 0)[0]
     occidx_b = xp.where(mo_occ[1] == 1)[0]
@@ -376,8 +376,8 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
     time1 = log.timer('Z-vector equation solver', *time1)
 
     # 5.1. construct W matrix, without Fock part
-    im0a = xp.zeros((nao, nao))
-    im0b = xp.zeros((nao, nao))
+    im0a = xp.zeros((nmo, nmo))
+    im0b = xp.zeros((nmo, nmo))
     im0a[:(nc+no),:(nc+no)] = orbo_a.T @ (veff0doo[0]+veff[0]) @ orbo_a
     im0a[:(nc+no),:(nc+no)] += xp.einsum('ak,ai->ki', veff0moa[(nc+no):,:(nc+no)], va)
     im0a[(nc+no):,(nc+no):] = xp.einsum('ci,ai->ac', veff0moa[(nc+no):,:(nc+no)], va)
@@ -394,8 +394,8 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
     zeta_b[nc:, :nc] = mo_energy[1][:nc]
     zeta_a[:(nc+no), (nc+no):] = mo_energy[0][(nc+no):]
     zeta_b[:nc, nc:] = mo_energy[1][nc:]
-    dm1a = xp.zeros((nao, nao))
-    dm1b = xp.zeros((nao, nao))
+    dm1a = xp.zeros((nmo, nmo))
+    dm1b = xp.zeros((nmo, nmo))
     dm1a[:(nc+no), :(nc+no)] = dooa
     dm1b[:nc, :nc] = doob
     dm1a[(nc+no):, (nc+no):] = dvva

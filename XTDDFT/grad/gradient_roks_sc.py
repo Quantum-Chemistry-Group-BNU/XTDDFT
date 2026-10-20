@@ -277,7 +277,7 @@ def grad_elec(td, atmlst=None, max_memory=2000,
     mo_energy = xp.stack((restricted_energy, restricted_energy))
     mo_coeff = xp.stack((restricted_coeff, restricted_coeff))
     mo_occ = xp.stack((restricted_occ >= 1, restricted_occ >= 2)).astype(float)
-    nao = mo_coeff[0].shape[0]
+    nao, nmo = mo_coeff[0].shape
     occidx_a = xp.where(mo_occ[0] == 1)[0]
     viridx_a = xp.where(mo_occ[0] == 0)[0]
     occidx_b = xp.where(mo_occ[1] == 1)[0]
@@ -550,8 +550,8 @@ def grad_elec(td, atmlst=None, max_memory=2000,
     z1ao[0] = orbv_a @ z1a @ orbo_a.T
     z1ao[1] = orbv_b @ z1b @ orbo_b.T
     veff = vresp((z1ao + z1ao.transpose(0, 2, 1)) / 2)
-    im0a = xp.zeros((nao, nao))
-    im0b = xp.zeros((nao, nao))
+    im0a = xp.zeros((nmo, nmo))
+    im0b = xp.zeros((nmo, nmo))
     im0a[:ni, :ni] += fockamo[:ni, :ni]  # ground state
     im0b[:nc, :nc] += fockbmo[:nc, :nc]  # ground state
     im0a[:ni, :ni] += (orbo_a.T @ veff0doo[0] @ orbo_a)
@@ -590,7 +590,7 @@ def grad_elec(td, atmlst=None, max_memory=2000,
 
     # 5.3 add correct term
     if uda:
-        scorrmo = xp.zeros((nao, nao))
+        scorrmo = xp.zeros((nmo, nmo))
         scorrmo[nc:ni, nc:ni] = xp.eye(no) / 2
         im0[:nc, :] += xp.einsum('ij,pj->ip', dmcc, FSmo[0, :, :nc])
         im0[ni:, :] += xp.einsum('ab,pb->ap', dmvv, FSmo[0, :, ni:])

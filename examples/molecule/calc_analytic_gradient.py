@@ -95,6 +95,10 @@ def main():
     if use_gpu:
         mf = mf.to_gpu()
     mf.kernel()
+    if with_df:
+        auxmol = mf.with_df.auxmol
+        print("Actual auxiliary basis:", auxmol.basis, file=mf.stdout)
+        print("Number of auxiliary functions:", auxmol.nao_nr(), file=mf.stdout)
     sync_gpu()
     time1 = perf_counter()
     print(f"SCF: {time1 - time0:.3f} s")

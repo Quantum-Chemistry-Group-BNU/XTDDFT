@@ -340,7 +340,7 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
     nc = len(occidx_b)
     nv = len(viridx_a)
     no = len(occidx_a) - len(occidx_b)
-    nao = mo_coeff[0].shape[0]
+    nao, nmo = mo_coeff[0].shape
     orbv_a = mo_coeff[0][:, (nc+no):]
     orbo_a = mo_coeff[0][:, :(nc+no)]
     orbv_b = mo_coeff[1][:, nc:]
@@ -545,8 +545,8 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
     z1ao[1] = orbv_b @ z1b @ orbo_b.T
     veff = vresp((z1ao + z1ao.transpose(0, 2, 1)) / 2)  # G_{\mu\nu}^{\sigma}[Z^S]
 
-    im0a = xp.zeros((nao, nao))
-    im0b = xp.zeros((nao, nao))
+    im0a = xp.zeros((nmo, nmo))
+    im0b = xp.zeros((nmo, nmo))
     im0a[:(nc+no), :(nc+no)] += fockamo[:(nc+no), :(nc+no)]  # ground state
     im0b[:nc, :nc] += fockbmo[:nc, :nc]  # ground state
     im0a[:(nc+no), :(nc+no)] += orbo_a.T @ (veff0doo[0] + veff[0]) @ orbo_a

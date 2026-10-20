@@ -328,7 +328,7 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
     nc = len(occidx_b)
     nv = len(viridx_a)
     no = len(occidx_a) - len(occidx_b)
-    nao = mo_coeff[0].shape[0]
+    nao, nmo = mo_coeff[0].shape
     orbv_a = mo_coeff[0][:, (nc+no):]
     orbo_a = mo_coeff[0][:, :(nc+no)]
     orbv_b = mo_coeff[1][:, nc:]
@@ -420,12 +420,12 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
     z1ao[1] = orbv_b @ z1b @ orbo_b.T
     veff = vresp((z1ao + z1ao.transpose(0, 2, 1)))  # G_{\mu\nu}^{\sigma}[Z^S]
 
-    im0a = xp.zeros((nao, nao))
+    im0a = xp.zeros((nmo, nmo))
     im0a[:(nc+no), :(nc+no)] = orbo_a.T @ (veff0doo[0] + veff[0]) @ orbo_a
     im0a[(nc+no):, (nc+no):] = xp.einsum('jd,jc->dc', veff0mo[:nc, (nc+no):], v)
     im0a[:(nc+no), (nc+no):] = xp.einsum('jk,jc->kc', veff0mo[:nc, :(nc+no)], v) * 2
 
-    im0b = xp.zeros((nao, nao))
+    im0b = xp.zeros((nmo, nmo))
     im0b[:nc, :nc] = orbo_b.T @ (veff0doo[1] + veff[1]) @ orbo_b  # W_{ij}^{\beta} in ao
     im0b[:nc, :nc] += xp.einsum('al,ka->lk', veff0mo.T[(nc+no):, :nc], v)
 
@@ -433,7 +433,7 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
     zeta_a = (mo_energy[0][:, None] + mo_energy[0]) * 0.5
     zeta_a[:(nc+no), (nc+no):] = mo_energy[0][(nc+no):]
     zeta_a[(nc+no):, :(nc+no)] = mo_energy[0][:(nc+no)]
-    dm1a = xp.zeros((nao, nao))
+    dm1a = xp.zeros((nmo, nmo))
     dm1a[(nc+no):, (nc+no):] = dvva
     dm1a[(nc+no):, :(nc+no)] = z1a * 2
     dm1a[:(nc+no), :(nc+no)] += xp.eye(nc+no)  # for ground state
@@ -442,7 +442,7 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
     zeta_b = (mo_energy[1][:, None] + mo_energy[1]) * 0.5
     zeta_b[nc:, :nc] = mo_energy[1][:nc]
     zeta_b[:nc, nc:] = mo_energy[1][nc:]
-    dm1b = xp.zeros((nao, nao))
+    dm1b = xp.zeros((nmo, nmo))
     dm1b[:nc, :nc] = doob
     dm1b[nc:, :nc] = z1b * 2
     dm1b[:nc, :nc] += xp.eye(nc)
