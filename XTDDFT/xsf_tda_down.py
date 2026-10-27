@@ -75,6 +75,19 @@ def add_hf_a_a2b(a_a2b, mf, orbo_a, orbv_b, nocc_a, nvir_b, hyb=1, omega=None):
 
     eri_mo = np.asarray(eri_mo).reshape(nocc_a,nocc_a,nvir_b,nvir_b)
     a_a2b -= contract('ijba->iajb', eri_mo) * hyb
+    # ao2mo omits the exchange G=0 correction included by get_k.
+    if _is_pbc_mf(mf) and getattr(mf, "exxdiv", None) is not None:
+        from pyscf.pbc.tools import pbc
+
+        if mf.exxdiv != "ewald":
+            raise NotImplementedError("Dense SF supports exxdiv=None or 'ewald'")
+        exx_shift = hyb * pbc.madelung(mf.cell, _get_gamma_kpt(mf), omega=omega)
+        overlap = np.asarray(_get_ovlp(mf))
+        a_a2b -= exx_shift * contract(
+            "ij,ab->iajb",
+            orbo_a.conj().T @ overlap @ orbo_a,
+            orbv_b.conj().T @ overlap @ orbv_b,
+        )
     return a_a2b
 
 def construct_xc_a2b(ao, orbo_a, orbv_b, fxc_ab):

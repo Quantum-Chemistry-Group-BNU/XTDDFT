@@ -16,6 +16,7 @@ from .base import (
     _df_ao2mo_pbc,
     _get_gamma_kpt,
     _get_mo_fock,
+    _get_ovlp,
     _is_pbc_mf,
     _iter_block_data,
     _make_spinflip_problem,
@@ -66,6 +67,19 @@ def add_hf_a_b2a(a_b2a, mf, orbo_b, orbv_a, nc, nv, hyb=1, omega=None):
 
     eri_mo = np.asarray(eri_mo).reshape(nc, nc, nv, nv)
     a_b2a -= contract('ijba->iajb', eri_mo) * hyb
+    # ao2mo omits the exchange G=0 correction included by get_k.
+    if _is_pbc_mf(mf) and getattr(mf, "exxdiv", None) is not None:
+        from pyscf.pbc.tools import pbc
+
+        if mf.exxdiv != "ewald":
+            raise NotImplementedError("Dense SF supports exxdiv=None or 'ewald'")
+        exx_shift = hyb * pbc.madelung(mf.cell, _get_gamma_kpt(mf), omega=omega)
+        overlap = np.asarray(_get_ovlp(mf))
+        a_b2a -= exx_shift * contract(
+            "ij,ab->iajb",
+            orbo_b.conj().T @ overlap @ orbo_b,
+            orbv_a.conj().T @ overlap @ orbv_a,
+        )
     return a_b2a
 
 def construct_xc_b2a(ao, orbo_b, orbv_a, fxc_ab):
