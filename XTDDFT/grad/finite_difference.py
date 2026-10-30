@@ -7,9 +7,12 @@ from XTDDFT.XTDDFT.xsf_tda_down import XSF_TDA_down
 from XTDDFT.XTDDFT.sf_tda_up import SF_TDA_up
 from XTDDFT.XTDDFT.xtda import XTDA
 from XTDDFT.utils import unit
+from XTDDFT.utils.backend import asnumpy
 
 
-def excited_energy(atom, spec, state, mk, xc='b3lyp', method=1, cs=20):
+def excited_energy(atom, spec, state, mk, xc='b3lyp', method=1, cs=20, *,
+                   use_gpu=False, with_df=False, auxbasis=None,
+                   return_solver=False):
     """excited energy = mf.e_tot + td.e[state-1], unit of td.e is Hartree"""
     kind = mk.lower()
     if kind not in ("usf_up", "usf_down", "usc", "xsf_up", "xsf_down", "xsc"):
@@ -21,11 +24,17 @@ def excited_energy(atom, spec, state, mk, xc='b3lyp', method=1, cs=20):
         mf = dft.UKS(mol)
     else:
         mf = dft.ROKS(mol)
+    if with_df:
+        mf = mf.density_fit(auxbasis=auxbasis, only_dfj=False)
     mf.xc = xc
     mf.conv_tol = 1e-12
     mf.max_cycle = 200
     mf.grids.level = 5
+    if use_gpu:
+        mf = mf.to_gpu()
     mf.kernel()
+    if not mf.converged:
+        raise RuntimeError("Finite-difference reference SCF did not converge")
 
     if 'sf_down' in mk.lower():
         td = XSF_TDA_down(mf, method=method, davidson=True, collinear_samples=cs)
@@ -37,7 +46,10 @@ def excited_energy(atom, spec, state, mk, xc='b3lyp', method=1, cs=20):
         raise ValueError
     # Request +2 extra roots, make davidson itersion more stable
     td.kernel(nstates=max(state, 1) + 2)
-    return mf.e_tot + td.e[state-1]
+    if not np.all(asnumpy(td.converged)):
+        raise RuntimeError("Finite-difference response calculation did not converge")
+    energy = float(mf.e_tot + asnumpy(td.e)[state-1])
+    return (energy, td) if return_solver else energy
 
 
 def fd_gradient(atoms, state, mk, xc='b3lyp', charge=0, spin=2,

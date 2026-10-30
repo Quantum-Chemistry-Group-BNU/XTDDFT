@@ -851,9 +851,15 @@ def _gen_response_sf_gpu(mf, mo_coeff, mo_occ, hermi=0, max_memory=None,
             def apply_xc(dm1):
                 return _nr_uks_fxc_sf_tda_gpu_pbc(ni, mf, dm1, hermi=hermi, vxc=vxc)
         else:
-            def apply_xc(dm1):
-                from gpu4pyscf.tdscf._uhf_resp_sf import nr_uks_fxc_sf
-                return nr_uks_fxc_sf(ni, mf.mol, mf.grids, mf.xc, None, dm1, 0, hermi, None, None, vxc)
+            # TODO(WHB): Unified version
+            from gpu4pyscf.tdscf import _uhf_resp_sf
+            if hasattr(_uhf_resp_sf, "nr_uks_fxc_sf"):
+                def apply_xc(dm1):
+                    return _uhf_resp_sf.nr_uks_fxc_sf(ni, mf.mol, mf.grids, mf.xc, None, dm1, 0, hermi, None, None, vxc,)
+            else:
+                def apply_xc(dm1):
+                    return ni.nr_rks_fxc(mf.mol, mf.grids, mf.xc, None, dm1,  0, hermi, None, None, 2.0 * vxc,)
+                
         return _make_gpu_response_vind(
             mf, xctype, hybrid, omega, alpha, hyb, hermi, apply_xc,
             with_xc=with_xc,

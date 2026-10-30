@@ -221,6 +221,7 @@ def main():
             raise RuntimeError("Excited-state calculation did not converge")
         energy = mf.e_tot + td.e[state - 1]
         timings["excitation"].append(time.perf_counter() - start)
+        td.analyse()
 
         start = time.perf_counter()
         gradient = td.nuc_grad_method(state=state).kernel()
@@ -235,7 +236,7 @@ def main():
         return float(energy), asnumpy(gradient)
 
     start = time.perf_counter()
-    method = as_pyscf_method(mol_reference, energy_gradient)
+    method = as_pyscf_method(mol, energy_gradient)
     mol_excited = geometric_solver.optimize(
         method, maxsteps=maxsteps, **conv_params
     )

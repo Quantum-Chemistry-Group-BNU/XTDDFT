@@ -1277,7 +1277,7 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
         self.converged = converged
         self.e = xp.asarray(e)
         self.v = xp.asarray(_asnumpy(x1)).T
-        logger.info('XSF_TDA_down {} converged: {}', self.davidson_method, converged)
+        logger.info(f'XSF_TDA_down {self.davidson_method} converged: {converged}\n')
         return self.e, self.v
 
     def _split_analysis_vectors(self, value):
