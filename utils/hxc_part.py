@@ -25,7 +25,10 @@ from ..XTDDFT.base import (
     _is_ks_mf,
     _response_max_memory,
 )
-from .backend import _asarray, _asnumpy, backend, contract, require_cupy, set_backend, xp
+from .backend import (
+    _asarray, _asnumpy, backend, contract, get_array_module, require_cupy,
+    set_backend, xp,
+)
 
 try:
     from loguru import logger
@@ -256,6 +259,40 @@ def cache_xc_kernel_sf_mc(self, mf, mol, grids, xc_code, mo_coeff, mo_occ, deriv
     fxc_sf = eval_xc(xc_code, rho_tmz, deriv=2, xctype=xctype)
     return fxc_sf
 
+def _rks_fxc_ncomp(xctype):
+    """Component count used by ``gpu4pyscf.dft.numint.nr_rks_fxc``."""
+    return {"LDA": 1, "HF": 1, "GGA": 4, "MGGA": 5}.get(xctype, 4)
+
+
+def embed_alda0_rks_kernel(kernel, xctype, ngrids=None):
+    """ALDA0 kernel as the ``(ncomp, ncomp, ngrids)`` tensor ``nr_rks_fxc`` multiplies.
+
+    ``nr_rks_fxc`` does ``cupy.multiply(fxc[:,:,p0:p1], weights, out=fxc_w)``
+    with ``fxc_w`` shaped ``(ncomp, ncomp, block)``. ``ncomp`` is 1, 4, or 5
+    for LDA, GGA, and MGGA. Padding every functional to 4x4 makes that
+    product disagree with ``fxc_w`` for LDA and MGGA. A packed grid axis
+    shorter than ``grids.coords`` does the same once a slice runs past it.
+    Only the density-density entry is stored: ALDA0 does not couple density
+    gradients or tau. ``kernel`` is already the half-strength value consumed
+    by the ``2 * fxc`` spin-flip convention.
+    """
+    array_api = get_array_module(kernel)
+    values = array_api.ravel(array_api.asarray(kernel))
+    ncomp = _rks_fxc_ncomp(xctype)
+    if ngrids is None:
+        ngrids = int(values.size)
+    ngrids = int(ngrids)
+    if int(values.size) != ngrids:
+        full = array_api.zeros(ngrids, dtype=values.dtype)
+        count = min(int(values.size), ngrids)
+        if count:
+            full[:count] = values[:count]
+        values = full
+    fxc = array_api.zeros((ncomp, ncomp, ngrids), dtype=values.dtype)
+    fxc[0, 0] = values
+    return fxc
+
+
 def _cache_xc_kernel_sf_gpu_mol(mf, mo_coeff, mo_occ, max_memory=2000):
     del max_memory
     cp = require_cupy()
@@ -289,10 +326,11 @@ def _cache_xc_kernel_sf_gpu_mol(mf, mo_coeff, mo_occ, max_memory=2000):
     rho_b = cp.hstack(rhob)
     rho, denom = _alda0_rho_and_denom(cp, rho_a, rho_b, xctype)
     vxc = ni.eval_xc_eff(mf.xc, rho, deriv=1, xctype=xctype, spin=1)[1]
-    # gpu4pyscf.tdscf._uhf_resp_sf.nr_uks_fxc_sf multiplies the spin-flip
-    # kernel by 2.0 internally for the xx/yy channels.
+    # Half of the response kernel. The nr_rks_fxc fallback multiplies by 2,
+    # which is the same factor gpu4pyscf applies to its multicollinear kernel.
     fxc_ab = (vxc[0, 0] - vxc[1, 0]) / (2.0 * (denom + 1e-9))
-    return cp.pad(fxc_ab[None, None], ((0, 3), (0, 3), (0, 0)))
+    ngrids = int(cp.asarray(mf.grids.weights).size) if mf.grids.weights is not None else None
+    return embed_alda0_rks_kernel(fxc_ab, xctype, ngrids)
 
 def _cache_xc_kernel_sf_mc_gpu_mol(mf, mo_coeff, mo_occ, collinear_samples, max_memory=2000):
     del max_memory
@@ -857,8 +895,12 @@ def _gen_response_sf_gpu(mf, mo_coeff, mo_occ, hermi=0, max_memory=None,
                 def apply_xc(dm1):
                     return _uhf_resp_sf.nr_uks_fxc_sf(ni, mf.mol, mf.grids, mf.xc, None, dm1, 0, hermi, None, None, vxc,)
             else:
+                cp = require_cupy()
                 def apply_xc(dm1):
-                    return ni.nr_rks_fxc(mf.mol, mf.grids, mf.xc, None, dm1,  0, hermi, None, None, 2.0 * vxc,)
+                    dm1 = cp.asarray(dm1)
+                    if dm1.ndim == 2:
+                        dm1 = dm1.reshape(1, *dm1.shape)
+                    return ni.nr_rks_fxc(mf.mol, mf.grids, mf.xc, None, dm1, 0, hermi, None, None, 2.0 * vxc,)
                 
         return _make_gpu_response_vind(
             mf, xctype, hybrid, omega, alpha, hyb, hermi, apply_xc,
