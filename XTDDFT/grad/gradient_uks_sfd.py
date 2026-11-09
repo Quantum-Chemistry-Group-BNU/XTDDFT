@@ -6,7 +6,7 @@ from pyscf.grad import uhf as uhf_grad
 from pyscf.grad import tdrks as tdrks_grad
 from pyscf.grad import tduks as tduks_grad
 # from pyscf.sftda.numint2c_sftd import mcfun_eval_xc_adapter_sf
-from ...utils.hxc_part import mcfun_eval_xc_adapter_sf
+from ...utils.hxc_part import alda0_weighted_potentials, mcfun_eval_xc_adapter_sf
 
 from ...utils.backend import asnumpy
 from ._backend import (
@@ -247,6 +247,18 @@ def _contract_xc_kernel(td_grad, xc_code, dmt, dmoo=None,
                         )
                 fmat_(eval_mol, k1ao[0], ao, wv[0], mask, shls_slice, ao_loc)
                 fmat_(eval_mol, k1ao[1], ao, wv[1], mask, shls_slice, ao_loc)
+        elif td_grad.base.collinear_samples == 0:
+            # ALDA0: f = (v_a - v_b) / (rho_a - rho_b), density component only.
+            rho1 = ni.eval_rho(
+                eval_mol, ao0, dmvo_block, mask, xctype, hermi=1, with_lapl=False,
+            )
+            wv, wv_k = alda0_weighted_potentials(
+                ni, xc_code, rho, rho1, weight, xctype, with_kxc, xp,
+            )
+            fmat_(eval_mol, f1vo, ao, wv, mask, shls_slice, ao_loc)
+            if with_kxc:
+                fmat_(eval_mol, k1ao[0], ao, wv_k[0], mask, shls_slice, ao_loc)
+                fmat_(eval_mol, k1ao[1], ao, wv_k[1], mask, shls_slice, ao_loc)
 
         if dmoo is not None or with_vxc:
             vxc, fxc, kxc = ni.eval_xc_eff(
@@ -356,7 +368,9 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
 
     # 2. functional derivative, include derivative respect to mo_coeff and coordinate
     ni_ = mf._numint
-    ni_.libxc.test_deriv_order(mf.xc, 3, raise_error=True)
+    # ALDA0 needs the second XC derivative. MCOL uses the third.
+    xc_deriv_order = 2 if td.base.collinear_samples == 0 else 3
+    ni_.libxc.test_deriv_order(mf.xc, xc_deriv_order, raise_error=True)
     omega, alpha, hyb = ni_.rsh_and_hybrid_coeff(mf.xc, mol.spin)
     # f1vo: f^{xc}[X], f1oo: f^{xc}[T], vxc1: v^{xc}[\rho], k1ao: g^{xc}[X,X] 
     # and their derivative
@@ -575,7 +589,7 @@ def grad_elec(td, atmlst=None, max_memory=2000, verbose=logger.INFO):
             de[k] += xp.einsum("xpq,qp->x", veff1b[0, :, p0:p1], dmz1dvvb[:, p0:p1]) * .5
             de[k] += xp.einsum("xij,ij->x", veff1a[1, :, p0:p1], oo0a[p0:p1]) * .5
             de[k] += xp.einsum("xij,ij->x", veff1b[1, :, p0:p1], oo0b[p0:p1]) * .5
-            if td.base.collinear_samples > 0:
+            if td.base.collinear_samples >= 0:
                 de[k] += xp.einsum("xpq,pq->x", f1vo[1:, p0:p1], dmt[p0:p1]) * 2
                 de[k] += xp.einsum("xpq,pq->x", f1vo[1:, p0:p1], dmt.T[p0:p1]) * 2
             if with_k:
@@ -604,12 +618,14 @@ class SFD_gradient(uhf_grad.Gradients):
         self.method = method
         self.de = None  # gradient of molecule
         self.atmlst = None  # which atom will be calculate gradient
-        if method == 1:
+        if method == 0:
+            self.base.collinear_samples = 0
+        elif method == 1:
             self.base.collinear_samples = getattr(td, "collinear_samples", 20)
         elif method == 2:
             self.base.collinear_samples = -1
         else:
-            raise NotImplementedError("ALDA0 and Noncollinear kernel do not implement")
+            raise NotImplementedError("Noncollinear kernel is not implemented")
         
     def grad_elec(self, atmlst=None):
         return grad_elec(self, atmlst=atmlst)

@@ -52,6 +52,7 @@ def _alda0_rho_and_denom(array_api, rho_a, rho_b, xctype):
     rhb[0] = rho_b[0]
     return array_api.stack([rha, rhb]), rho_a[0] - rho_b[0]
 
+
 def AldA0(ni, mf, rho, weight, xctype, omega=None):
     vxc = ni.eval_xc_eff(mf.xc, rho, deriv=1, omega=omega, xctype=xctype)[1]
     vxc_a = vxc[0, 0] * weight
@@ -60,7 +61,78 @@ def AldA0(ni, mf, rho, weight, xctype, omega=None):
         denom = np.asarray(rho[0]) - np.asarray(rho[1])
     else:
         denom = np.asarray(rho[0][0]) - np.asarray(rho[1][0])
+    # Same floor used by the spin-flip response. A vanishing magnetization would
+    # otherwise make the ALDA0 quotient undefined.
     return (vxc_a - vxc_b) / (denom + 1e-9)
+
+
+def alda0_kernel_and_density_derivative(vxc, fxc, denom):
+    """Bare ALDA0 kernel and its ground-state density derivatives.
+
+    ``vxc`` and ``fxc`` are the spin-polarized tensors returned by
+    ``eval_xc_eff`` for the density-only projection used by ``AldA0``.
+    ``denom`` is ``rho_alpha - rho_beta`` on the same grid. ``fxc`` may be
+    ``None`` when only the kernel value is required.
+
+    The excitation contribution is ``∫ n_t^2 f dr`` with
+    ``f = (v_alpha - v_beta) / (rho_alpha - rho_beta + eps)``. Differentiating
+    that quotient with respect to the spin densities gives ``df_alpha`` and
+    ``df_beta``.
+    """
+    denom_eps = denom + 1e-9
+    kernel = (vxc[0, 0] - vxc[1, 0]) / denom_eps
+    if fxc is None:
+        return kernel, None, None
+    du_alpha = fxc[0, 0, 0, 0] - fxc[1, 0, 0, 0]
+    du_beta = fxc[0, 0, 1, 0] - fxc[1, 0, 1, 0]
+    df_alpha = du_alpha / denom_eps - kernel / denom_eps
+    df_beta = du_beta / denom_eps + kernel / denom_eps
+    return kernel, df_alpha, df_beta
+
+
+def _alda0_potential_components(array_api, values, weight, xctype):
+    """Density-only quadrature potential consumed by the gradient ``fmat_``."""
+    if xctype == "LDA":
+        ncomp = 1
+    elif xctype == "MGGA":
+        ncomp = 5
+    else:
+        ncomp = 4
+    wv = array_api.zeros((ncomp, weight.shape[0]), dtype=values.dtype)
+    wv[0] = values * weight
+    return wv
+
+
+def alda0_weighted_potentials(ni, xc_code, rho, rho1, weight, xctype,
+                              with_kxc, array_api):
+    """ALDA0 potentials for one XC grid block.
+
+    Returns the weighted transition potential ``f n_t`` and, when requested,
+    the pair of weighted ground-state potentials ``n_t^2 df/drho_sigma``.
+    Gradient and kinetic-energy components stay zero: ALDA0 evaluates the
+    functional on the density and contracts only that component.
+    """
+    rho_alda, denom = _alda0_rho_and_denom(array_api, rho[0], rho[1], xctype)
+    deriv = 2 if with_kxc else 1
+    evfk = ni.eval_xc_eff(xc_code, rho_alda, deriv=deriv, xctype=xctype, spin=1)
+    kernel, df_alpha, df_beta = alda0_kernel_and_density_derivative(
+        evfk[1], evfk[2] if with_kxc else None, denom,
+    )
+    kernel = array_api.asarray(kernel)
+    transition = rho1 if xctype == "LDA" else rho1[0]
+    wv = _alda0_potential_components(array_api, kernel * transition, weight, xctype)
+    if not with_kxc:
+        return wv, None
+    df_alpha = array_api.asarray(df_alpha)
+    df_beta = array_api.asarray(df_beta)
+    density = transition * transition
+    wv_alpha = _alda0_potential_components(
+        array_api, density * df_alpha, weight, xctype,
+    )
+    wv_beta = _alda0_potential_components(
+        array_api, density * df_beta, weight, xctype,
+    )
+    return wv, array_api.stack((wv_alpha, wv_beta))
 
 def __mcfun_fn_eval_xc(ni, xc_code, xctype, rho, deriv):
     evfk = ni.eval_xc_eff(xc_code, rho, deriv=deriv, xctype=xctype)
@@ -895,7 +967,11 @@ def _gen_response_sf_gpu(mf, mo_coeff, mo_occ, hermi=0, max_memory=None,
                 def apply_xc(dm1):
                     return _uhf_resp_sf.nr_uks_fxc_sf(ni, mf.mol, mf.grids, mf.xc, None, dm1, 0, hermi, None, None, vxc,)
             else:
+                # gpu4pyscf has no nr_uks_fxc_sf. nr_rks_fxc consumes the
+                # (ncomp, ncomp, ngrids) tensor built above. SF_TDA_up (USF)
+                # and XSF_TDA_down both arrive here for method=0.
                 cp = require_cupy()
+
                 def apply_xc(dm1):
                     dm1 = cp.asarray(dm1)
                     if dm1.ndim == 2:

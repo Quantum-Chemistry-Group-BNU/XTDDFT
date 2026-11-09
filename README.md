@@ -133,9 +133,9 @@ gradient = td.nuc_grad_method(state=1).kernel()
 ```
 
 The state number is one-based and refers to an excited state. Implemented
-routes are XTDA `method=0`, SF-TDA `method=1` or `method=2`, and XSF-TDA `method=1` or
-`2`. Periodic and GPU references are not supported by the analytic gradient
-driver.
+routes are XTDA `method=0` and SF-TDA / XSF-TDA `method=0` (ALDA0), `1`
+(multicollinear), or `2` (collinear). Periodic and GPU references are not
+supported by the analytic gradient driver.
 
 ## Non-adiabatic couplings
 

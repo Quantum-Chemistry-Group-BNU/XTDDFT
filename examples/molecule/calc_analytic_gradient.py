@@ -33,22 +33,28 @@ def parse_xyz_string(xyz: str):
 
 
 # ===== Manually edit these parameters on the server =====
-method_kind = "xsc"  # "usf_up", "usf_down", "usc", "xsf_up", "xsf_down", "xsc"
+method_kind = "usf_down"  # "usf_up", "usf_down", "usc", "xsf_up", "xsf_down", "xsc"
 use_gpu = False
 
 xc = "b3lyp"
-basis = 'sto3g'
+basis = '631g'
 spin = 2
 charge = 0
 cs = 20  # collinear_samples
-states = [2]
-sf_method = 1
+states = [1]
+sf_method = 0
 verbose = 4  # finite difference output level adjust line 19 in XTDDFT/grad/finite_difference.py 
-with_df = True
+with_df = False
+# atom = '''
+#     C   0.00   0.00   0.00
+#     H   0.00   0.95   0.15
+#     H   0.10  -0.75   0.65
+# '''
 atom = '''
-    C   0.00   0.00   0.00
-    H   0.00   0.95   0.15
-    H   0.10  -0.75   0.65
+    H   0.000000   0.934473  -0.588078
+    H   0.000000  -0.934473  -0.588078
+    C   0.000000   0.000000   0.000000
+    O   0.000000   0.000000   1.221104
 '''
 # finite difference use this form coordinate
 atom = parse_xyz_string(atom)

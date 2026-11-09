@@ -30,6 +30,10 @@ ATOM = (
 CASES = (
     ("roks", "sc", 0),
     ("uks", "sc", 0),
+    ("roks", "sfu", 0),
+    ("uks", "sfu", 0),
+    ("roks", "sfd", 0),
+    ("uks", "sfd", 0),
     ("roks", "sfu", 1),
     ("uks", "sfu", 1),
     ("roks", "sfd", 1),
@@ -502,3 +506,61 @@ def test_gpu_df_streamed_matches_native(gpu_df_backend, sum_results):
     actual = df_jk_energies_per_atom(
         mf, pairs, jf, kf, sum_results=sum_results)
     np.testing.assert_allclose(actual, expected, atol=1e-8, rtol=1e-8)
+
+
+@pytest.mark.parametrize("xc,xctype", [("svwn", "LDA"), ("pbe", "GGA")])
+def test_alda0_density_derivative_matches_finite_difference(xc, xctype):
+    """The gradient kernel must use the same quotient as AldA0."""
+    from types import SimpleNamespace
+    from pyscf.dft import numint
+    from XTDDFT.utils.hxc_part import (
+        AldA0,
+        _alda0_rho_and_denom,
+        alda0_kernel_and_density_derivative,
+    )
+
+    rho_alpha = np.array([0.2, 0.5, 0.05, 1.0, 0.31])
+    rho_beta = np.array([0.1, 0.45, 0.04, 0.2, 0.30])
+    if xctype == "LDA":
+        rho = (rho_alpha, rho_beta)
+    else:
+        rho_a = np.zeros((4, rho_alpha.size))
+        rho_b = np.zeros((4, rho_beta.size))
+        rho_a[0], rho_b[0] = rho_alpha, rho_beta
+        rho = (rho_a, rho_b)
+
+    ni = numint.NumInt()
+    projected, denom = _alda0_rho_and_denom(np, rho[0], rho[1], xctype)
+    exc_vxc_fxc = ni.eval_xc_eff(xc, projected, deriv=2, xctype=xctype, spin=1)
+    kernel, df_alpha, df_beta = alda0_kernel_and_density_derivative(
+        exc_vxc_fxc[1], exc_vxc_fxc[2], denom,
+    )
+    bare = AldA0(ni, SimpleNamespace(xc=xc), rho, np.ones(rho_alpha.size), xctype)
+    np.testing.assert_allclose(kernel, bare, rtol=0, atol=1e-12)
+
+    step = 1e-6
+
+    def kernel_at(alpha, beta):
+        if xctype == "LDA":
+            trial = (alpha, beta)
+            rho_eff = trial
+        else:
+            trial_a = np.zeros((4, alpha.size))
+            trial_b = np.zeros((4, beta.size))
+            trial_a[0], trial_b[0] = alpha, beta
+            trial = (trial_a, trial_b)
+            rho_eff = np.stack(trial)
+        _, trial_denom = _alda0_rho_and_denom(np, trial[0], trial[1], xctype)
+        potential = ni.eval_xc_eff(
+            xc, rho_eff, deriv=1, xctype=xctype, spin=1,
+        )[1]
+        return (potential[0, 0] - potential[1, 0]) / (trial_denom + 1e-9)
+
+    df_alpha_fd = (
+        kernel_at(rho_alpha + step, rho_beta) - kernel_at(rho_alpha - step, rho_beta)
+    ) / (2 * step)
+    df_beta_fd = (
+        kernel_at(rho_alpha, rho_beta + step) - kernel_at(rho_alpha, rho_beta - step)
+    ) / (2 * step)
+    np.testing.assert_allclose(df_alpha, df_alpha_fd, rtol=1e-6, atol=1e-7)
+    np.testing.assert_allclose(df_beta, df_beta_fd, rtol=1e-6, atol=1e-7)

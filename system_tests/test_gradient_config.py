@@ -151,6 +151,24 @@ def test_unsupported_df_gradient_is_rejected(kwargs):
 @pytest.mark.parametrize("module_name,class_name", [
     ("gradient_uks_sfd", "SFD_gradient"),
     ("gradient_uks_sfu", "SFU_gradient"),
+    ("gradient_roks_sfd", "SFD_gradient"),
+    ("gradient_roks_sfu", "SFU_gradient"),
+])
+def test_alda0_gradient_selects_density_kernel(module_name, class_name):
+    from importlib import import_module
+
+    cls = getattr(import_module("XTDDFT.XTDDFT.grad." + module_name), class_name)
+    reference = "ROKS" if "roks" in module_name else "UKS"
+    td = SimpleNamespace(mf=_gradient_reference(reference=reference, gpu=False, density_fit=False),
+                         mol=None, v=np.zeros((1, 1)), collinear_samples=24)
+    gradient = cls(td, method=0)
+    assert gradient.method == 0
+    assert gradient.base.collinear_samples == 0
+
+
+@pytest.mark.parametrize("module_name,class_name", [
+    ("gradient_uks_sfd", "SFD_gradient"),
+    ("gradient_uks_sfu", "SFU_gradient"),
 ])
 def test_uks_sf_gradient_keeps_excitation_sampling(module_name, class_name):
     from importlib import import_module
