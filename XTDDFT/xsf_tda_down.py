@@ -1720,10 +1720,10 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
                 )
 
             for label, arr, occ_offset, vir_offset in (
-                ("CV(ab)", x_cv, 1, self.nc + self.no + 1),
-                ("CO(ab)", x_co, 1, self.nc + 1),
-                ("OV(ab)", x_ov, self.nc + 1, self.nc + self.no + 1),
-                ("OO(ab)", x_oo, self.nc + 1, self.nc + 1),
+                ("CV(1)", x_cv, 1, self.nc + self.no + 1),
+                ("CO(1)", x_co, 1, self.nc + 1),
+                ("OV(1)", x_ov, self.nc + 1, self.nc + self.no + 1),
+                ("OO(1)", x_oo, self.nc + 1, self.nc + 1),
             ):
                 for occ, vir in zip(*np.where(abs(arr) > threshold)):
                     amp = arr[occ, vir]
@@ -1731,6 +1731,12 @@ class XSF_TDA_down(XTDDFT_base): # just for ROKS
                         f"{100 * amp**2:5.2f}% {label} "
                         f"{occ + occ_offset}a -> {vir + vir_offset}b {amp:10.5f}"
                     )
+            print(
+                f'CV(1):{100*((x_cv**2).sum()):6.3f}%, '
+                f'CO(1):{100*((x_co**2).sum()):6.3f}%, '
+                f'OV(1):{100*((x_ov**2).sum()):6.3f}%, '
+                f'OO(1):{100*((x_oo**2).sum()):6.3f}%'
+            )
             print("========================================")
         return self.dS2
 
