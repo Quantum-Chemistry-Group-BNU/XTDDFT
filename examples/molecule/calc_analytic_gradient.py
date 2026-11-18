@@ -33,7 +33,7 @@ def parse_xyz_string(xyz: str):
 
 
 # ===== Manually edit these parameters on the server =====
-method_kind = "usf_down"  # "usf_up", "usf_down", "usc", "xsf_up", "xsf_down", "xsc"
+method_kind = "xsf_down"  # "usf_up", "usf_down", "usc", "xsf_up", "xsf_down", "xsc"
 use_gpu = False
 
 xc = "b3lyp"

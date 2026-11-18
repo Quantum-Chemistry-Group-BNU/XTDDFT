@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import sys
+import types
 from pyscf import lib, __config__
 from pyscf.lib import logger
 from pyscf.grad import uhf as uhf_grad
@@ -780,16 +781,17 @@ class _RO2U:
         self.mol = td_grad.mol
         self.verbose = getattr(td_grad, 'verbose', logger.INFO)
         self.stdout = getattr(td_grad, 'stdout', sys.stdout)
-        self.base = self
-        self._scf = mf.copy()
+        scf_view = mf.copy()
         restricted_occ = xp.asarray(mf.mo_occ)
-        self._scf.mo_occ = xp.stack(
+        scf_view.mo_occ = xp.stack(
             (restricted_occ >= 1, restricted_occ >= 2)
         ).astype(float)
         restricted_coeff = xp.asarray(mf.mo_coeff)
-        self._scf.mo_coeff = xp.stack((restricted_coeff, restricted_coeff))
+        scf_view.mo_coeff = xp.stack((restricted_coeff, restricted_coeff))
         restricted_energy = xp.asarray(mf.mo_energy)
-        self._scf.mo_energy = xp.stack((restricted_energy, restricted_energy))
+        scf_view.mo_energy = xp.stack((restricted_energy, restricted_energy))
+        # The spin-conserving kernel reads the UKS SCF from td_grad.base._scf.
+        self.base = types.SimpleNamespace(_scf=scf_view)
 
 
 class SC_gradient(rohf_grad.Gradients):
