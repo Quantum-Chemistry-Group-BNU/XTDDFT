@@ -191,6 +191,7 @@ else:
 
 
 # 6. 保存结果。npz 文件只能可靠保存 NumPy 数组，所以这里统一用 asnumpy() 转回 CPU。
+# 轨道数据取自 xsf.mf，与本征矢使用相同的轨道顺序。
 np.savez_compressed(
     output_file,
     e_ev=np.asarray(energies_ev),
@@ -198,9 +199,9 @@ np.savez_compressed(
     vectors=asnumpy(xsf.v),
     converged=asnumpy(xsf.converged) if xsf.converged is not None else np.asarray([]),
     delta_s2=delta_s2,
-    mo_energy=asnumpy(mf.mo_energy),
-    mo_occ=asnumpy(mf.mo_occ),
-    mo_coeff=asnumpy(mf.mo_coeff),
+    mo_energy=asnumpy(xsf.mf.mo_energy),
+    mo_occ=asnumpy(xsf.mf.mo_occ),
+    mo_coeff=asnumpy(xsf.mf.mo_coeff),
     e_ref=np.asarray(mf.e_tot),
     s2_ref=np.asarray(s2_ref),
     multiplicity_ref=np.asarray(mult_ref),

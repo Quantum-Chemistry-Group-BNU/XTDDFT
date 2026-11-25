@@ -156,7 +156,7 @@ class SOCSI:
             include_mf2e=self.include_mf2e, mf2e_impl=self.mf2e_impl,
             nproc=self.nproc, use_1c=self.use_1c, backend=self.backend,
         )
-        mo = self.xp.asarray(_asnumpy(self.mf.mo_coeff))
+        mo = self.xp.asarray(_asnumpy(self.xtda.mf.mo_coeff))
         self.Vso_mo = self.xp.einsum("nij,ik,jl->nkl", self.Vso, mo, mo)
 
         tdm_blocks = None

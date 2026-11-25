@@ -164,7 +164,7 @@ else:
 # 最重要的是：
 #   e_ev/e_ha: 激发能，分别用 eV 和 Hartree 表示；
 #   vectors: XSF-TDA 本征矢，后续做 NTO、TDM 或其他分析时会用到；
-#   mo_energy/mo_occ/mo_coeff: SCF 轨道信息，方便复现实验或离线分析。
+#   mo_energy/mo_occ/mo_coeff: 取自 xsf.mf，与本征矢使用相同的轨道顺序。
 np.savez_compressed(
     output_file,
     e_ev=np.asarray(energies_ev),
@@ -172,9 +172,9 @@ np.savez_compressed(
     vectors=np.asarray(xsf.v),
     converged=np.asarray(xsf.converged) if xsf.converged is not None else np.asarray([]),
     delta_s2=delta_s2,
-    mo_energy=np.asarray(mf.mo_energy),
-    mo_occ=np.asarray(mf.mo_occ),
-    mo_coeff=np.asarray(mf.mo_coeff),
+    mo_energy=np.asarray(xsf.mf.mo_energy),
+    mo_occ=np.asarray(xsf.mf.mo_occ),
+    mo_coeff=np.asarray(xsf.mf.mo_coeff),
     e_ref=np.asarray(mf.e_tot),
     s2_ref=np.asarray(s2_ref),
     multiplicity_ref=np.asarray(mult_ref),

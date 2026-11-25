@@ -858,6 +858,16 @@ def _run_davidson(mf, davidson_backend, vind, hdiag, x0, nroots,
 class XTDDFT_base:
     def __init__(self, mf, method, davidson=True, df_cache=None):
         self.mf = backend.cast(mf)
+        occ = self.mf.mo_occ
+        if getattr(occ, "ndim", None) == 1:
+            module = get_array_module(occ)
+            if module.any(occ[:-1] < occ[1:]):
+                # Stable descending occupancy gives contiguous C, O, V blocks.
+                order = module.lexsort(-occ[None, :])
+                self.mf = self.mf.copy()
+                self.mf.mo_occ = occ[order]
+                self.mf.mo_coeff = module.asarray(self.mf.mo_coeff)[:, order]
+                self.mf.mo_energy = module.asarray(self.mf.mo_energy)[order]
         self.df_cache_config = _set_df_cache_config_on_mf(self.mf, df_cache)
         self.method = method
         self.davidson = davidson
